@@ -33,3 +33,20 @@ def test_ctrl_return_accepts(qtbot):
     dlg.show()
     qtbot.keyClick(dlg, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert dlg.result() == 1
+
+
+def test_plain_return_does_not_accept(qtbot):
+    dlg = make(qtbot)
+    dlg.show()
+    qtbot.keyClick(dlg, Qt.Key.Key_Return)
+    assert dlg.result() == 0
+    assert dlg.isVisible()
+
+
+def test_unrelated_key_does_not_accept(qtbot):
+    dlg = make(qtbot)
+    dlg.show()
+    qtbot.keyClick(dlg, Qt.Key.Key_A)
+    qtbot.keyClick(dlg, Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    assert dlg.result() == 0
+    assert dlg.isVisible()

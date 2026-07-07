@@ -41,6 +41,10 @@ class ConfirmDialog(QDialog):
         actions = QHBoxLayout()
         cancel = button("Cancel  esc", "ghost")
         confirm = button(f"{confirm_label}  ⌘↵", "primary")
+        # No default/autoDefault buttons: bare Return must never click a button
+        # on a write-confirmation dialog.
+        cancel.setAutoDefault(False)
+        confirm.setAutoDefault(False)
         cancel.clicked.connect(self.reject)
         confirm.clicked.connect(self.accept)
         actions.addWidget(cancel, 1)
@@ -50,10 +54,13 @@ class ConfirmDialog(QDialog):
         QShortcut(QKeySequence("Ctrl+Return"), self, self.accept)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.key() == Qt.Key.Key_Return and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.accept()
-        else:
-            super().keyPressEvent(event)
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.accept()
+            # Swallow bare/otherwise-modified Return: never let QDialog's
+            # default-button handling confirm or dismiss a pending write.
+            return
+        super().keyPressEvent(event)
 
     @classmethod
     def ask(cls, title: str, intro: str, fields: list[tuple[str, str]],
