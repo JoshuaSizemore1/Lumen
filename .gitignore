@@ -14,6 +14,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+uv.lock
 
 # SQLite data
 *.db
@@ -23,3 +24,4 @@ venv/
 # OS / editor
 .DS_Store
 *.swp
+.superpowers/
