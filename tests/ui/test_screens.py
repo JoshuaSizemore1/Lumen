@@ -22,3 +22,4 @@ def test_calendar_month_grid(qtbot):
     t = texts(w)
     assert "July 2026" in t and "MON" in t and "SUN" in t
     assert "Standup — Platf…" in t
+    assert "+2 more" in t
