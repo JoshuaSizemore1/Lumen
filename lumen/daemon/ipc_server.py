@@ -1,2 +1,45 @@
-# Local IPC endpoint (Unix socket or localhost HTTP, not both) that the UI talks to;
-# receives requests from tray/launcher and streams router responses back.
+"""Unix-socket IPC. One JSON object per line in, router dicts (with id) per line out.
+The UI is the only expected client; connections are persistent."""
+
+import asyncio
+import json
+import logging
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+class IPCServer:
+    def __init__(self, socket_path: Path, router):
+        self._path = Path(socket_path)
+        self._router = router
+        self._server: asyncio.Server | None = None
+
+    async def start(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._path.unlink(missing_ok=True)  # stale socket from a previous run
+        self._server = await asyncio.start_unix_server(self._handle, path=str(self._path))
+
+    async def stop(self) -> None:
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+        self._path.unlink(missing_ok=True)
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while raw := await reader.readline():
+                try:
+                    req = json.loads(raw)
+                    req_id, type_, payload = req["id"], req["type"], req.get("payload", {})
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    log.warning("skipping malformed IPC line: %r", raw[:200])
+                    continue
+                async for resp in self._router.handle(type_, payload):
+                    resp["id"] = req_id
+                    writer.write(json.dumps(resp).encode() + b"\n")
+                    await writer.drain()
+        except (ConnectionResetError, BrokenPipeError):
+            pass  # UI went away mid-stream; nothing to do
+        finally:
+            writer.close()
