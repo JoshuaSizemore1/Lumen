@@ -30,9 +30,12 @@ A local-first daily assistant running on-device LLMs (Ollama/llama.cpp) that man
 - **Fine-tuning/LoRA-ing the local model** as the personalization mechanism — deliberately rejected in favor of context-injected, editable memory (see `memory-system.md` for the full reasoning)
 - **Unbounded email history pull** — first sync is bounded and resumable, not "grab everything"
 - **Routing bulk data sync through the LLM/MCP tool-calling loop** — bulk operations (email sync) are plain background jobs; MCP is for the LLM's on-demand, per-request tool decisions only
+- **Adopting Hermes Agent (Nous Research) as the agent harness** — evaluated 2026-07-07, not adopted. It duplicates the daemon's role (agent loop, memory, tool layer) rather than extending it; it requires ≥64K context and is sized for 32B–70B models (outside this hardware's thermal envelope); and it is autonomous-by-default (unattended shell, self-created skills), inverting the no-silent-writes principle. Its memory/skills design is a useful cross-check for `memory-system.md` — steal ideas, don't adopt the harness.
+- **Fully autonomous self-improving skills** (agent writes and activates its own new capabilities unattended) — rejected for the same reasons; see the supervised alternative in `memory-system.md`.
 
 ## Discussed but not yet committed
-These came up as brainstorm ideas for the "learning/hobbies" and "home/life admin" gap, but only the book catalog was actually built out. Revisit if there's appetite later, don't assume they're planned:
+These came up as brainstorm ideas, but only the book catalog was actually built out. Revisit if there's appetite later, don't assume they're planned:
+- **PC management via MCP** (discussed 2026-07-07): a filesystem MCP server, read-only first ("find that PDF I downloaded"), and possibly a shell server later. If ever added: every mutating command goes through the standard write-confirmation dialog, and shell tasks route to the escalation model only — `mcp-integration.md`'s 14B+ tool-chain reality check applies doubly to anything that can delete files. This is the correct route to "more power over the PC" — capability comes from which MCP tools the daemon exposes, not from swapping harness or model.
 - Recurring maintenance schedule (distinct from todos)
 - Receipt/warranty tracker
 - Bill/subscription tracker
