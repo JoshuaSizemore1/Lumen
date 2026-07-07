@@ -84,11 +84,18 @@ class MainWindow(QWidget):
     def current_view(self) -> str:
         return self._names[self._stack.currentIndex()]
 
+    _DIGIT_KEYS = {
+        Qt.Key.Key_1: "launcher", Qt.Key.Key_2: "dashboard", Qt.Key.Key_3: "calendar",
+        Qt.Key.Key_4: "mail", Qt.Key.Key_5: "todos", Qt.Key.Key_6: "books",
+    }
+
+    # Assumes descendant text inputs (QLineEdit etc.) consume printable keys before
+    # they bubble here, so digit typing in future screens isn't hijacked.
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        """Map digit keys 1-6 to set_view for offscreen platform compatibility."""
-        if event.text() in "123456":
-            digit = int(event.text())
-            if digit <= len(VIEWS):
-                self.set_view(VIEWS[digit - 1])
-                return
+        """Map digit keys 1-6 to set_view, complementing the QShortcuts for
+        synthesized/offscreen key events."""
+        view = self._DIGIT_KEYS.get(event.key())
+        if view is not None:
+            self.set_view(view)
+            return
         super().keyPressEvent(event)
