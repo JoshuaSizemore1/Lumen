@@ -18,6 +18,7 @@ class Config:
     model: str = "qwen3:4b"
     idle_unload_minutes: int = 10
     ollama_url: str = "http://127.0.0.1:11434"
+    think: bool = False
     socket_path: Path = field(default_factory=default_socket_path)
 
     @property
@@ -43,6 +44,8 @@ def load_config(path: Path | None = None) -> Config:
         kwargs["idle_unload_minutes"] = llm["idle_unload_minutes"]
     if "ollama_url" in llm:
         kwargs["ollama_url"] = llm["ollama_url"]
+    if "think" in llm:
+        kwargs["think"] = llm["think"]
     if "socket_path" in ipc:
         kwargs["socket_path"] = Path(ipc["socket_path"])
     return Config(**kwargs)

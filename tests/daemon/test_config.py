@@ -11,6 +11,7 @@ def test_defaults_when_no_file(tmp_path):
     assert cfg.model == "qwen3:4b"
     assert cfg.idle_unload_minutes == 10
     assert cfg.ollama_url == "http://127.0.0.1:11434"
+    assert cfg.think is False
 
 
 def test_socket_path_uses_xdg_runtime_dir(monkeypatch, tmp_path):
@@ -27,7 +28,7 @@ def test_reads_toml(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text(
         '[llm]\nmodel = "gemma3:12b-it-qat"\nidle_unload_minutes = 5\n'
-        'ollama_url = "http://127.0.0.1:9999"\n'
+        'ollama_url = "http://127.0.0.1:9999"\nthink = true\n'
         f'[ipc]\nsocket_path = "{tmp_path}/d.sock"\n'
     )
     cfg = load_config(p)
@@ -35,6 +36,7 @@ def test_reads_toml(tmp_path):
     assert cfg.idle_unload_minutes == 5
     assert cfg.ollama_url == "http://127.0.0.1:9999"
     assert cfg.socket_path == Path(f"{tmp_path}/d.sock")
+    assert cfg.think is True
 
 
 def test_keep_alive_format():

@@ -36,6 +36,7 @@ async def test_chat_streams_chunks_and_sends_keep_alive():
     assert seen["keep_alive"] == "10m"          # the power constraint, enforced per-request
     assert seen["model"] == "qwen3:4b"
     assert seen["stream"] is True
+    assert seen["think"] is False
     await client.aclose()
 
 
@@ -50,6 +51,7 @@ async def test_unload_sends_zero_keep_alive_and_empty_messages():
     await client.unload()
     assert seen["keep_alive"] == 0
     assert seen["messages"] == []
+    assert "think" not in seen
     await client.aclose()
 
 

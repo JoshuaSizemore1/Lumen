@@ -14,7 +14,7 @@ log = logging.getLogger("lumen.daemon")
 
 async def run() -> None:
     cfg = load_config()
-    llm = OllamaClient(cfg.ollama_url, cfg.model, cfg.keep_alive)
+    llm = OllamaClient(cfg.ollama_url, cfg.model, cfg.keep_alive, think=cfg.think)
     server = IPCServer(cfg.socket_path, Router(llm))
     await server.start()
     log.info("listening on %s (model=%s, keep_alive=%s)", cfg.socket_path, cfg.model, cfg.keep_alive)

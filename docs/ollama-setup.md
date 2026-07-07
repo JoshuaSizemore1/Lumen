@@ -63,6 +63,12 @@ Model slots (decided 2026-07-07, see `.claude/skills/llm-serving.md`):
 | Tool-chain escalation | Qwen3 14B-class | Phase 3 — do NOT pull yet |
 | Writing escalation candidate | `gemma3:12b-it-qat` | Phase 7 benchmark — do NOT pull yet |
 
+> **Thinking mode:** qwen3 models "think" by default — thousands of hidden
+> reasoning tokens per query, which at CPU speeds means minutes of latency and
+> heat before the first visible word (measured: 8m16s for a two-word answer).
+> The Lumen daemon disables it per-request (`think = false` in `config.toml`).
+> When testing interactively, do the same: `ollama run qwen3:4b --think=false "..."`.
+
 ## 4. Start / stop / call — the control surface
 
 | Action | How |

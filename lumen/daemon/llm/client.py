@@ -17,11 +17,13 @@ class OllamaClient:
         base_url: str,
         model: str,
         keep_alive: str,
+        think: bool = False,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.base_url = base_url
         self.model = model
         self.keep_alive = keep_alive
+        self.think = think
         # No read timeout: generation on CPU can legitimately be slow.
         self._http = httpx.AsyncClient(
             base_url=base_url,
@@ -35,6 +37,7 @@ class OllamaClient:
             "messages": messages,
             "stream": True,
             "keep_alive": self.keep_alive,
+            "think": self.think,
         }
         try:
             async with self._http.stream("POST", "/api/chat", json=body) as resp:
