@@ -1,7 +1,7 @@
 """Todos: direct-manipulation skeleton. CRUD + SQLite land in Phase 2."""
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from lumen.ui import theme
 from lumen.ui.widgets import Panel, button, chip, label
@@ -32,7 +32,7 @@ class TodoScreen(QWidget):
 
         head = QHBoxLayout()
         head.addWidget(label("Todos", "h2"))
-        head.addWidget(label("5 open · edit directly, no assistant needed", "sub"))
+        head.addWidget(label("6 open · edit directly, no assistant needed", "sub"))
         head.addStretch()
         root.addLayout(head)
 
@@ -53,12 +53,13 @@ class TodoScreen(QWidget):
             root.addWidget(g)
             for text, due, tag, done in items:
                 row = QHBoxLayout()
-                box = label("✓" if done else "", "chip")
+                box = QLabel("✓" if done else "")
                 box.setFixedSize(15, 15)
+                box.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 box.setStyleSheet(
                     f"background: {theme.ACCENT if done else 'transparent'};"
-                    f"border: 1px solid {theme.ACCENT if done else theme.TEXT_FAINT};"
-                    f"color: {theme.BG_WINDOW};")
+                    f"border: 1px solid {theme.ACCENT if done else theme.TEXT_FAINT}; border-radius: 3px;"
+                    f"color: {theme.BG_WINDOW}; font-size: 10px;")
                 row.addWidget(box)
                 row.addWidget(label(text, "dim" if done else "secondary"), 1)
                 if due:

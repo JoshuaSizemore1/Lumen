@@ -51,3 +51,4 @@ def test_todos_groups(qtbot):
     t = texts(w)
     assert "TODAY" in t and "UPCOMING" in t and "NO DATE" in t
     assert "Renew lumen.sh domain" in t
+    assert "6 open" in t
