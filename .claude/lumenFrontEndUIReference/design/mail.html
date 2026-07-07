@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — Mail (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ---- Static visual reference for PyQt6. Not production code. See tokens.md. ---- */
+  *{box-sizing:border-box}
+  :root{--ac:#7aa2f7;--ac-soft:#7aa2f71f}
+  body{margin:0;background:#1a1b26;color:#c0caf5;font-family:'JetBrains Mono',ui-monospace,monospace}
+  .sans{font-family:'IBM Plex Sans',system-ui,sans-serif}
+  /* two-pane split: message list | reading pane */
+  .split{height:722px;display:grid;grid-template-columns:334px 1fr}
+  .list{border-right:1px solid #20222e;overflow:auto}
+  .list-head{display:flex;align-items:baseline;gap:9px;padding:16px 16px 12px;border-bottom:1px solid #20222e;position:sticky;top:0;background:#1a1b26;z-index:2}
+  .list-head h2{margin:0;font-size:15px;font-weight:600;color:#c0caf5}
+  .list-head .n{font-size:11px;color:#565f89}
+  /* list row — selected = left accent border + soft fill */
+  .mrow{display:flex;gap:10px;padding:10px 12px;cursor:pointer;border-bottom:1px solid #1a1c26;border-left:2px solid transparent}
+  .mrow.sel{background:var(--ac-soft);border-left:2px solid var(--ac)}
+  .mrow .dot{width:7px;height:7px;border-radius:50%;flex:none;margin-top:5px}
+  .mrow.unread .dot{background:var(--ac)}
+  .mrow.read .dot{background:transparent;border:1px solid #3b4261}
+  .mrow .body{flex:1;min-width:0}
+  .mrow .top{display:flex;align-items:baseline;gap:8px}
+  .mrow .from{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mrow.unread .from{color:#c0caf5;font-weight:600}
+  .mrow.read .from{color:#8a90b3;font-weight:400}
+  .mrow .time{margin-left:auto;font-size:10px;color:#565f89;flex:none}
+  .mrow .subj{font-size:12.5px;color:#a9b1d6;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mrow .prev{font-size:11px;color:#565f89;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* reading pane */
+  .pane{overflow:auto}
+  .pane-in{padding:20px 26px}
+  .subject{font-size:18px;color:#c0caf5;font-weight:600;margin-bottom:10px;line-height:1.3}
+  .meta{display:flex;align-items:center;gap:11px;padding-bottom:14px;border-bottom:1px solid #20222e}
+  .avatar{width:34px;height:34px;border-radius:50%;background:var(--ac-soft);border:1px solid var(--ac);color:var(--ac);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;flex:none}
+  .meta .who{flex:1}
+  .meta .name{font-size:13px;color:#c0caf5;font-weight:500}
+  .meta .addr{font-size:11px;color:#565f89}
+  .btn-reply{flex:none;white-space:nowrap;background:var(--ac);border:1px solid var(--ac);color:#0d0e14;font-size:11.5px;font-weight:600;padding:6px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
+  .btn-archive{flex:none;white-space:nowrap;background:transparent;border:1px solid #2a2f45;color:#a9b1d6;font-size:11.5px;padding:6px 12px;border-radius:6px;cursor:pointer;font-family:inherit}
+  .mbody{font-size:13.5px;line-height:1.65;color:#c0caf5;white-space:pre-line;padding:16px 0}
+</style>
+</head>
+<body>
+  <!-- Mail = two-pane inbox: list (left) + reading pane (right).
+       Selecting a message marks it read (updates the tab's unread badge).
+       Reply opens the confirmation dialog (external write). Archive is a placeholder. -->
+  <div class="split">
+    <!-- message list -->
+    <div class="list">
+      <div class="list-head"><h2>Inbox</h2><span class="n">4 unread</span></div>
+      <div class="mrow unread"><span class="dot"></span><div class="body"><div class="top"><span class="from">GitHub</span><span class="time">08:12</span></div><div class="subj">PR #142: swap to local model runtime</div><div class="prev sans">All checks passed. 2 approvals — ready to merge.</div></div></div>
+      <div class="mrow sel unread"><span class="dot"></span><div class="body"><div class="top"><span class="from">Priya Nair</span><span class="time">07:40</span></div><div class="subj">Re: sync interval defaults</div><div class="prev sans">Agreed on 15 min — can we expose it in the config?</div></div></div>
+      <div class="mrow unread"><span class="dot"></span><div class="body"><div class="top"><span class="from">Dr. Okafor’s office</span><span class="time">Tue</span></div><div class="subj">Appointment reminder — Jul 9</div><div class="prev sans">Reminder: dental cleaning, Wed Jul 9 at 10:00.</div></div></div>
+      <div class="mrow unread"><span class="dot"></span><div class="body"><div class="top"><span class="from">Sarah Chen</span><span class="time">Mon</span></div><div class="subj">Book club: next pick?</div><div class="prev sans">You’ve been on a Le Guin run — want to lead?</div></div></div>
+      <div class="mrow read"><span class="dot"></span><div class="body"><div class="top"><span class="from">Linux Weekly</span><span class="time">Wed</span></div><div class="subj">Wayland color management lands</div><div class="prev sans">The long-awaited color-management protocol merged.</div></div></div>
+      <div class="mrow read"><span class="dot"></span><div class="body"><div class="top"><span class="from">Calendar</span><span class="time">Wed</span></div><div class="subj">Invitation: Design review: Lumen</div><div class="prev sans">Today 15:30 – 16:15 · you accepted.</div></div></div>
+      <div class="mrow read"><span class="dot"></span><div class="body"><div class="top"><span class="from">lumen digest</span><span class="time">Mon</span></div><div class="subj">Your week: 3 books, 12 todos closed</div><div class="prev sans">A quiet, productive week. Here’s the recap.</div></div></div>
+    </div>
+
+    <!-- reading pane (selected message) -->
+    <div class="pane">
+      <div class="pane-in">
+        <div class="subject">Re: sync interval defaults</div>
+        <div class="meta">
+          <span class="avatar">P</span>
+          <div class="who"><div class="name">Priya Nair</div><div class="addr">to me · Thu · 07:40</div></div>
+          <button class="btn-reply">&#8627; Reply</button>
+          <button class="btn-archive">Archive</button>
+        </div>
+        <div class="mbody sans">Thanks for writing this up.
+
+15 minutes as the default feels right — long enough to stay quiet, short enough that the tray never goes stale. Can we expose it under [sync] so power users can drop it to 5?
+
+— Priya</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

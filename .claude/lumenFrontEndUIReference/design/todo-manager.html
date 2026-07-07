@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — Todo manager (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ---- Static visual reference for PyQt6. Not production code. See tokens.md. ---- */
+  *{box-sizing:border-box}
+  :root{--ac:#7aa2f7;--ac-soft:#7aa2f71f}
+  body{margin:0;background:#1a1b26;color:#c0caf5;font-family:'JetBrains Mono',ui-monospace,monospace}
+  .view{padding:22px 26px 40px;max-width:820px;margin:0 auto}
+  .head{display:flex;align-items:baseline;gap:10px;margin-bottom:16px}
+  .head h2{margin:0;font-size:16px;font-weight:600;color:#c0caf5}
+  .head .sub{font-size:11.5px;color:#565f89}
+  /* add row */
+  .add{display:flex;align-items:center;gap:10px;padding:11px 13px;background:#171821;border:1px solid #2a2f45;border-radius:8px;margin-bottom:20px}
+  .add .plus{color:var(--ac);font-size:15px}
+  .add input{flex:1;background:transparent;border:none;color:#c0caf5;font-size:13.5px;font-family:inherit}
+  .add input:focus{outline:none}
+  .add button{background:var(--ac-soft);border:1px solid var(--ac);color:#c0caf5;font-size:11px;padding:5px 12px;border-radius:5px;cursor:pointer;font-family:inherit}
+  /* group headers — color signals urgency */
+  .group{letter-spacing:.6px;font-size:11px;margin:20px 0 6px}
+  .group.today{color:var(--ac)}
+  .group.upcoming{color:#e0af68}
+  .group.nodate{color:#565f89}
+  .group:first-of-type{margin-top:0}
+  /* item row */
+  .item{display:flex;align-items:flex-start;gap:11px;padding:8px;border-radius:6px;border-bottom:1px solid #1a1c26}
+  .box{width:15px;height:15px;flex:none;border-radius:3px;border:1px solid #3b4261;background:transparent;display:flex;align-items:center;justify-content:center;font-size:10px;margin-top:1px;cursor:pointer}
+  .box.done{background:var(--ac);border-color:var(--ac);color:#1a1b26}
+  .item .txt{flex:1;font-size:13.5px;line-height:1.4;color:#c0caf5}
+  .item .txt.done{text-decoration:line-through;color:#565f89}
+  .due{font-size:10.5px;color:#e0af68;border:1px solid #3a3324;border-radius:3px;padding:1px 6px;flex:none}
+  .tag{font-size:10px;border:1px solid #2a2f45;border-radius:3px;padding:1px 5px;flex:none}
+  .tag.work{color:#7aa2f7}.tag.personal{color:#bb9af7}.tag.home{color:#9ece6a}.tag.admin{color:#e0af68}.tag.tinker{color:#7dcfff}
+  .del{color:#3b4261;cursor:pointer;font-size:13px;padding:0 2px}
+</style>
+</head>
+<body>
+  <!-- Todo manager = direct-manipulation list, NO LLM round-trip.
+       Add via input (⏎), toggle via checkbox, delete via ✕. Grouped by due date.
+       No confirmation dialog — local edits are immediate. -->
+  <div class="view">
+    <div class="head">
+      <h2>Todos</h2>
+      <span class="sub">5 open · edit directly, no assistant needed</span>
+    </div>
+
+    <div class="add">
+      <span class="plus">+</span>
+      <input value="" placeholder="Add a todo… (⏎ to save)">
+      <button>Add</button>
+    </div>
+
+    <div class="group today">TODAY</div>
+    <div class="item"><span class="box"></span><span class="txt">Call the dentist</span><span class="tag personal">personal</span><span class="del">&#10005;</span></div>
+    <div class="item"><span class="box"></span><span class="txt">Reply to Priya re: sync defaults</span><span class="tag work">work</span><span class="del">&#10005;</span></div>
+    <div class="item"><span class="box done">&#10003;</span><span class="txt done">Water the plants</span><span class="tag home">home</span><span class="del">&#10005;</span></div>
+
+    <div class="group upcoming">UPCOMING</div>
+    <div class="item"><span class="box"></span><span class="txt">Draft Lumen README</span><span class="due">Sat</span><span class="tag work">work</span><span class="del">&#10005;</span></div>
+    <div class="item"><span class="box"></span><span class="txt">Renew lumen.sh domain</span><span class="due">Jul 9</span><span class="tag admin">admin</span><span class="del">&#10005;</span></div>
+
+    <div class="group nodate">NO DATE</div>
+    <div class="item"><span class="box"></span><span class="txt">Read “Systemantics”</span><span class="tag personal">personal</span><span class="del">&#10005;</span></div>
+    <div class="item"><span class="box"></span><span class="txt">Try river WM on the laptop</span><span class="tag tinker">tinker</span><span class="del">&#10005;</span></div>
+  </div>
+</body>
+</html>

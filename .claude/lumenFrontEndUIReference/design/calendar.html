@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — Calendar (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ---- Static visual reference for PyQt6. Not production code. See tokens.md. ----
+     Calendar has three views: Month | Week | Day, chosen by a segmented switch.
+     All three are shown stacked here so each layout is visible at once. In the app
+     only one shows at a time. Prev/Today/Next nav shifts by month/week/day per view.
+     Event category colors (fixed, independent of the themeable accent):
+       work #7aa2f7 · personal #bb9af7 · health #9ece6a · social #e0af68
+     "+ Event" opens the confirmation dialog (creating an event is an external write). */
+  *{box-sizing:border-box}
+  :root{--ac:#7aa2f7;--ac-soft:#7aa2f71f;--ac-mid:#7aa2f733;
+        --work:#7aa2f7;--personal:#bb9af7;--health:#9ece6a;--social:#e0af68}
+  body{margin:0;background:#1a1b26;color:#c0caf5;font-family:'JetBrains Mono',ui-monospace,monospace}
+
+  /* toolbar (shared across views) */
+  .toolbar{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid #20222e}
+  .nav{display:flex;align-items:center;gap:4px}
+  .nav button{height:28px;background:transparent;border:1px solid #2a2f45;border-radius:6px;color:#a9b1d6;cursor:pointer;font-family:inherit;font-size:11.5px}
+  .nav .arrow{width:28px;font-size:13px}
+  .nav .today{padding:0 12px}
+  .toolbar h2{margin:0;font-size:16px;font-weight:600;color:#c0caf5}
+  .right{margin-left:auto;display:flex;align-items:center;gap:14px}
+  .legend{display:flex;align-items:center;gap:11px}
+  .legend span{display:flex;align-items:center;gap:5px;font-size:10.5px;color:#787c99}
+  .legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .seg{display:flex;gap:4px}
+  .seg button{padding:4px 10px;font-size:11px;border:1px solid #2a2f45;border-radius:5px;background:transparent;color:#565f89;cursor:pointer;font-family:inherit}
+  .seg button.on{color:#c0caf5;background:var(--ac-soft);border-color:var(--ac)}
+  .addev{height:28px;padding:0 14px;white-space:nowrap;background:var(--ac);border:1px solid var(--ac);border-radius:6px;color:#0d0e14;font-weight:600;cursor:pointer;font-family:inherit;font-size:11.5px}
+  .view-label{padding:8px 22px 0;font-size:10px;letter-spacing:1px;color:#3b4261}
+
+  /* ---------- MONTH ---------- */
+  .wd-row,.mgrid{display:grid;grid-template-columns:repeat(7,1fr)}
+  .wd-row{border-bottom:1px solid #20222e}
+  .wd-row div{text-align:center;padding:7px 0;font-size:10px;letter-spacing:.8px;color:#565f89}
+  .cell{min-height:104px;display:flex;flex-direction:column;gap:1px;border:1px solid #1a1c26;padding:5px 6px 4px;overflow:hidden}
+  .cell.out{background:#141520}
+  .cell.today{background:var(--ac-soft)}
+  .num{align-self:flex-start;min-width:19px;height:19px;font-size:11px;display:flex;align-items:center;justify-content:center;margin-bottom:2px;color:#c0caf5}
+  .cell.out .num{color:#3b4261}
+  .num.ring{background:var(--ac);color:#0d0e14;border-radius:50%;font-weight:700}
+  .chip{font-size:10px;line-height:1.35;border-radius:3px;padding:1px 5px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .chip.work{color:#c7cdf0;background:var(--work) 1f;background:rgba(122,162,247,.12);border-left:2px solid var(--work)}
+  .chip.personal{color:#c7cdf0;background:rgba(187,154,247,.12);border-left:2px solid var(--personal)}
+  .chip.health{color:#c7cdf0;background:rgba(158,206,106,.12);border-left:2px solid var(--health)}
+  .chip.social{color:#c7cdf0;background:rgba(224,175,104,.12);border-left:2px solid var(--social)}
+  .more{font-size:9.5px;color:#565f89;padding-left:2px}
+
+  /* ---------- WEEK / DAY grids ---------- */
+  .grid-head{display:flex;border-bottom:1px solid #20222e}
+  .grid-head .gutter{width:46px;flex:none}
+  .grid-head .dcol{flex:1;text-align:center;padding:7px 0;border-left:1px solid #1a1c26}
+  .grid-head .dcol.today{background:var(--ac-soft)}
+  .grid-head .dow{font-size:9.5px;letter-spacing:.5px;color:#565f89}
+  .grid-head .dcol.today .dow{color:var(--ac)}
+  .grid-head .dnum{font-size:15px;font-weight:600;color:#c0caf5}
+  .grid-head .dcol.today .dnum{color:var(--ac)}
+  /* hour grid; 46px per hour via repeating gradient */
+  .canvas{display:flex;position:relative;
+          background-image:repeating-linear-gradient(to bottom,transparent 0,transparent 45px,#1a1c26 45px,#1a1c26 46px)}
+  .gutter{width:46px;flex:none;position:relative}
+  .gutter .hr{position:absolute;right:8px;transform:translateY(-6px);font-size:9.5px;color:#3b4261}
+  .col{flex:1;position:relative;border-left:1px solid #1a1c26}
+  .block{position:absolute;left:3px;right:3px;box-sizing:border-box;border-radius:4px;padding:4px 8px;overflow:hidden}
+  .block .bt{font-size:11px;color:#dfe4f5;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .block .bm{font-size:9.5px}
+  .block.work{background:rgba(122,162,247,.15);border-left:2px solid var(--work)}   .block.work .bm{color:var(--work)}
+  .block.personal{background:rgba(187,154,247,.15);border-left:2px solid var(--personal)} .block.personal .bm{color:var(--personal)}
+  .block.health{background:rgba(158,206,106,.15);border-left:2px solid var(--health)}     .block.health .bm{color:var(--health)}
+  .block.social{background:rgba(224,175,104,.15);border-left:2px solid var(--social)}      .block.social .bm{color:var(--social)}
+
+  /* ---------- DAY (grid + agenda rail) ---------- */
+  .day-wrap{display:flex}
+  .day-wrap .canvas{flex:1}
+  .agenda{width:280px;flex:none;border-left:1px solid #20222e;padding:16px}
+  .agenda .h{font-size:10.5px;color:var(--ac);letter-spacing:.8px;margin-bottom:10px}
+  .arow{display:flex;align-items:flex-start;gap:9px;padding:8px 0;border-bottom:1px solid #1a1c26}
+  .arow i{width:7px;height:7px;border-radius:50%;flex:none;margin-top:5px}
+  .arow .at{font-size:12.5px;color:#c0caf5;line-height:1.35}
+  .arow .am{font-size:10.5px;color:#565f89;margin-top:2px}
+
+  .divider{height:10px;background:#0d0e14;border-top:1px solid #20222e;border-bottom:1px solid #20222e}
+</style>
+</head>
+<body>
+
+  <!-- =================== MONTH VIEW =================== -->
+  <div class="toolbar">
+    <div class="nav"><button class="arrow">‹</button><button class="today">Today</button><button class="arrow">›</button></div>
+    <h2>July 2026</h2>
+    <div class="right">
+      <div class="legend"><span><i style="background:var(--work)"></i>work</span><span><i style="background:var(--personal)"></i>personal</span><span><i style="background:var(--health)"></i>health</span><span><i style="background:var(--social)"></i>social</span></div>
+      <div class="seg"><button class="on">Month</button><button>Week</button><button>Day</button></div>
+      <button class="addev">+ Event</button>
+    </div>
+  </div>
+  <div class="view-label">MONTH — 7×6 grid · today ringed · up to 3 chips per cell + "+N more" · click a day → Day view</div>
+  <div class="wd-row"><div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div><div>SUN</div></div>
+  <div class="mgrid">
+    <div class="cell out"><span class="num">29</span></div>
+    <div class="cell out"><span class="num">30</span></div>
+    <div class="cell"><span class="num">1</span></div>
+    <div class="cell"><span class="num">2</span></div>
+    <div class="cell"><span class="num">3</span></div>
+    <div class="cell"><span class="num">4</span></div>
+    <div class="cell"><span class="num">5</span><span class="chip health">Long run</span><span class="chip social">Sunday roast @ …</span></div>
+
+    <div class="cell today"><span class="num ring">6</span><span class="chip work">Standup — Platf…</span><span class="chip work">1:1 with Priya</span><span class="chip personal">Lunch</span><span class="more">+2 more</span></div>
+    <div class="cell"><span class="num">7</span><span class="chip work">Standup — Platf…</span><span class="chip work">Sprint planning</span><span class="chip social">Book club: The …</span></div>
+    <div class="cell"><span class="num">8</span><span class="chip work">Standup — Platf…</span><span class="chip work">Deep work — syn…</span><span class="chip social">Lunch w/ Sam</span></div>
+    <div class="cell"><span class="num">9</span><span class="chip work">Standup — Platf…</span><span class="chip health">Dental cleaning</span><span class="chip work">Release review</span></div>
+    <div class="cell"><span class="num">10</span><span class="chip work">Standup — Platf…</span><span class="chip work">Sprint retro</span><span class="chip health">Gym</span></div>
+    <div class="cell"><span class="num">11</span><span class="chip social">Hiking — Ridge …</span></div>
+    <div class="cell"><span class="num">12</span></div>
+
+    <div class="cell"><span class="num">13</span></div>
+    <div class="cell"><span class="num">14</span><span class="chip work">Quarterly plann…</span></div>
+    <div class="cell"><span class="num">15</span></div>
+    <div class="cell"><span class="num">16</span></div>
+    <div class="cell"><span class="num">17</span></div>
+    <div class="cell"><span class="num">18</span></div>
+    <div class="cell"><span class="num">19</span></div>
+
+    <div class="cell"><span class="num">20</span><span class="chip personal">PTO</span></div>
+    <div class="cell"><span class="num">21</span></div>
+    <div class="cell"><span class="num">22</span></div>
+    <div class="cell"><span class="num">23</span></div>
+    <div class="cell"><span class="num">24</span><span class="chip work">Conf talk: loca…</span></div>
+    <div class="cell"><span class="num">25</span></div>
+    <div class="cell"><span class="num">26</span></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- =================== WEEK VIEW =================== -->
+  <div class="view-label">WEEK — Mon–Sun columns over an hour grid (07:00–21:00, 46px/hr) · blocks positioned by start &amp; duration · today's column tinted</div>
+  <div class="grid-head">
+    <div class="gutter"></div>
+    <div class="dcol today"><div class="dow">MON</div><div class="dnum">6</div></div>
+    <div class="dcol"><div class="dow">TUE</div><div class="dnum">7</div></div>
+    <div class="dcol"><div class="dow">WED</div><div class="dnum">8</div></div>
+    <div class="dcol"><div class="dow">THU</div><div class="dnum">9</div></div>
+    <div class="dcol"><div class="dow">FRI</div><div class="dnum">10</div></div>
+    <div class="dcol"><div class="dow">SAT</div><div class="dnum">11</div></div>
+    <div class="dcol"><div class="dow">SUN</div><div class="dnum">12</div></div>
+  </div>
+  <!-- geometry: top = (startMin − 420)/60 × 46px ; height = durMin/60 × 46 − 2 -->
+  <div class="canvas" style="height:644px">
+    <div class="gutter">
+      <span class="hr" style="top:0">07:00</span><span class="hr" style="top:46px">08:00</span><span class="hr" style="top:92px">09:00</span>
+      <span class="hr" style="top:138px">10:00</span><span class="hr" style="top:184px">11:00</span><span class="hr" style="top:230px">12:00</span>
+      <span class="hr" style="top:276px">13:00</span><span class="hr" style="top:322px">14:00</span><span class="hr" style="top:368px">15:00</span>
+      <span class="hr" style="top:414px">16:00</span><span class="hr" style="top:460px">17:00</span><span class="hr" style="top:506px">18:00</span>
+      <span class="hr" style="top:552px">19:00</span><span class="hr" style="top:598px">20:00</span><span class="hr" style="top:644px">21:00</span>
+    </div>
+    <!-- MON 6 -->
+    <div class="col">
+      <div class="block work" style="top:115px;height:21px"><div class="bt">Standup — Platform</div><div class="bm">09:30</div></div>
+      <div class="block work" style="top:184px;height:21px"><div class="bt">1:1 with Priya</div><div class="bm">11:00</div></div>
+      <div class="block personal" style="top:276px;height:44px"><div class="bt">Lunch</div><div class="bm">13:00</div></div>
+      <div class="block work" style="top:391px;height:33px"><div class="bt">Design review: Lumen</div><div class="bm">15:30</div></div>
+      <div class="block health" style="top:506px;height:44px"><div class="bt">Gym</div><div class="bm">18:00</div></div>
+    </div>
+    <!-- TUE 7 -->
+    <div class="col">
+      <div class="block work" style="top:115px;height:21px"><div class="bt">Standup — Platform</div><div class="bm">09:30</div></div>
+      <div class="block work" style="top:276px;height:67px"><div class="bt">Sprint planning</div><div class="bm">13:00</div></div>
+      <div class="block social" style="top:552px;height:67px"><div class="bt">Book club: The Dispossessed</div><div class="bm">19:00</div></div>
+    </div>
+    <!-- WED 8 -->
+    <div class="col">
+      <div class="block work" style="top:115px;height:21px"><div class="bt">Standup — Platform</div><div class="bm">09:30</div></div>
+      <div class="block work" style="top:161px;height:90px"><div class="bt">Deep work — sync engine</div><div class="bm">10:30</div></div>
+      <div class="block social" style="top:253px;height:44px"><div class="bt">Lunch w/ Sam</div><div class="bm">12:30</div></div>
+    </div>
+    <!-- THU 9 -->
+    <div class="col">
+      <div class="block work" style="top:115px;height:21px"><div class="bt">Standup — Platform</div><div class="bm">09:30</div></div>
+      <div class="block health" style="top:138px;height:44px"><div class="bt">Dental cleaning</div><div class="bm">10:00</div></div>
+      <div class="block work" style="top:414px;height:44px"><div class="bt">Release review</div><div class="bm">16:00</div></div>
+    </div>
+    <!-- FRI 10 -->
+    <div class="col">
+      <div class="block work" style="top:115px;height:21px"><div class="bt">Standup — Platform</div><div class="bm">09:30</div></div>
+      <div class="block work" style="top:322px;height:44px"><div class="bt">Sprint retro</div><div class="bm">14:00</div></div>
+      <div class="block health" style="top:506px;height:44px"><div class="bt">Gym</div><div class="bm">18:00</div></div>
+    </div>
+    <!-- SAT 11 -->
+    <div class="col">
+      <div class="block social" style="top:92px;height:182px"><div class="bt">Hiking — Ridge trail</div><div class="bm">09:00</div></div>
+    </div>
+    <!-- SUN 12 -->
+    <div class="col"></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- =================== DAY VIEW =================== -->
+  <div class="view-label">DAY — single hour-grid column + agenda rail (280px) listing that day's events</div>
+  <div class="day-wrap">
+    <div class="canvas" style="height:644px">
+      <div class="gutter">
+        <span class="hr" style="top:0">07:00</span><span class="hr" style="top:46px">08:00</span><span class="hr" style="top:92px">09:00</span>
+        <span class="hr" style="top:138px">10:00</span><span class="hr" style="top:184px">11:00</span><span class="hr" style="top:230px">12:00</span>
+        <span class="hr" style="top:276px">13:00</span><span class="hr" style="top:322px">14:00</span><span class="hr" style="top:368px">15:00</span>
+        <span class="hr" style="top:414px">16:00</span><span class="hr" style="top:460px">17:00</span><span class="hr" style="top:506px">18:00</span>
+        <span class="hr" style="top:552px">19:00</span><span class="hr" style="top:598px">20:00</span><span class="hr" style="top:644px">21:00</span>
+      </div>
+      <div class="col">
+        <div class="block work" style="top:115px;height:21px"><div class="bt">Standup — Platform</div><div class="bm">09:30 · work</div></div>
+        <div class="block work" style="top:184px;height:21px"><div class="bt">1:1 with Priya</div><div class="bm">11:00 · work</div></div>
+        <div class="block personal" style="top:276px;height:44px"><div class="bt">Lunch</div><div class="bm">13:00 · personal</div></div>
+        <div class="block work" style="top:391px;height:33px"><div class="bt">Design review: Lumen</div><div class="bm">15:30 · work</div></div>
+        <div class="block health" style="top:506px;height:44px"><div class="bt">Gym</div><div class="bm">18:00 · health</div></div>
+      </div>
+    </div>
+    <div class="agenda">
+      <div class="h">AGENDA</div>
+      <div class="arow"><i style="background:var(--work)"></i><div><div class="at">Standup — Platform</div><div class="am">09:30 · work</div></div></div>
+      <div class="arow"><i style="background:var(--work)"></i><div><div class="at">1:1 with Priya</div><div class="am">11:00 · work</div></div></div>
+      <div class="arow"><i style="background:var(--personal)"></i><div><div class="at">Lunch</div><div class="am">13:00 · personal</div></div></div>
+      <div class="arow"><i style="background:var(--work)"></i><div><div class="at">Design review: Lumen</div><div class="am">15:30 · work</div></div></div>
+      <div class="arow"><i style="background:var(--health)"></i><div><div class="at">Gym</div><div class="am">18:00 · health</div></div></div>
+    </div>
+  </div>
+
+</body>
+</html>

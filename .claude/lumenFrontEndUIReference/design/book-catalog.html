@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lumen — Book catalog (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ---- Static visual reference for PyQt6. Not production code. See tokens.md. ---- */
+  *{box-sizing:border-box}
+  :root{--ac:#7aa2f7;--ac-soft:#7aa2f71f}
+  body{margin:0;background:#1a1b26;color:#c0caf5;font-family:'JetBrains Mono',ui-monospace,monospace}
+  .sans{font-family:'IBM Plex Sans',system-ui,sans-serif}
+  .view{padding:22px 26px 40px}
+  .split{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+  /* reading log (left, grows) */
+  .log{flex:1;min-width:420px}
+  .head{display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
+  .head h2{margin:0;font-size:16px;font-weight:600;color:#c0caf5}
+  .head .sub{font-size:11.5px;color:#565f89}
+  .addform{background:#171821;border:1px solid #2a2f45;border-radius:8px;padding:12px;margin-bottom:18px}
+  .addform .eye{font-size:10px;color:#3b4261;letter-spacing:1px;margin-bottom:9px}
+  .addform .line{display:flex;gap:8px;margin-bottom:8px}
+  .addform input{background:#0f1017;border:1px solid #2a2f45;border-radius:5px;color:#c0caf5;font-size:12.5px;padding:7px 9px;font-family:inherit}
+  .addform input:focus{outline:none}
+  .addform select{background:#0f1017;border:1px solid #2a2f45;border-radius:5px;color:#e0af68;font-size:12.5px;padding:7px 6px;font-family:inherit}
+  .addform button{background:var(--ac-soft);border:1px solid var(--ac);color:#c0caf5;font-size:11.5px;padding:6px 14px;border-radius:5px;cursor:pointer;font-family:inherit}
+  .book{padding:12px 2px;border-bottom:1px solid #1e202c}
+  .book .row1{display:flex;align-items:baseline;gap:10px}
+  .book .title{font-size:14px;color:#c0caf5;font-weight:500}
+  .book .author{font-size:11.5px;color:#787c99}
+  .book .stars{margin-left:auto;color:#e0af68;font-size:12px;letter-spacing:1px}
+  .book .fin{font-size:10.5px;color:#565f89;margin-top:3px}
+  .book .notes{font-size:12.5px;color:#8a90b3;margin-top:5px;line-height:1.45}
+  /* recommendations (right, fixed) — VISUALLY DISTINCT: dashed purple frame + tint */
+  .recs{width:360px;flex:none}
+  .recs .head h2{color:#bb9af7}
+  .recbox{background:linear-gradient(180deg,#1a1626,#16141f);border:1px dashed #3b3155;border-radius:9px;padding:6px 14px 12px}
+  .recbox .eye{font-size:10px;color:#6b5d8f;letter-spacing:1px;padding:9px 0 4px}
+  .rec{padding:11px 0;border-bottom:1px solid #241d33}
+  .rec .row1{display:flex;align-items:baseline;gap:8px}
+  .rec .title{font-size:13.5px;color:#c9b8f0;font-weight:500}
+  .rec .author{font-size:11px;color:#6b5d8f}
+  .rec .why{font-size:12px;color:#8f83ac;margin-top:4px;line-height:1.45}
+  .rec button{margin-top:7px;background:transparent;border:1px solid #3b3155;color:#bb9af7;font-size:10.5px;padding:3px 9px;border-radius:4px;cursor:pointer;font-family:inherit}
+  .recbox .foot{font-size:10px;color:#4a4066;padding-top:9px}
+</style>
+</head>
+<body>
+  <!-- Book catalog: (left) reading log + add form; (right) LLM recommendations.
+       The two are kept visually separate — recs use a dashed purple frame + tint
+       so "read" and "suggested next" never blur. Each rec cites specific logged books. -->
+  <div class="view">
+    <div class="split">
+
+      <!-- reading log -->
+      <div class="log">
+        <div class="head"><h2>Reading log</h2><span class="sub">4 books · your catalog</span></div>
+
+        <div class="addform">
+          <div class="eye">+ ADD ENTRY</div>
+          <div class="line">
+            <input style="flex:2" placeholder="Title">
+            <input style="flex:1" placeholder="Author">
+            <select><option>&#9733;5</option><option>&#9733;4</option><option>&#9733;3</option><option>&#9733;2</option><option>&#9733;1</option></select>
+          </div>
+          <div class="line" style="margin-bottom:0">
+            <input style="flex:1" placeholder="Notes (free text)">
+            <button>Log</button>
+          </div>
+        </div>
+
+        <div class="book">
+          <div class="row1"><span class="title">The Left Hand of Darkness</span><span class="author">Ursula K. Le Guin</span><span class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</span></div>
+          <div class="fin">finished Jun 28</div>
+          <div class="notes sans">Slow burn, worth it. Gethen worldbuilding stuck with me.</div>
+        </div>
+        <div class="book">
+          <div class="row1"><span class="title">Project Hail Mary</span><span class="author">Andy Weir</span><span class="stars">&#9733;&#9733;&#9733;&#9733;&#9734;</span></div>
+          <div class="fin">finished Jun 10</div>
+          <div class="notes sans">Propulsive. Rocky carries it more than the science.</div>
+        </div>
+        <div class="book">
+          <div class="row1"><span class="title">The Dispossessed</span><span class="author">Ursula K. Le Guin</span><span class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</span></div>
+          <div class="fin">finished May 22</div>
+          <div class="notes sans">Ambiguous utopia. Reread candidate.</div>
+        </div>
+        <div class="book">
+          <div class="row1"><span class="title">Piranesi</span><span class="author">Susanna Clarke</span><span class="stars">&#9733;&#9733;&#9733;&#9733;&#9734;</span></div>
+          <div class="fin">finished Apr 30</div>
+          <div class="notes sans">Quiet, strange, lingers for weeks.</div>
+        </div>
+      </div>
+
+      <!-- recommendations -->
+      <div class="recs">
+        <div class="head"><h2>Suggested next</h2><span class="sub">3 · from the LLM</span></div>
+        <div class="recbox">
+          <div class="eye">&#9670; SUGGESTED — NOT YET READ</div>
+          <div class="rec">
+            <div class="row1"><span class="title">A Fire Upon the Deep</span><span class="author">Vernor Vinge</span></div>
+            <div class="why sans">&#8627; Big-idea space opera near Project Hail Mary’s energy, but denser.</div>
+            <button>+ add to log</button>
+          </div>
+          <div class="rec">
+            <div class="row1"><span class="title">The Word for World Is Forest</span><span class="author">Ursula K. Le Guin</span></div>
+            <div class="why sans">&#8627; You rated two Le Guin novels 5&#9733; — the short Hainish entry you haven’t logged.</div>
+            <button>+ add to log</button>
+          </div>
+          <div class="rec">
+            <div class="row1"><span class="title">Solaris</span><span class="author">Stanisław Lem</span></div>
+            <div class="why sans">&#8627; Shares Piranesi’s uncanny, unknowable-space mood.</div>
+            <button>+ add to log</button>
+          </div>
+          <div class="foot">refreshed from your catalog · Le Guin + hard-SF signal</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

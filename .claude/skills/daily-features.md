@@ -1,0 +1,27 @@
+# Skill: Daily-Use Features
+
+These are user-facing behaviors that compose across the email, calendar, and todo connectors. Each notes which subsystems it touches and any implementation considerations. Build roughly in the order listed — later ones depend on patterns established by earlier ones.
+
+## Morning briefing
+One query ("what's my day look like") pulls today's calendar, unread/priority email, and due todos into a single summary. Good first feature to build — it exercises all three connectors in one request and validates the router's ability to fan out to multiple tools and merge results.
+
+## Commitment tracking
+Scans sent email for things you committed to ("I'll send that over Friday") and surfaces them as suggested todos. Reuses the existing `llm-extracted` source pattern from `todo-system.md` — never auto-commits these, always surfaces for confirmation like any other LLM-extracted todo.
+
+## Meeting prep
+Before a calendar event, pulls any email threads involving the attendees so context is ready without manually digging. Needs attendee emails from the calendar connector cross-referenced against the email connector's search — a natural first use of chaining two MCP tool calls in one router decision.
+
+## Inbox triage digest
+On request (not a background push), summarizes what's in the inbox and flags what actually needs a response vs what doesn't. Distinct from a notification system — this is a pull, not a push: you ask for it, it doesn't interrupt you.
+
+## Natural-language scheduling
+"Find 30 minutes with X this week" checks free/busy via the calendar connector and proposes times rather than you checking manually. Any actual event creation still goes through the write-confirmation flow in `calendar-integration.md`.
+
+## Local knowledge base / notes Q&A
+RAG over a local folder of notes/docs so you can ask "where did I write down X." Good candidate for testing the MCP plumbing before tackling Gmail/Calendar, since a filesystem MCP server is the simplest one to stand up. Needs a lightweight local embedding step (small embedding model, separate from the chat model) plus a vector store — SQLite with a vector extension is enough at this scale, no need for anything heavier.
+
+## Japanese study nudge
+Surfaces "you haven't done your Manabi SRS reviews today" as a todo-like reminder. Deliberately thin — Lumen should not reimplement any of Manabi's SRS logic, just read a simple signal (e.g. last-review timestamp) that Manabi exposes, and treat it like any other due-today item.
+
+## Quick capture
+The hotkey quick-launcher doubles as a scratchpad: free text that isn't clearly a question defaults to becoming a todo or note rather than requiring an explicit "add a todo:" prefix. Router's intent-classification step (from `todo-system.md`) handles this — falls back to "capture as todo" when the input doesn't parse as a question or command.

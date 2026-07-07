@@ -1,0 +1,25 @@
+# Secrets & local config
+.env
+config.toml
+credentials.json
+token.json
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# SQLite data
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+*.swp

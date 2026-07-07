@@ -1,0 +1,23 @@
+# Skill: MCP Integration
+
+## Why MCP instead of hand-rolled connectors
+MCP (Model Context Protocol) standardizes how an LLM discovers and calls external tools. Rather than writing bespoke Gmail/Calendar API wrappers, the daemon connects to MCP servers that already expose these as tools, and the LLM calls them directly through the router.
+
+## Servers to use
+- **Gmail + Calendar**: `mcp-google-workspace` (community, runs locally via `npx`, single OAuth setup covers both) is the simplest self-hosted path. Google's official remote servers (`gmailmcp.googleapis.com`, `calendarmcp.googleapis.com`) are the alternative if a full Google Cloud Console OAuth consent-screen setup is preferred — more enterprise-flavored than a single-user app needs, but an option.
+- **Research/lookup**: Brave Search MCP server (requires a free-tier API key) for "look this up" queries. A DuckDuckGo MCP server is a no-signup alternative if that's preferred.
+- **Books lookup**: Open Library API (no key required) for grounding book recommendations — see `book-catalog.md`. Wrap it as a thin custom MCP server to keep it consistent with the rest of the integration pattern.
+
+## Bridging local models to MCP
+Ollama has no native MCP client support (as of April 2026, still an open feature request) — pick one:
+1. **Swap runtime to llama.cpp's `llama-server`** — merged native MCP client support in March 2026, no separate bridge process needed. Simplest fit for this project's single-daemon design.
+2. **Keep Ollama + a bridge** — `mcphost` (Go) or `ollmcp` (Python, TUI) translate MCP tool schemas into Ollama's function-calling format.
+3. **Build the bridge into `daemon/llm/`** — MCP Python SDK + Ollama Python client, logic living where the router already lives. Most consistent with this project's "everything routes through daemon/llm/" rule.
+
+Recommendation: start with (1) if open to the runtime swap — fewer moving parts. Otherwise (3).
+
+## Model size reality check
+Tool-calling reliability scales with model size. As of 2026, community consensus is 14B parameters minimum for anything beyond a single obvious tool call, and 32B+ for reliable multi-step chains (e.g. "check my calendar, then draft a reply referencing tomorrow's meeting"). This is heavier than the 3B–7B estimate in `llm-serving.md` — benchmark cold-start and thermal behavior on the actual hardware before committing. A workable middle ground: keep a small (3B) model as the default for simple queries, and only load a 14B+ model when the router detects a task needs chained tool calls.
+
+## Safety
+MCP doesn't change the write-confirmation rule already in CLAUDE.md — any tool call that sends, creates, deletes, or modifies still surfaces a confirmation in the UI before executing, regardless of which MCP server it's routed through.
