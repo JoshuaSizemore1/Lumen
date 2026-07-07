@@ -52,3 +52,12 @@ def test_todos_groups(qtbot):
     assert "TODAY" in t and "UPCOMING" in t and "NO DATE" in t
     assert "Renew lumen.sh domain" in t
     assert "6 open" in t
+
+
+def test_books_log_and_recs(qtbot):
+    from lumen.ui.book_catalog import BooksScreen
+    w = BooksScreen()
+    qtbot.addWidget(w)
+    t = texts(w)
+    assert "Reading log" in t and "The Left Hand of Darkness" in t
+    assert "SUGGESTED — NOT YET READ" in t and "Solaris" in t
