@@ -1,0 +1,2 @@
+# Example config: copy to config.toml and adjust. Holds non-secret settings only —
+# sync intervals, idle-unload timeout, model names, feature toggles. Secrets go in .env.

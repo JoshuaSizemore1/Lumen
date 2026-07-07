@@ -33,20 +33,45 @@ A local-first daily assistant that manages email, calendar, and todos, keeps a p
 ```
 lumen/
   daemon/
-    llm/          # Ollama client, model routing, idle/keep-alive config
-    connectors/   # gmail.py, gcal.py, todos.py — thin sync + query interfaces
-    router.py     # tool-call vs direct-answer decision, dispatch
+    router.py           # tool-call vs direct-answer decision, dispatch
+    ipc_server.py        # local IPC endpoint the UI talks to
+    db.py                # SQLite schema/connection setup, hand-written migrations
+    config.py            # loads config.toml + .env into settings
+    llm/
+      client.py           # Ollama/llama.cpp client, idle-unload keep_alive
+      model_router.py      # default vs escalation-tier model choice
+      mcp_bridge.py         # MCP tool schema <-> local model function-calling
+      memory.py             # two-tier personalization memory (raw log + distilled)
+      writing_style.py       # derive-once/apply-often writing style ruleset
+    connectors/
+      gmail.py             # Gmail metadata sync + confirmation-gated send
+      email_menu.py         # full inbox mirror, bulk sync + History API, FTS5 search
+      gcal.py                # Google Calendar read + confirmation-gated write
+      todos.py                # SQLite todo store, CRUD + NL querying
+      books.py                 # reading log + Open Library lookup-grounded recs
+      search.py                 # web search via MCP (Brave/DuckDuckGo)
+      notes.py                   # local notes RAG (embeddings + vector store)
+      commitments.py              # sent-mail commitment scanning -> suggested todos
+      briefing.py                  # morning briefing fan-out across connectors
   ui/
-    tray.py        # PyQt6 tray icon + menu
-    launcher.py     # hotkey-invoked quick-launcher (command palette style)
-  design/          # Claude Design output — HTML/React mockups, reference only
-  config.toml
-  .env             # secrets, gitignored
+    tray.py               # PyQt6 tray icon + menu
+    launcher.py            # hotkey-invoked quick-launcher (command palette style)
+    dashboard.py            # today's briefing view
+    mail.py                  # email menu screen
+    calendar_view.py          # calendar screen
+    todo_manager.py            # direct-manipulation todo screen
+    book_catalog.py             # book catalog screen
+    settings.py                  # account/MCP/model/sync settings screen
+    confirm_dialog.py             # shared write-confirmation dialog
+  design/                # future Claude Design output, reference only
+tests/                   # mirrors lumen/ layout
+config.example.toml      # copy to config.toml (non-secret settings)
+.env.example             # copy to .env (secrets, gitignored)
 ```
 
 ## Status
 
-Pre-implementation. The architecture, scope, and per-subsystem design are fully specified in `.claude/skills/`; no application code has been written yet. See `.claude/skills/development-plan.md` for the phased build order (LLM runtime → todos → MCP proof of concept → book catalog → calendar → email → writing style → cross-cutting features → memory → UI polish → power/thermal validation), each phase gated on the previous one actually working end-to-end.
+Directory scaffold and file stubs are in place (each file has a one-line comment describing its role; no logic yet). The architecture, scope, and per-subsystem design are fully specified in `.claude/skills/`. See `.claude/skills/development-plan.md` for the phased build order (LLM runtime → todos → MCP proof of concept → book catalog → calendar → email → writing style → cross-cutting features → memory → UI polish → power/thermal validation), each phase gated on the previous one actually working end-to-end.
 
 ## Design references
 
