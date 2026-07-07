@@ -7,8 +7,10 @@ from pathlib import Path
 
 
 def default_socket_path() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/lumen-{os.getuid()}"
-    return Path(base) / "lumen" / "daemon.sock"
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base:
+        return Path(base) / "lumen" / "daemon.sock"
+    return Path(f"/tmp/lumen-{os.getuid()}") / "daemon.sock"
 
 
 @dataclass(frozen=True)
@@ -28,7 +30,10 @@ def load_config(path: Path | None = None) -> Config:
     if not path.exists():
         return Config()
     with open(path, "rb") as f:
-        data = tomllib.load(f)
+        try:
+            data = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            raise SystemExit(f"lumen: invalid TOML in {path}: {e}")
     llm = data.get("llm", {})
     ipc = data.get("ipc", {})
     kwargs = {}
