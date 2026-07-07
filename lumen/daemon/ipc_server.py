@@ -16,7 +16,8 @@ class IPCServer:
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.parent.chmod(0o700)
         self._path.unlink(missing_ok=True)  # stale socket from a previous run
         self._server = await asyncio.start_unix_server(self._handle, path=str(self._path))
 
@@ -35,11 +36,24 @@ class IPCServer:
                 except (json.JSONDecodeError, KeyError, TypeError):
                     log.warning("skipping malformed IPC line: %r", raw[:200])
                     continue
-                async for resp in self._router.handle(type_, payload):
-                    resp["id"] = req_id
-                    writer.write(json.dumps(resp).encode() + b"\n")
+                try:
+                    async for resp in self._router.handle(type_, payload):
+                        resp["id"] = req_id
+                        writer.write(json.dumps(resp).encode() + b"\n")
+                        await writer.drain()
+                except (ConnectionResetError, BrokenPipeError):
+                    raise
+                except Exception:
+                    log.exception("router error handling %r request", type_)
+                    writer.write(json.dumps(
+                        {"id": req_id, "error": f"internal error handling {type_!r} request"}
+                    ).encode() + b"\n")
                     await writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             pass  # UI went away mid-stream; nothing to do
         finally:
             writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
