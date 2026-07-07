@@ -62,3 +62,34 @@ async def test_unreachable_raises_llm_unavailable():
         async for _ in client.chat([{"role": "user", "content": "hi"}]):
             pass
     await client.aclose()
+
+
+async def test_model_not_found_raises_with_pull_hint():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "model not found"})
+
+    client = make_client(handler)
+    with pytest.raises(LLMUnavailable, match="ollama pull qwen3:4b"):
+        async for _ in client.chat([{"role": "user", "content": "hi"}]):
+            pass
+    await client.aclose()
+
+
+async def test_http_error_status_raises_llm_unavailable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client = make_client(handler)
+    with pytest.raises(LLMUnavailable):
+        async for _ in client.chat([{"role": "user", "content": "hi"}]):
+            pass
+    await client.aclose()
+
+
+async def test_unload_swallows_transport_errors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("dropped")
+
+    client = make_client(handler)
+    await client.unload()  # must not raise
+    await client.aclose()

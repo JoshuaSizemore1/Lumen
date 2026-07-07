@@ -38,6 +38,10 @@ class OllamaClient:
         }
         try:
             async with self._http.stream("POST", "/api/chat", json=body) as resp:
+                if resp.status_code == 404:
+                    raise LLMUnavailable(
+                        f"model '{self.model}' not found — run: ollama pull {self.model}"
+                    )
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line.strip():
@@ -48,10 +52,10 @@ class OllamaClient:
                         yield content
                     if data.get("done"):
                         return
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        except httpx.HTTPError as e:
             raise LLMUnavailable(
-                f"Ollama unreachable at {self.base_url} — is the service running? "
-                "(systemctl --user status ollama)"
+                f"Ollama request failed ({type(e).__name__}) at {self.base_url} — is the "
+                "service running? (systemctl --user status ollama)"
             ) from e
 
     async def unload(self) -> None:
@@ -61,7 +65,7 @@ class OllamaClient:
                 "/api/chat",
                 json={"model": self.model, "messages": [], "keep_alive": 0},
             )
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except httpx.HTTPError:
             pass  # not running == nothing loaded == already "asleep"
 
     async def aclose(self) -> None:
