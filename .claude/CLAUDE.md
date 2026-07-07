@@ -55,3 +55,6 @@ See also `development-plan.md` (project root) for build order and success criter
 
 ## Dev protocol
 Use your existing Development Protocol (researcher → architect → implementer → tester → code-reviewer) for new features, and Debugging Protocol for bugs. If reusing the versions from Manabi/AgentForge, drop them in here — this file intentionally leaves that section for you to paste in rather than guessing at your exact wording.
+
+## Git commit convention
+Every commit message must end with a line stating how many user prompts drove it, counting from the prompt right after the last push up to and including the one that triggered this commit: `This commit used N prompts.` (before the `Co-Authored-By` trailer, if present).
