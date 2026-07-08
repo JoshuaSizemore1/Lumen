@@ -8,3 +8,6 @@ think = false               # reasoning toggle for thinking-capable models — f
 
 [ipc]
 # socket_path = "/run/user/1000/lumen/daemon.sock"  # default: $XDG_RUNTIME_DIR/lumen/daemon.sock
+
+[storage]
+# db_path = "~/.local/share/lumen/lumen.db"  # default: $XDG_DATA_HOME/lumen/lumen.db

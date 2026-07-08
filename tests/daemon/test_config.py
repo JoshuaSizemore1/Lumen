@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from lumen.daemon.config import Config, default_socket_path, load_config
+from lumen.daemon.config import Config, default_db_path, default_socket_path, load_config
 
 
 def test_defaults_when_no_file(tmp_path):
@@ -55,3 +55,25 @@ def test_nonpositive_idle_unload_rejected(tmp_path):
     p.write_text("[llm]\nidle_unload_minutes = -1\n")
     with pytest.raises(SystemExit, match="idle_unload_minutes must be positive"):
         load_config(p)
+
+
+def test_default_db_path_honors_xdg(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert default_db_path() == tmp_path / "lumen" / "lumen.db"
+
+
+def test_default_db_path_falls_back_to_local_share(monkeypatch):
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert default_db_path() == Path.home() / ".local" / "share" / "lumen" / "lumen.db"
+
+
+def test_db_path_from_toml(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[storage]\ndb_path = "/tmp/x/lumen.db"\n')
+    assert load_config(p).db_path == Path("/tmp/x/lumen.db")
+
+
+def test_db_path_defaults_when_absent(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[llm]\nmodel = "m"\n')
+    assert load_config(p).db_path.name == "lumen.db"

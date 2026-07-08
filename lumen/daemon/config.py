@@ -13,6 +13,12 @@ def default_socket_path() -> Path:
     return Path(f"/tmp/lumen-{os.getuid()}") / "daemon.sock"
 
 
+def default_db_path() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "lumen.db"
+
+
 @dataclass(frozen=True)
 class Config:
     model: str = "qwen3:4b-instruct"
@@ -20,6 +26,7 @@ class Config:
     ollama_url: str = "http://127.0.0.1:11434"
     think: bool = False
     socket_path: Path = field(default_factory=default_socket_path)
+    db_path: Path = field(default_factory=default_db_path)
 
     @property
     def keep_alive(self) -> str:
@@ -48,6 +55,9 @@ def load_config(path: Path | None = None) -> Config:
         kwargs["think"] = llm["think"]
     if "socket_path" in ipc:
         kwargs["socket_path"] = Path(ipc["socket_path"])
+    storage = data.get("storage", {})
+    if "db_path" in storage:
+        kwargs["db_path"] = Path(storage["db_path"]).expanduser()
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:
         raise SystemExit(
