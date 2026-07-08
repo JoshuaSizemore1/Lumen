@@ -22,6 +22,7 @@ class LauncherScreen(QWidget):
     def __init__(self, client):
         super().__init__()
         self._client = client
+        self._busy = False
         client.chunk.connect(self._on_chunk)
         client.done.connect(self._on_done)
         client.error.connect(self._on_error)
@@ -78,11 +79,14 @@ class LauncherScreen(QWidget):
         text = self.input.text().strip()
         if not text:
             return
+        if self._busy:
+            return
         self.hints.hide()
         self.response.clear()
         self.response.hide()
         self.status.hide()
         self._wake_timer.start()
+        self._busy = True
         self._client.send("chat", {"message": text})
 
     def _on_chunk(self, text: str) -> None:
@@ -94,10 +98,12 @@ class LauncherScreen(QWidget):
         self.response.insertPlainText(text)
 
     def _on_done(self) -> None:
+        self._busy = False
         self._wake_timer.stop()
         self.status.hide()
 
     def _on_error(self, message: str) -> None:
+        self._busy = False
         self._wake_timer.stop()
         self._set_status(message, error=True)
 

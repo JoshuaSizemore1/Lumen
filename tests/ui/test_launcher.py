@@ -62,3 +62,36 @@ def test_error_state(qtbot):
     client.error.emit("daemon offline — start it")
     assert w.status.isVisible()
     assert "daemon offline" in w.status.text()
+
+
+def test_resubmit_while_streaming_is_ignored(qtbot):
+    w, client = make(qtbot)
+    w.input.setText("first")
+    qtbot.keyClick(w.input, Qt.Key.Key_Return)
+    client.chunk.emit("partial")
+    w.input.setText("second")
+    qtbot.keyClick(w.input, Qt.Key.Key_Return)
+    assert len(client.sent) == 1          # ignored mid-stream
+    assert w.response.toPlainText() == "partial"
+    client.done.emit()
+    qtbot.keyClick(w.input, Qt.Key.Key_Return)
+    assert len(client.sent) == 2          # allowed again after done
+
+
+def test_empty_input_sends_nothing(qtbot):
+    w, client = make(qtbot)
+    w.input.setText("   ")
+    qtbot.keyClick(w.input, Qt.Key.Key_Return)
+    assert client.sent == []
+
+
+def test_overlay_toggle_and_shape(qtbot):
+    from lumen.ui.launcher import LauncherOverlay
+    overlay = LauncherOverlay(FakeClient())
+    qtbot.addWidget(overlay)
+    assert overlay.width() == 620
+    assert overlay.windowFlags() & Qt.WindowType.FramelessWindowHint
+    overlay.toggle()
+    assert overlay.isVisible()
+    overlay.toggle()
+    assert not overlay.isVisible()
