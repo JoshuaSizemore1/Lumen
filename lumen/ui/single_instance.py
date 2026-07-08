@@ -32,5 +32,11 @@ class InstanceServer(QObject):
 
     def _on_conn(self) -> None:
         conn = self._server.nextPendingConnection()
-        conn.readyRead.connect(
-            lambda: self.message.emit(bytes(conn.readLine()).decode().strip()))
+
+        def read() -> None:
+            while conn.canReadLine():
+                self.message.emit(bytes(conn.readLine()).decode().strip())
+
+        conn.readyRead.connect(read)
+        conn.disconnected.connect(conn.deleteLater)
+        read()  # data may already be buffered before the signal was wired

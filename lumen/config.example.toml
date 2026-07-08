@@ -4,7 +4,7 @@
 model = "qwen3:4b-instruct" # fast-path model; see .claude/skills/llm-serving.md for slots
 idle_unload_minutes = 10    # model evicts from RAM after this much inactivity — never -1
 ollama_url = "http://127.0.0.1:11434"
-think = false               # qwen3 hidden reasoning: ~2900 tokens/query at CPU speed — keep off for the fast path
+think = false               # reasoning toggle for thinking-capable models — fast path uses non-thinking qwen3:4b-instruct; keep false
 
 [ipc]
 # socket_path = "/run/user/1000/lumen/daemon.sock"  # default: $XDG_RUNTIME_DIR/lumen/daemon.sock

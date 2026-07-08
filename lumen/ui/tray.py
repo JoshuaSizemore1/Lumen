@@ -30,4 +30,5 @@ def make_tray(app: QApplication, on_show, on_toggle_launcher, on_sleep) -> QSyst
     tray.setContextMenu(menu)
     tray.setToolTip("Lumen — daily assistant")
     tray.show()
+    tray._menu = menu  # keep a Python ref: setContextMenu doesn't take ownership
     return tray
