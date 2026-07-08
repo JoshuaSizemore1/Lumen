@@ -5,7 +5,7 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from lumen.daemon.config import default_socket_path
+from lumen.daemon.config import load_config
 from lumen.ui.book_catalog import BooksScreen
 from lumen.ui.calendar_view import CalendarScreen
 from lumen.ui.daemon_client import DaemonClient
@@ -30,7 +30,7 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     app.setStyleSheet(build_qss())
 
-    socket_path = str(default_socket_path())
+    socket_path = str(load_config().socket_path)
     tab_client = DaemonClient(socket_path)
     overlay_client = DaemonClient(socket_path)
 

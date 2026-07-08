@@ -44,3 +44,25 @@ def test_missing_screen_gets_placeholder(qtbot):
     qtbot.addWidget(win)
     win.set_view("books")
     assert win.current_view() == "books"
+
+
+def test_typing_digits_into_launcher_input_does_not_switch_tabs(qtbot):
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    class FakeClient(QObject):
+        chunk = pyqtSignal(str)
+        done = pyqtSignal()
+        error = pyqtSignal(str)
+
+        def send(self, type_, payload):
+            pass
+
+    from lumen.ui.launcher import LauncherScreen
+    launcher = LauncherScreen(FakeClient())
+    win = MainWindow({"launcher": launcher})
+    qtbot.addWidget(win)
+    win.show()
+    launcher.input.setFocus()
+    qtbot.keyClicks(launcher.input, "33")
+    assert win.current_view() == "launcher"      # focus in input: no tab switch
+    assert launcher.input.text() == "33"

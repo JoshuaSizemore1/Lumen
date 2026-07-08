@@ -49,3 +49,34 @@ def test_offline_send_does_not_leave_stale_queue(qtbot, tmp_path):
     with qtbot.waitSignal(client.error, timeout=2000):
         client.send("chat", {"message": "hello"})
     assert client._pending == []
+
+
+def test_reconnect_after_error_gets_clean_stream(qtbot, tmp_path):
+    path = str(tmp_path / "d.sock")
+    client = DaemonClient(path)
+    client._buf = b'{"id": 1, "chunk": "stale-partial'   # simulate mid-line daemon death
+    with qtbot.waitSignal(client.error, timeout=2000):
+        client.send("chat", {"message": "hello"})        # no server yet -> error path
+    assert client._buf == b""                            # buffer must reset with the error
+
+    server = QLocalServer()
+    assert server.listen(path)
+
+    def on_new_conn():
+        conn = server.nextPendingConnection()
+
+        def on_ready():
+            req = json.loads(bytes(conn.readLine()))
+            for resp in ({"id": req["id"], "chunk": "hi"}, {"id": req["id"], "done": True}):
+                conn.write(json.dumps(resp).encode() + b"\n")
+            conn.flush()
+
+        conn.readyRead.connect(on_ready)
+
+    server.newConnection.connect(on_new_conn)
+    chunks = []
+    client.chunk.connect(chunks.append)
+    with qtbot.waitSignal(client.done, timeout=2000):
+        client.send("chat", {"message": "again"})
+    assert chunks == ["hi"]                              # clean stream, nothing eaten
+    server.close()

@@ -48,3 +48,10 @@ def test_malformed_toml_exits_with_clear_message(tmp_path):
     p.write_text("[llm\nmodel = ")
     with pytest.raises(SystemExit, match="invalid TOML"):
         load_config(p)
+
+
+def test_nonpositive_idle_unload_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[llm]\nidle_unload_minutes = -1\n")
+    with pytest.raises(SystemExit, match="idle_unload_minutes must be positive"):
+        load_config(p)

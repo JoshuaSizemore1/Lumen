@@ -4,7 +4,6 @@ live toggles/hot-reload arrive with the features they control."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QCheckBox, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
-from lumen.ui import theme
 from lumen.ui.widgets import label
 
 ACCOUNTS = [("gmail", "not connected · Phase 6", False),

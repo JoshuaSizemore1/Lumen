@@ -48,4 +48,10 @@ def load_config(path: Path | None = None) -> Config:
         kwargs["think"] = llm["think"]
     if "socket_path" in ipc:
         kwargs["socket_path"] = Path(ipc["socket_path"])
+    idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
+    if idle_unload_minutes <= 0:
+        raise SystemExit(
+            f"lumen: idle_unload_minutes must be positive (got {idle_unload_minutes}) "
+            "— idle-unload is non-negotiable"
+        )
     return Config(**kwargs)

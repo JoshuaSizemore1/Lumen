@@ -41,6 +41,7 @@ class DaemonClient(QObject):
 
     def _on_error(self, _err) -> None:
         self._pending.clear()  # a send that failed is dead — never burst stale messages later
+        self._buf = b""        # a partial line from a daemon that died mid-stream is dead too
         self._sock.abort()     # back to UnconnectedState so the next send() reconnects
         self.error.emit(OFFLINE_MSG)
 
