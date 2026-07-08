@@ -11,6 +11,8 @@ class FakeRouter:
         if type_ == "chat":
             yield {"chunk": f"echo:{payload['message']}"}
             yield {"done": True}
+        elif type_ == "todos.list":
+            yield {"result": ["fake-row"]}
         else:
             yield {"error": "unknown request type: " + type_}
 
@@ -105,3 +107,13 @@ async def test_socket_dir_mode_enforced(tmp_path):
         assert (tmp_path / "run").stat().st_mode & 0o777 == 0o700
     finally:
         await srv.stop()
+
+
+async def test_one_shot_result_line(server, tmp_path):
+    reader, writer = await asyncio.open_unix_connection(str(tmp_path / "d.sock"))
+    writer.write(json.dumps({"id": 9, "type": "todos.list", "payload": {}}).encode() + b"\n")
+    await writer.drain()
+    msg = json.loads(await asyncio.wait_for(reader.readline(), timeout=2))
+    assert msg == {"id": 9, "result": ["fake-row"]}
+    writer.close()
+    await writer.wait_closed()
