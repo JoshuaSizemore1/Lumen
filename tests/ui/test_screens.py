@@ -61,3 +61,12 @@ def test_books_log_and_recs(qtbot):
     t = texts(w)
     assert "Reading log" in t and "The Left Hand of Darkness" in t
     assert "SUGGESTED — NOT YET READ" in t and "Solaris" in t
+
+
+def test_settings_sections(qtbot):
+    from lumen.ui.settings import SettingsScreen
+    w = SettingsScreen()
+    qtbot.addWidget(w)
+    t = texts(w)
+    assert "[accounts]" in t and "[mcp_servers]" in t and "[model]" in t and "[sync]" in t
+    assert "qwen3:4b" in t
