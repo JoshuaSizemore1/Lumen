@@ -78,6 +78,16 @@ def test_resubmit_while_streaming_is_ignored(qtbot):
     assert len(client.sent) == 2          # allowed again after done
 
 
+def test_resubmit_after_error_is_allowed(qtbot):
+    w, client = make(qtbot)
+    w.input.setText("first")
+    qtbot.keyClick(w.input, Qt.Key.Key_Return)
+    client.error.emit("daemon offline — start it")
+    w.input.setText("retry")
+    qtbot.keyClick(w.input, Qt.Key.Key_Return)
+    assert len(client.sent) == 2      # error path must un-wedge the launcher
+
+
 def test_empty_input_sends_nothing(qtbot):
     w, client = make(qtbot)
     w.input.setText("   ")
@@ -95,3 +105,6 @@ def test_overlay_toggle_and_shape(qtbot):
     assert overlay.isVisible()
     overlay.toggle()
     assert not overlay.isVisible()
+    overlay.toggle()
+    qtbot.keyClick(overlay, Qt.Key.Key_Escape)
+    assert not overlay.isVisible()    # Esc dismisses (QDialog reject)
