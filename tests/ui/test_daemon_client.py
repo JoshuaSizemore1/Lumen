@@ -80,3 +80,56 @@ def test_reconnect_after_error_gets_clean_stream(qtbot, tmp_path):
         client.send("chat", {"message": "again"})
     assert chunks == ["hi"]                              # clean stream, nothing eaten
     server.close()
+
+
+def _serve_one_shot(server, reply_for):
+    """reply_for(req) -> response dict (id gets filled in)."""
+    def on_new_conn():
+        conn = server.nextPendingConnection()
+
+        def on_ready():
+            req = json.loads(bytes(conn.readLine()))
+            resp = reply_for(req) | {"id": req["id"]}
+            conn.write(json.dumps(resp).encode() + b"\n")
+            conn.flush()
+
+        conn.readyRead.connect(on_ready)
+
+    server.newConnection.connect(on_new_conn)
+
+
+def test_request_routes_result_to_callback(qtbot, tmp_path):
+    path = str(tmp_path / "d.sock")
+    server = QLocalServer()
+    assert server.listen(path)
+    _serve_one_shot(server, lambda req: {"result": [{"echo": req["type"]}]})
+
+    client = DaemonClient(path)
+    results = []
+    client.request("todos.list", {}, results.append)
+    qtbot.waitUntil(lambda: results != [], timeout=2000)
+    assert results == [[{"echo": "todos.list"}]]
+    assert client._callbacks == {}
+    server.close()
+
+
+def test_request_error_fires_signal_and_drops_callback(qtbot, tmp_path):
+    path = str(tmp_path / "d.sock")
+    server = QLocalServer()
+    assert server.listen(path)
+    _serve_one_shot(server, lambda req: {"error": "empty todo text"})
+
+    client = DaemonClient(path)
+    results = []
+    with qtbot.waitSignal(client.error, timeout=2000) as blocker:
+        client.request("todos.add", {"text": ""}, results.append)
+    assert "empty todo" in blocker.args[0]
+    assert results == [] and client._callbacks == {}
+    server.close()
+
+
+def test_offline_request_clears_callbacks(qtbot, tmp_path):
+    client = DaemonClient(str(tmp_path / "missing.sock"))
+    with qtbot.waitSignal(client.error, timeout=2000):
+        client.request("todos.list", {}, lambda r: None)
+    assert client._callbacks == {}
