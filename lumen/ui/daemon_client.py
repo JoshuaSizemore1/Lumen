@@ -25,7 +25,7 @@ class DaemonClient(QObject):
         self._sock = QLocalSocket(self)
         self._sock.readyRead.connect(self._on_ready_read)
         self._sock.connected.connect(self._flush_pending)
-        self._sock.errorOccurred.connect(lambda _e: self.error.emit(OFFLINE_MSG))
+        self._sock.errorOccurred.connect(self._on_error)
 
     def send(self, type_: str, payload: dict) -> None:
         line = json.dumps({"id": next(self._ids), "type": type_, "payload": payload}).encode() + b"\n"
@@ -38,6 +38,11 @@ class DaemonClient(QObject):
 
     def sleep_model(self) -> None:
         self.send("sleep", {})
+
+    def _on_error(self, _err) -> None:
+        self._pending.clear()  # a send that failed is dead — never burst stale messages later
+        self._sock.abort()     # back to UnconnectedState so the next send() reconnects
+        self.error.emit(OFFLINE_MSG)
 
     def _flush_pending(self) -> None:
         for line in self._pending:

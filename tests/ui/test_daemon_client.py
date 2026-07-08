@@ -42,3 +42,10 @@ def test_offline_emits_error(qtbot, tmp_path):
     with qtbot.waitSignal(client.error, timeout=2000) as blocker:
         client.send("chat", {"message": "hello"})
     assert "daemon offline" in blocker.args[0]
+
+
+def test_offline_send_does_not_leave_stale_queue(qtbot, tmp_path):
+    client = DaemonClient(str(tmp_path / "missing.sock"))
+    with qtbot.waitSignal(client.error, timeout=2000):
+        client.send("chat", {"message": "hello"})
+    assert client._pending == []
