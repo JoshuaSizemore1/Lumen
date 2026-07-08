@@ -7,8 +7,10 @@ class FakeLLM:
         self._chunks = chunks
         self._fail = fail
         self.unloaded = False
+        self.messages = None
 
     async def chat(self, messages):
+        self.messages = messages
         if self._fail:
             raise LLMUnavailable("down")
         for c in self._chunks:
@@ -94,3 +96,38 @@ async def test_todos_toggle_and_delete_validate_payload():
     assert ("delete", 3) in store.calls
     out = await collect(router, "todos.delete", {})
     assert "error" in out[0]
+
+
+async def test_chat_todo_question_injects_context():
+    llm = FakeLLM()
+    store = FakeStore(rows=[{
+        "id": 1, "text": "call dentist", "due_date": "2026-07-08",
+        "completed": False, "created_at": "2026-07-08T09:00:00",
+        "source": "manual", "tags": ["personal"],
+    }])
+    await collect(Router(llm, store), "chat", {"message": "what's due today?"})
+    assert llm.messages[0]["role"] == "system"
+    content = llm.messages[0]["content"]
+    assert "Today is" in content
+    assert "- call dentist (due 2026-07-08) [personal]" in content
+    assert llm.messages[-1] == {"role": "user", "content": "what's due today?"}
+
+
+async def test_chat_non_todo_question_stays_uninjected():
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "chat", {"message": "capital of France?"})
+    assert llm.messages == [{"role": "user", "content": "capital of France?"}]
+
+
+async def test_chat_empty_todo_list_injects_no_open_todos():
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "chat", {"message": "any tasks left?"})
+    assert "no open todos" in llm.messages[0]["content"]
+
+
+def test_hint_matches_whole_words_only():
+    from lumen.daemon.router import TODO_HINT
+    assert TODO_HINT.search("what is due today")
+    assert TODO_HINT.search("my TODO list")
+    assert TODO_HINT.search("anything overdue?")
+    assert not TODO_HINT.search("the residue subdued the duel")
