@@ -1,7 +1,7 @@
 # Copy to config.toml (same directory) and adjust. Secrets go in .env, never here.
 
 [llm]
-model = "qwen3:4b"          # fast-path model; see .claude/skills/llm-serving.md for slots
+model = "qwen3:4b-instruct" # fast-path model; see .claude/skills/llm-serving.md for slots
 idle_unload_minutes = 10    # model evicts from RAM after this much inactivity — never -1
 ollama_url = "http://127.0.0.1:11434"
 think = false               # qwen3 hidden reasoning: ~2900 tokens/query at CPU speed — keep off for the fast path

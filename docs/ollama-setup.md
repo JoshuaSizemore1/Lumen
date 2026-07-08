@@ -51,23 +51,30 @@ systemctl --user status ollama --no-pager   # expect: active (running)
 ## 3. Pull the fast-path model
 
 ```bash
-ollama pull qwen3:4b       # ~2.6GB download
-curl -s localhost:11434/api/tags | python3 -m json.tool   # should list qwen3:4b
+ollama pull qwen3:4b-instruct       # ~2.5GB download
+curl -s localhost:11434/api/tags | python3 -m json.tool   # should list qwen3:4b-instruct
 ```
 
 Model slots (decided 2026-07-07, see `.claude/skills/llm-serving.md`):
 
 | Slot | Model | Status |
 |---|---|---|
-| Fast path / router / tools | `qwen3:4b` | pull now |
+| Fast path / router / tools | `qwen3:4b-instruct` | pull now |
 | Tool-chain escalation | Qwen3 14B-class | Phase 3 — do NOT pull yet |
 | Writing escalation candidate | `gemma3:12b-it-qat` | Phase 7 benchmark — do NOT pull yet |
 
 > **Thinking mode:** qwen3 models "think" by default — thousands of hidden
 > reasoning tokens per query, which at CPU speeds means minutes of latency and
 > heat before the first visible word (measured: 8m16s for a two-word answer).
-> The Lumen daemon disables it per-request (`think = false` in `config.toml`).
-> When testing interactively, do the same: `ollama run qwen3:4b --think=false "..."`.
+> Ollama's `think=false` request parameter is supposed to suppress this, but on
+> this machine's Ollama build (0.31.1) it only disables the *parser* — reasoning
+> still generates and streams into visible content as literal `<think>...</think>`
+> text (measured: one-sentence answers ~57s total; a two-word prompt exceeded
+> 3 minutes). The fix that actually works here: the fast-path slot uses the
+> non-thinking `qwen3:4b-instruct` variant, which has no `thinking` capability
+> at all and never generates reasoning tokens. `think = false` stays set in
+> `config.toml` regardless — it's correct (and needed) for any future
+> thinking-capable escalation slot, just harmless as a no-op on this one.
 
 ## 4. Start / stop / call — the control surface
 
@@ -77,14 +84,14 @@ Model slots (decided 2026-07-07, see `.claude/skills/llm-serving.md`):
 | Stop the server | `systemctl --user stop ollama` |
 | Load the model | automatic, on the first request (cold start = a few seconds) |
 | Call the model | only ever through the Lumen daemon (`daemon/llm/client.py`) |
-| Unload NOW ("sleep") | tray menu → "Sleep model now", or: `curl localhost:11434/api/chat -d '{"model":"qwen3:4b","messages":[],"keep_alive":0}'` |
+| Unload NOW ("sleep") | tray menu → "Sleep model now", or: `curl localhost:11434/api/chat -d '{"model":"qwen3:4b-instruct","messages":[],"keep_alive":0}'` |
 | What's loaded? | `ollama ps` |
 
 ## 5. Verify idle-unload actually works (Phase 1 success criterion)
 
 ```bash
-ollama run qwen3:4b "say hi"   # loads the model
-ollama ps                      # shows qwen3:4b resident, with an UNTIL column
+ollama run qwen3:4b-instruct "say hi"   # loads the model
+ollama ps                               # shows qwen3:4b-instruct resident, with an UNTIL column
 ```
 
 For a fast check, restart the user service with a 1-minute override, ask once,
@@ -93,7 +100,7 @@ and watch it evict:
 ```bash
 systemctl --user edit ollama   # drop-in: [Service] Environment="OLLAMA_KEEP_ALIVE=1m"
 systemctl --user restart ollama
-ollama run qwen3:4b "say hi" && sleep 75 && ollama ps   # expect: empty table
+ollama run qwen3:4b-instruct "say hi" && sleep 75 && ollama ps   # expect: empty table
 ```
 
 Then delete the drop-in (`systemctl --user revert ollama`) and restart to go

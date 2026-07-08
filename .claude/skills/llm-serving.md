@@ -16,7 +16,7 @@ Environment="OLLAMA_KEEP_ALIVE=10m"
 ## Model choice (slots decided 2026-07-07)
 | Slot | Model | When it enters |
 |---|---|---|
-| Fast path / router / tool calls | `qwen3:4b` (Q4, ~2.6GB) | Phase 1 default |
+| Fast path / router / tool calls | `qwen3:4b-instruct` (Q4, ~2.5GB, non-thinking variant) | Phase 1 default |
 | Tool-chain escalation | Qwen3 14B-class (Q4, ~9GB) | Phase 3+, when MCP chains need it (see `mcp-integration.md`) |
 | Writing/synthesis escalation (candidate) | `gemma3:12b-it-qat` (~8GB) | Phase 7–8 benchmark — stronger prose + Japanese |
 
@@ -25,6 +25,7 @@ Environment="OLLAMA_KEEP_ALIVE=10m"
 - Thermal ceiling on this hardware (Core Ultra 9 285H, 32GB shared RAM, iGPU only): ~14B-class for regular use. 27B+ fits in RAM but not the thermal envelope.
 - Benchmark cold-start latency on the actual hardware before committing to a model size. If it's not sub-2-second on a cold load, the "quick-launcher" UX will feel broken.
 - Thinking mode off on the fast path (`think = false`, benchmarked 2026-07-07: ~2900 hidden tokens ≈ 8min CPU per trivial query with it on). Revisit per-slot if an escalation task genuinely benefits.
+- Follow-up (2026-07-07): `think = false` alone is not sufficient on this machine's Ollama build (0.31.1). For the thinking-capable `qwen3:4b`, it only disables Ollama's parser — reasoning still generates and leaks into visible content as literal `<think>...</think>` text (one-sentence answers ~57s total, a two-word prompt >3min). Fixed by switching the fast-path slot to the non-thinking `qwen3:4b-instruct` variant, which reports no `thinking` capability (`/api/tags`) and never generates reasoning tokens. `think = false` stays in config — correct and needed for any future thinking-capable slot, just not sufficient by itself on a thinking model.
 
 ## Router behavior
 `daemon/llm/` should expose a single entrypoint that:

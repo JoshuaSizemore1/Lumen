@@ -69,4 +69,4 @@ def test_settings_sections(qtbot):
     qtbot.addWidget(w)
     t = texts(w)
     assert "[accounts]" in t and "[mcp_servers]" in t and "[model]" in t and "[sync]" in t
-    assert "qwen3:4b" in t
+    assert "qwen3:4b-instruct" in t

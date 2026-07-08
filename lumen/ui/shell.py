@@ -36,7 +36,7 @@ class MainWindow(QWidget):
         tb.addWidget(label("lumen", "secondary"))
         tb.addWidget(label("daily assistant", "dim"))
         tb.addStretch()
-        tb.addWidget(label("local · qwen3:4b", "dim"))
+        tb.addWidget(label("local · qwen3:4b-instruct", "dim"))
         self.sleep_btn = button("idle 10m — sleep", "ghost")
         self.sleep_btn.clicked.connect(self.sleep_requested.emit)
         tb.addWidget(self.sleep_btn)

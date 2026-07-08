@@ -11,7 +11,7 @@ ACCOUNTS = [("gmail", "not connected · Phase 6", False),
             ("google_calendar", "not connected · Phase 5", False)]
 SERVERS = [("search", "brave-search · Phase 3", False),
            ("books_lookup", "openlibrary · Phase 4", False)]
-MODEL_KV = [("runtime", '"ollama"'), ("name", '"qwen3:4b"'),
+MODEL_KV = [("runtime", '"ollama"'), ("name", '"qwen3:4b-instruct"'),
             ("idle_unload_minutes", "10  # unload after 10m")]
 SYNC_KV = [("interval", "5  # minutes"), ("confirm_writes", "true  # email/calendar")]
 

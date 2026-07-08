@@ -15,7 +15,7 @@ def default_socket_path() -> Path:
 
 @dataclass(frozen=True)
 class Config:
-    model: str = "qwen3:4b"
+    model: str = "qwen3:4b-instruct"
     idle_unload_minutes: int = 10
     ollama_url: str = "http://127.0.0.1:11434"
     think: bool = False

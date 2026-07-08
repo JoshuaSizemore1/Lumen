@@ -8,7 +8,7 @@ from lumen.daemon.config import Config, default_socket_path, load_config
 
 def test_defaults_when_no_file(tmp_path):
     cfg = load_config(tmp_path / "nope.toml")
-    assert cfg.model == "qwen3:4b"
+    assert cfg.model == "qwen3:4b-instruct"
     assert cfg.idle_unload_minutes == 10
     assert cfg.ollama_url == "http://127.0.0.1:11434"
     assert cfg.think is False
