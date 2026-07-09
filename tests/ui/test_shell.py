@@ -53,6 +53,7 @@ def test_typing_digits_into_launcher_input_does_not_switch_tabs(qtbot):
         chunk = pyqtSignal(str)
         done = pyqtSignal()
         error = pyqtSignal(str)
+        tool_used = pyqtSignal(str)
 
         def send(self, type_, payload):
             pass

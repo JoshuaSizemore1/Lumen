@@ -15,6 +15,7 @@ class DaemonClient(QObject):
     chunk = pyqtSignal(str)
     done = pyqtSignal()
     error = pyqtSignal(str)
+    tool_used = pyqtSignal(str)
 
     def __init__(self, socket_path: str, parent=None):
         super().__init__(parent)
@@ -63,6 +64,9 @@ class DaemonClient(QObject):
 
     def _on_ready_read(self) -> None:
         self._buf += bytes(self._sock.readAll())
+        self._process_buffer()
+
+    def _process_buffer(self) -> None:
         while b"\n" in self._buf:
             raw, self._buf = self._buf.split(b"\n", 1)
             try:
@@ -77,5 +81,7 @@ class DaemonClient(QObject):
                     cb(msg["result"])
             elif msg.get("done"):
                 self.done.emit()
+            elif "tool_used" in msg:
+                self.tool_used.emit(msg["tool_used"])
             elif "chunk" in msg:
                 self.chunk.emit(msg["chunk"])

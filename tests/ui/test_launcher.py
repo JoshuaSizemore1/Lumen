@@ -7,6 +7,7 @@ class FakeClient(QObject):
     chunk = pyqtSignal(str)
     done = pyqtSignal()
     error = pyqtSignal(str)
+    tool_used = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -93,6 +94,23 @@ def test_empty_input_sends_nothing(qtbot):
     w.input.setText("   ")
     qtbot.keyClick(w.input, Qt.Key.Key_Return)
     assert client.sent == []
+
+
+def test_tool_marker_shown_then_cleared_on_submit(qtbot):
+    from lumen.ui.daemon_client import DaemonClient
+
+    client = DaemonClient("/nonexistent.sock")
+    screen = LauncherScreen(client)
+    qtbot.addWidget(screen)
+    screen.show()  # isVisible() reflects the whole ancestor chain; unshown top-level reports False
+
+    client.tool_used.emit("search_books")
+    assert "search_books" in screen.tool_marker.text()
+    assert screen.tool_marker.isVisible()
+
+    screen.input.setText("next question")
+    screen._submit()
+    assert not screen.tool_marker.isVisible()   # cleared for the new answer
 
 
 def test_overlay_toggle_and_shape(qtbot):

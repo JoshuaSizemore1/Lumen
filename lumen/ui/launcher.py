@@ -26,6 +26,7 @@ class LauncherScreen(QWidget):
         client.chunk.connect(self._on_chunk)
         client.done.connect(self._on_done)
         client.error.connect(self._on_error)
+        client.tool_used.connect(self._on_tool_used)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 12)
@@ -58,6 +59,10 @@ class LauncherScreen(QWidget):
         self.status.hide()
         root.addWidget(self.status)
 
+        self.tool_marker = label("", "faint")
+        self.tool_marker.hide()
+        root.addWidget(self.tool_marker)
+
         self.response = QTextEdit()
         self.response.setReadOnly(True)
         self.response.hide()
@@ -85,9 +90,14 @@ class LauncherScreen(QWidget):
         self.response.clear()
         self.response.hide()
         self.status.hide()
+        self.tool_marker.hide()
         self._wake_timer.start()
         self._busy = True
         self._client.send("chat", {"message": text})
+
+    def _on_tool_used(self, name: str) -> None:
+        self.tool_marker.setText(f"🔧 used {name}")
+        self.tool_marker.show()
 
     def _on_chunk(self, text: str) -> None:
         self._wake_timer.stop()

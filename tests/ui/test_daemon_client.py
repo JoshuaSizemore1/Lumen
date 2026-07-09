@@ -133,3 +133,12 @@ def test_offline_request_clears_callbacks(qtbot, tmp_path):
     with qtbot.waitSignal(client.error, timeout=2000):
         client.request("todos.list", {}, lambda r: None)
     assert client._callbacks == {}
+
+
+def test_tool_used_line_emits_signal(qtbot):
+    client = DaemonClient("/nonexistent.sock")
+    seen = []
+    client.tool_used.connect(seen.append)
+    client._buf = b'{"id": 1, "tool_used": "search_books"}\n'
+    client._process_buffer()
+    assert seen == ["search_books"]
