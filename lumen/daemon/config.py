@@ -29,7 +29,7 @@ def default_tool_log_path() -> Path:
 class MCPServerConfig:
     name: str
     command: str
-    args: list[str]
+    args: tuple[str, ...] = ()
     tools: tuple[str, ...] | None = None   # read-only allowlist; None = expose all
 
 
@@ -87,7 +87,7 @@ def load_config(path: Path | None = None) -> Config:
             MCPServerConfig(
                 name=s["name"],
                 command=s["command"],
-                args=list(s.get("args", [])),
+                args=tuple(s.get("args", [])),
                 tools=tuple(s["tools"]) if "tools" in s else None,
             )
             for s in mcp_raw.get("servers", [])

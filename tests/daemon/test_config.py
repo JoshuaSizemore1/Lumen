@@ -107,9 +107,15 @@ def test_mcp_parses_servers_and_allowlist(tmp_path):
     assert cfg.mcp.max_iterations == 3
     assert cfg.mcp.servers == (
         MCPServerConfig("fs", "npx",
-                        ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"],
+                        ("-y", "@modelcontextprotocol/server-filesystem", "~/notes"),
                         ("read_file", "list_directory")),
     )
+
+
+def test_mcp_log_path_from_toml(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[mcp]\nenabled = true\nlog_path = "/tmp/x/tool-calls.jsonl"\n')
+    assert load_config(p).mcp.log_path == Path("/tmp/x/tool-calls.jsonl")
 
 
 def test_mcp_server_without_tools_has_none_allowlist(tmp_path):
