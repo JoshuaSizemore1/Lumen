@@ -77,3 +77,48 @@ def test_db_path_defaults_when_absent(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text('[llm]\nmodel = "m"\n')
     assert load_config(p).db_path.name == "lumen.db"
+
+
+from lumen.daemon.config import MCPConfig, MCPServerConfig, default_tool_log_path
+
+
+def test_mcp_defaults_disabled_when_absent(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[llm]\nmodel = "m"\n')
+    cfg = load_config(p)
+    assert cfg.mcp.enabled is False
+    assert cfg.mcp.servers == ()
+
+
+def test_mcp_parses_servers_and_allowlist(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        "[mcp]\n"
+        "enabled = true\n"
+        "max_iterations = 3\n"
+        "[[mcp.servers]]\n"
+        'name = "fs"\n'
+        'command = "npx"\n'
+        'args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]\n'
+        'tools = ["read_file", "list_directory"]\n'
+    )
+    cfg = load_config(p)
+    assert cfg.mcp.enabled is True
+    assert cfg.mcp.max_iterations == 3
+    assert cfg.mcp.servers == (
+        MCPServerConfig("fs", "npx",
+                        ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"],
+                        ("read_file", "list_directory")),
+    )
+
+
+def test_mcp_server_without_tools_has_none_allowlist(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[mcp]\nenabled = true\n[[mcp.servers]]\nname = "books"\ncommand = "python"\nargs = ["-m", "x"]\n')
+    cfg = load_config(p)
+    assert cfg.mcp.servers[0].tools is None
+
+
+def test_default_tool_log_path_honors_xdg_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert default_tool_log_path() == tmp_path / "lumen" / "tool-calls.jsonl"

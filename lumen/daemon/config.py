@@ -19,6 +19,28 @@ def default_db_path() -> Path:
     return root / "lumen" / "lumen.db"
 
 
+def default_tool_log_path() -> Path:
+    base = os.environ.get("XDG_STATE_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "state"
+    return root / "lumen" / "tool-calls.jsonl"
+
+
+@dataclass(frozen=True)
+class MCPServerConfig:
+    name: str
+    command: str
+    args: list[str]
+    tools: tuple[str, ...] | None = None   # read-only allowlist; None = expose all
+
+
+@dataclass(frozen=True)
+class MCPConfig:
+    enabled: bool = False
+    max_iterations: int = 4
+    log_path: Path = field(default_factory=default_tool_log_path)
+    servers: tuple[MCPServerConfig, ...] = ()
+
+
 @dataclass(frozen=True)
 class Config:
     model: str = "qwen3:4b-instruct"
@@ -27,6 +49,7 @@ class Config:
     think: bool = False
     socket_path: Path = field(default_factory=default_socket_path)
     db_path: Path = field(default_factory=default_db_path)
+    mcp: "MCPConfig" = field(default_factory=lambda: MCPConfig())
 
     @property
     def keep_alive(self) -> str:
@@ -58,6 +81,23 @@ def load_config(path: Path | None = None) -> Config:
     storage = data.get("storage", {})
     if "db_path" in storage:
         kwargs["db_path"] = Path(storage["db_path"]).expanduser()
+    mcp_raw = data.get("mcp")
+    if mcp_raw is not None:
+        servers = tuple(
+            MCPServerConfig(
+                name=s["name"],
+                command=s["command"],
+                args=list(s.get("args", [])),
+                tools=tuple(s["tools"]) if "tools" in s else None,
+            )
+            for s in mcp_raw.get("servers", [])
+        )
+        mcp_kwargs = {"enabled": bool(mcp_raw.get("enabled", False)), "servers": servers}
+        if "max_iterations" in mcp_raw:
+            mcp_kwargs["max_iterations"] = int(mcp_raw["max_iterations"])
+        if mcp_raw.get("log_path"):
+            mcp_kwargs["log_path"] = Path(mcp_raw["log_path"]).expanduser()
+        kwargs["mcp"] = MCPConfig(**mcp_kwargs)
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:
         raise SystemExit(
