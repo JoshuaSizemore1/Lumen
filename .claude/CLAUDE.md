@@ -56,6 +56,9 @@ See also `development-plan.md` (project root) for build order and success criter
 ## Dev protocol
 Use your existing Development Protocol (researcher → architect → implementer → tester → code-reviewer) for new features, and Debugging Protocol for bugs. If reusing the versions from Manabi/AgentForge, drop them in here — this file intentionally leaves that section for you to paste in rather than guessing at your exact wording.
 
+## Decision autonomy
+The user is not deeply technical. Do NOT ask the user to approve technical or workflow choices — bridge/library/architecture selection, dependencies, refactors, test strategy, tooling, implementation approach. Evaluate the options yourself and pick the best one, stating the choice and a one-line why as you proceed. Only bring the user *design / product / behavior* questions: what a feature does, how it should work, what it should look like, scope/priority trade-offs, and anything that changes the user-visible experience. When in doubt: "how it's built" → you decide; "how it works for me" → ask. Still present the finished design spec for the user to review — that review is a design gate, not approach-approval.
+
 ## Git commit convention
 Every commit message must end with a line stating how many user prompts drove it, counting from the prompt right after the last push up to and including the one that triggered this commit: `This commit used N prompts.`
 Commit messages must NOT include a `Co-Authored-By` trailer (or any other credit line) for Claude or any Anthropic model — this repo's commits are authored solely by the user.
