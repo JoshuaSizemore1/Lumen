@@ -19,6 +19,7 @@ Environment="OLLAMA_KEEP_ALIVE=10m"
 | Fast path / router / tool calls | `qwen3:4b-instruct` (Q4, ~2.5GB, non-thinking variant) | Phase 1 default |
 | Tool-chain escalation | Qwen3 14B-class (Q4, ~9GB) | Phase 3+, when MCP chains need it (see `mcp-integration.md`) |
 | Writing/synthesis escalation (candidate) | `gemma3:12b-it-qat` (~8GB) | Phase 7–8 benchmark — stronger prose + Japanese |
+| Deep-reasoning, no-tools (discussed, not committed) | thinking-mode model, e.g. `qwen3:4b` with `think: true` | Not scheduled — see `project-scope.md` "Discussed but not yet committed" for why, and the open questions before this could be built |
 
 - The fast-path slot must be a model with native tool-call support in Ollama's `tools` API (Qwen3 qualifies; Gemma 3 does not — never route tool calls to Gemma, prose-only).
 - Escalation is the exception, not the default — every escalation is a bigger RAM/thermal hit. Model names live in `config.toml`; swapping a slot is config, not code.
