@@ -10,9 +10,10 @@ No tools, no connectors yet. Get Ollama/llama.cpp running with idle-unload confi
 No external auth needed, so it's the safest place to prove out the daemon ↔ UI ↔ SQLite pattern. Build the schema, CRUD, and the visual todo manager UI.
 **Success**: you can add/complete/delete todos directly in the UI with no LLM involved, and separately ask the LLM "what's due today" and get a correct answer from the same data.
 
-## Phase 3 — MCP plumbing, proof of concept
+## Phase 3 — MCP plumbing, proof of concept — DONE (2026-07-09)
 Before touching Gmail/Calendar, prove the MCP bridge works against something lower-stakes — Open Library or a filesystem MCP server.
 **Success**: the LLM calls a read-only MCP tool and returns a result that's visibly grounded in the actual tool output (not something it could have hallucinated) — you should be able to verify this by checking the returned info against the tool call log.
+**Verified**: live end-to-end against real Ollama (`qwen3:4b-instruct`) — filesystem ("what files are in my notes folder?" → `list_directory`, named the actual files) and Open Library ("who wrote Dune..." → `search_books`, correctly answered Frank Herbert/1965) both produced a `tool_used` event and a matching `tool-calls.jsonl` line. See `mcp-integration.md` for the bridge decision and `llm-serving.md` for model behavior.
 
 ## Phase 4 — Book catalog + recommendations
 Schema, add-book UI, and the recommendation flow using the now-proven MCP pattern.

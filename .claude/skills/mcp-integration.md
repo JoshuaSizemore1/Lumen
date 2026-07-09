@@ -16,6 +16,12 @@ Ollama has no native MCP client support (as of April 2026, still an open feature
 
 Recommendation: start with (1) if open to the runtime swap — fewer moving parts. Otherwise (3).
 
+**Decision (2026-07-09, Phase 3 verified):** Option 3, chosen for Phase 3. The bridge lives in `daemon/llm/mcp_bridge.py`: `MCPBridge` converts MCP tool schemas to Ollama's native `tools` API and routes calls back to the owning server; `LazyBridge` defers `connect_servers` (stdio subprocess spawn) until the first tool-shaped request, so an MCP-enabled daemon that never gets asked a lookup question spawns nothing. `daemon/llm/client.py`'s `chat_with_tools` drives the agentic loop with non-streamed turns (`stream: false` on `/api/chat`) — needed because tool_calls only arrive as a complete JSON object, not incrementally. Live end-to-end run (filesystem + Open Library, both single-tool-call) confirmed the loop works against real Ollama; see `llm-serving.md` for the model-behavior notes and `development-plan.md` for the Phase 3 close-out.
+
+Read-only allowlist convention: each `[[mcp.servers]]` block's `tools` = the exposed set; `MCPBridge.load_tools()` drops any tool name not listed (omit `tools` to expose everything — avoid this for write-capable servers). One gotcha found during verification: if the allowlist excludes discovery tools like the filesystem server's `list_allowed_directories`, the model has no way to learn the real absolute root and guesses a relative path, which fails with ENOENT — include any "tell me the accessible paths" tool alongside the read tools.
+
+`lumen/mcp_servers/` is the template location for custom in-repo servers — `openlibrary.py` (built on `mcp.server.fastmcp.FastMCP`) is the reference shape for Phase 4's book catalog and later lookups: thin `@mcp.tool()` functions, no API key, graceful-degradation return strings on HTTP failure instead of raising.
+
 ## Model size reality check
 Tool-calling reliability scales with model size. As of 2026, community consensus is 14B parameters minimum for anything beyond a single obvious tool call, and 32B+ for reliable multi-step chains (e.g. "check my calendar, then draft a reply referencing tomorrow's meeting"). This is heavier than the 3B–7B estimate in `llm-serving.md` — benchmark cold-start and thermal behavior on the actual hardware before committing. A workable middle ground: keep a small (3B) model as the default for simple queries, and only load a 14B+ model when the router detects a task needs chained tool calls.
 
