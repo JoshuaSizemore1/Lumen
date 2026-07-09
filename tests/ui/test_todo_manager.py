@@ -1,6 +1,6 @@
 from datetime import date
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import QCheckBox, QLabel
 
 from lumen.ui.todo_manager import TodoScreen, format_due, group_todos
@@ -119,3 +119,12 @@ def test_error_shows_banner_and_next_result_clears_it(qtbot):
 def test_unknown_tag_renders_with_fallback_color(qtbot):
     screen, _ = make_screen(qtbot, [row(1, "x", tags=("zebra",))])
     assert "zebra" in texts(screen)  # no KeyError on unknown tag
+
+
+def test_delete_ignores_non_left_buttons(qtbot):
+    screen, client = make_screen(qtbot, [row(7, "x")])
+    x = next(lab for lab in screen.findChildren(QLabel) if lab.text() == "✕")
+    qtbot.mouseClick(x, Qt.MouseButton.RightButton)
+    assert ("todos.delete", {"id": 7}) not in client.requests
+    qtbot.mouseClick(x, Qt.MouseButton.LeftButton)
+    assert ("todos.delete", {"id": 7}) in client.requests

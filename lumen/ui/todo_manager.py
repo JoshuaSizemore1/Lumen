@@ -49,7 +49,8 @@ class ClickableLabel(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def mousePressEvent(self, event):
-        self.clicked.emit()
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
 
 
 class TodoScreen(QWidget):
