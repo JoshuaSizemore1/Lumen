@@ -10,6 +10,8 @@ from lumen.daemon.config import load_config
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
 from lumen.daemon.llm.client import OllamaClient
+from lumen.daemon.llm.mcp_bridge import LazyBridge
+from lumen.daemon.llm.model_router import ModelRouter
 from lumen.daemon.router import Router
 
 log = logging.getLogger("lumen.daemon")
@@ -19,7 +21,11 @@ async def run() -> None:
     cfg = load_config()
     conn = db.connect(cfg.db_path)
     llm = OllamaClient(cfg.ollama_url, cfg.model, cfg.keep_alive, think=cfg.think)
-    server = IPCServer(cfg.socket_path, Router(llm, TodoStore(conn)))
+    bridge = LazyBridge(list(cfg.mcp.servers)) if cfg.mcp.enabled else None
+    model_router = ModelRouter(cfg.model)
+    router = Router(llm, TodoStore(conn), bridge=bridge, model_router=model_router,
+                    max_iterations=cfg.mcp.max_iterations)
+    server = IPCServer(cfg.socket_path, router)
     await server.start()
     log.info("listening on %s (model=%s, keep_alive=%s, db=%s)",
              cfg.socket_path, cfg.model, cfg.keep_alive, cfg.db_path)
@@ -33,6 +39,8 @@ async def run() -> None:
     log.info("shutting down")
     await server.stop()
     await llm.aclose()
+    if bridge is not None:
+        await bridge.aclose()
     conn.close()
 
 

@@ -1,4 +1,7 @@
+import re
+
 from lumen.daemon.llm.client import LLMUnavailable
+from lumen.daemon.llm.mcp_bridge import ToolCallError
 from lumen.daemon.router import Router
 
 
@@ -131,3 +134,74 @@ def test_hint_matches_whole_words_only():
     assert TODO_HINT.search("my TODO list")
     assert TODO_HINT.search("anything overdue?")
     assert not TODO_HINT.search("the residue subdued the duel")
+
+
+class FakeBridge:
+    def __init__(self, tools=(("list_directory", {}),), result="a.txt\nb.txt", fail=False):
+        self._tools = [{"type": "function", "function": {"name": n}} for n, _ in tools]
+        self._result = result
+        self._fail = fail
+        self.started = False
+        self.calls = []
+
+    async def ensure_started(self):
+        self.started = True
+
+    def ollama_tools(self):
+        return self._tools
+
+    async def call(self, name, args):
+        self.calls.append((name, args))
+        if self._fail:
+            raise ToolCallError("boom")
+        return self._result
+
+
+class ToolLLM:
+    """Fake LLM whose chat_with_tools invokes one tool then answers."""
+    def __init__(self):
+        self.model = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+        yield {"tool_call": {"name": "list_directory", "arguments": {"path": "/n"}}}
+        text = await executor("list_directory", {"path": "/n"})
+        yield {"content": f"Files: {text}"}
+
+
+class FakeModelRouter:
+    def pick_model(self, message, *, needs_tools):
+        return "fast"
+
+
+def test_tool_hint_matches_lookup_phrases():
+    from lumen.daemon.router import TOOL_HINT
+    assert TOOL_HINT.search("what files are in my notes")
+    assert TOOL_HINT.search("who wrote Dune")
+    assert TOOL_HINT.search("look up the isbn")
+    assert not TOOL_HINT.search("how are you today")
+
+
+async def test_chat_runs_tool_loop_and_emits_tool_used():
+    bridge = FakeBridge()
+    router = Router(ToolLLM(), FakeStore(), bridge=bridge, model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "what files are in /n"})
+    assert bridge.started is True
+    assert {"tool_used": "list_directory"} in out
+    assert any(o.get("chunk", "").startswith("Files: a.txt") for o in out)
+    assert out[-1] == {"done": True}
+
+
+async def test_chat_without_bridge_uses_plain_path():
+    llm = FakeLLM()
+    out = await collect(Router(llm, FakeStore()), "chat", {"message": "who wrote Dune"})
+    # no bridge → plain chat, no tool_used
+    assert not any("tool_used" in o for o in out)
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_chat_non_lookup_skips_tools_even_with_bridge():
+    bridge = FakeBridge()
+    out = await collect(Router(FakeLLM(), FakeStore(), bridge=bridge, model_router=FakeModelRouter()),
+                        "chat", {"message": "how are you today"})
+    assert bridge.started is False           # gate missed → no connect, plain path
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]

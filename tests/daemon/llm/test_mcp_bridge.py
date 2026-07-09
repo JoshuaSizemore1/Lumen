@@ -99,3 +99,21 @@ def test_server_params_builds_stdio_command():
     p = server_params(cfg)
     assert p.command == "npx"
     assert p.args == ["-y", "pkg", "~/notes"]
+
+
+async def test_lazy_bridge_connects_once(monkeypatch):
+    from lumen.daemon.llm import mcp_bridge as mod
+    calls = {"n": 0}
+
+    async def fake_connect(servers):
+        calls["n"] += 1
+        b = MCPBridge({}, {})
+        await b.load_tools()
+        return b
+
+    monkeypatch.setattr(mod, "connect_servers", fake_connect)
+    lazy = mod.LazyBridge([])
+    assert lazy.ollama_tools() == []          # nothing before start
+    await lazy.ensure_started()
+    await lazy.ensure_started()
+    assert calls["n"] == 1                     # connected exactly once

@@ -2,12 +2,20 @@
 Tool-call vs direct-answer classification arrives with the MCP phase."""
 
 import re
+import time
 from collections.abc import AsyncIterator
 from datetime import date
 
 from lumen.daemon.llm.client import LLMUnavailable
+from lumen.daemon.llm.mcp_bridge import ToolCallError
 
 TODO_HINT = re.compile(r"\b(?:todos?|tasks?|due|overdue)\b", re.IGNORECASE)
+
+TOOL_HINT = re.compile(
+    r"\b(look ?up|search|find|who wrote|author of|isbn|published|"
+    r"books?|novels?|files?|folder|directory|notes|list .*files|what files)\b",
+    re.IGNORECASE,
+)
 
 
 def todo_context(todos: list[dict], today: date) -> str:
@@ -26,13 +34,22 @@ def todo_context(todos: list[dict], today: date) -> str:
 
 
 class Router:
-    def __init__(self, llm, todos):
+    def __init__(self, llm, todos, *, bridge=None, model_router=None, tool_log=None,
+                 max_iterations=4):
         self._llm = llm
         self._todos = todos
+        self._bridge = bridge
+        self._model_router = model_router
+        self._tool_log = tool_log
+        self._max_iterations = max_iterations
 
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
             message = payload.get("message", "")
+            if self._bridge is not None and TOOL_HINT.search(message):
+                async for ev in self._chat_with_tools(message):
+                    yield ev
+                return
             messages = []
             if TODO_HINT.search(message):
                 messages.append({"role": "system",
@@ -69,3 +86,49 @@ class Router:
                 yield {"error": "todos.delete needs {id}"}
         else:
             yield {"error": f"unknown request type: {type_}"}
+
+    async def _chat_with_tools(self, message: str):
+        await self._bridge.ensure_started()
+        tools = self._bridge.ollama_tools()
+        if not tools:                      # no servers came up → fall back to plain chat
+            try:
+                async for chunk in self._llm.chat([{"role": "user", "content": message}]):
+                    yield {"chunk": chunk}
+            except LLMUnavailable as e:
+                yield {"error": str(e)}
+                return
+            yield {"done": True}
+            return
+
+        async def executor(name, args):
+            start = time.monotonic()
+            try:
+                text = await self._bridge.call(name, args)
+                ok = True
+            except ToolCallError as e:
+                text, ok = f"tool error: {e}", False
+            if self._tool_log is not None:
+                self._tool_log.write(name, args, ok, text,
+                                     int((time.monotonic() - start) * 1000))
+            return text
+
+        messages = []
+        if TODO_HINT.search(message):
+            messages.append({"role": "system",
+                             "content": todo_context(self._todos.open_todos(), date.today())})
+        messages.append({"role": "user", "content": message})
+        model = self._model_router.pick_model(message, needs_tools=True) \
+            if self._model_router else None
+        try:
+            async for ev in self._llm.chat_with_tools(
+                messages, tools, executor, model=model, max_iterations=self._max_iterations):
+                if "tool_call" in ev:
+                    yield {"tool_used": ev["tool_call"]["name"]}
+                elif ev.get("capped"):
+                    yield {"chunk": "(stopped after several tool steps without a final answer)"}
+                elif "content" in ev:
+                    yield {"chunk": ev["content"]}
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        yield {"done": True}

@@ -124,3 +124,27 @@ async def connect_servers(servers: list[MCPServerConfig]) -> MCPBridge:
         await stack.aclose()
         raise
     return bridge
+
+
+class LazyBridge:
+    """Defers connect_servers until the first tool need (power discipline: an
+    MCP-enabled daemon that never gets a tool question spawns nothing)."""
+
+    def __init__(self, servers: list):
+        self._servers = servers
+        self._bridge: MCPBridge | None = None
+
+    async def ensure_started(self) -> None:
+        if self._bridge is None:
+            self._bridge = await connect_servers(self._servers)
+
+    def ollama_tools(self) -> list[dict]:
+        return self._bridge.ollama_tools() if self._bridge else []
+
+    async def call(self, name: str, arguments: dict) -> str:
+        return await self._bridge.call(name, arguments)
+
+    async def aclose(self) -> None:
+        if self._bridge is not None:
+            await self._bridge.aclose()
+            self._bridge = None
