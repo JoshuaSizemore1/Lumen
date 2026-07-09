@@ -117,3 +117,21 @@ async def test_lazy_bridge_connects_once(monkeypatch):
     await lazy.ensure_started()
     await lazy.ensure_started()
     assert calls["n"] == 1                     # connected exactly once
+
+
+async def test_lazy_bridge_concurrent_ensure_started_connects_once(monkeypatch):
+    import asyncio
+    from lumen.daemon.llm import mcp_bridge as mod
+    calls = {"n": 0}
+
+    async def fake_connect(servers):
+        calls["n"] += 1
+        await asyncio.sleep(0)          # yield so a second task can interleave
+        b = MCPBridge({}, {})
+        await b.load_tools()
+        return b
+
+    monkeypatch.setattr(mod, "connect_servers", fake_connect)
+    lazy = mod.LazyBridge([])
+    await asyncio.gather(lazy.ensure_started(), lazy.ensure_started())
+    assert calls["n"] == 1              # lock prevents a double-connect

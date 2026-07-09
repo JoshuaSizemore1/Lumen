@@ -13,7 +13,7 @@ TODO_HINT = re.compile(r"\b(?:todos?|tasks?|due|overdue)\b", re.IGNORECASE)
 
 TOOL_HINT = re.compile(
     r"\b(look ?up|search|find|who wrote|author of|isbn|published|"
-    r"books?|novels?|files?|folder|directory|notes|list .*files|what files)\b",
+    r"books?|novels?|files?|folder|directory|notes)\b",
     re.IGNORECASE,
 )
 
@@ -91,8 +91,13 @@ class Router:
         await self._bridge.ensure_started()
         tools = self._bridge.ollama_tools()
         if not tools:                      # no servers came up → fall back to plain chat
+            messages = []
+            if TODO_HINT.search(message):
+                messages.append({"role": "system",
+                                 "content": todo_context(self._todos.open_todos(), date.today())})
+            messages.append({"role": "user", "content": message})
             try:
-                async for chunk in self._llm.chat([{"role": "user", "content": message}]):
+                async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
             except LLMUnavailable as e:
                 yield {"error": str(e)}

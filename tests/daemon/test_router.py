@@ -205,3 +205,66 @@ async def test_chat_non_lookup_skips_tools_even_with_bridge():
                         "chat", {"message": "how are you today"})
     assert bridge.started is False           # gate missed → no connect, plain path
     assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_chat_tool_error_fed_back_to_model():
+    bridge = FakeBridge(fail=True)
+    captured = {}
+
+    class ErrLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            yield {"tool_call": {"name": "list_directory", "arguments": {}}}
+            captured["text"] = await executor("list_directory", {})
+            yield {"content": f"done: {captured['text']}"}
+
+    out = await collect(Router(ErrLLM(), FakeStore(), bridge=bridge, model_router=FakeModelRouter()),
+                        "chat", {"message": "look up files"})
+    assert captured["text"].startswith("tool error:")
+    assert any(o.get("chunk", "").startswith("done: tool error:") for o in out)
+
+
+async def test_chat_capped_yields_stopped_message():
+    class CapLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            yield {"tool_call": {"name": "list_directory", "arguments": {}}}
+            await executor("list_directory", {})
+            yield {"content": "", "capped": True}
+
+    out = await collect(Router(CapLLM(), FakeStore(), bridge=FakeBridge(), model_router=FakeModelRouter()),
+                        "chat", {"message": "look up files"})
+    assert any("stopped after several tool steps" in o.get("chunk", "") for o in out)
+    assert out[-1] == {"done": True}
+
+
+async def test_chat_empty_tools_falls_back_and_injects_todo_context():
+    llm = FakeLLM()
+    store = FakeStore(rows=[{"id": 1, "text": "call dentist", "due_date": "2026-07-09",
+                             "completed": False, "created_at": "2026-07-09T09:00:00",
+                             "source": "manual", "tags": []}])
+    out = await collect(Router(llm, store, bridge=FakeBridge(tools=()), model_router=FakeModelRouter()),
+                        "chat", {"message": "what todos are due, and look up a file"})
+    assert llm.messages[0]["role"] == "system" and "call dentist" in llm.messages[0]["content"]
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_model_router_choice_reaches_chat_with_tools():
+    captured = {}
+
+    class CapModelLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            captured["model"] = model
+            yield {"content": "ok"}
+
+    class MR:
+        def pick_model(self, message, *, needs_tools):
+            return "escalated-xyz"
+
+    await collect(Router(CapModelLLM(), FakeStore(), bridge=FakeBridge(), model_router=MR()),
+                  "chat", {"message": "look up files"})
+    assert captured["model"] == "escalated-xyz"

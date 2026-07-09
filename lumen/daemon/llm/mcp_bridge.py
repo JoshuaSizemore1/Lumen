@@ -3,6 +3,7 @@ routes tool calls to the owning server, and flattens results to text. The stdio
 subprocess wiring lives in connect_servers (Task 3); MCPBridge itself is pure
 aggregation over injected clients so it unit-tests without a subprocess."""
 
+import asyncio
 import logging
 from collections import Counter
 from contextlib import AsyncExitStack
@@ -133,10 +134,14 @@ class LazyBridge:
     def __init__(self, servers: list):
         self._servers = servers
         self._bridge: MCPBridge | None = None
+        self._lock = asyncio.Lock()
 
     async def ensure_started(self) -> None:
-        if self._bridge is None:
-            self._bridge = await connect_servers(self._servers)
+        if self._bridge is not None:
+            return
+        async with self._lock:
+            if self._bridge is None:
+                self._bridge = await connect_servers(self._servers)
 
     def ollama_tools(self) -> list[dict]:
         return self._bridge.ollama_tools() if self._bridge else []
