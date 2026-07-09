@@ -33,13 +33,14 @@ def main() -> None:
     socket_path = str(load_config().socket_path)
     tab_client = DaemonClient(socket_path)
     overlay_client = DaemonClient(socket_path)
+    todos_client = DaemonClient(socket_path)
 
     win = MainWindow({
         "launcher": LauncherScreen(tab_client),
         "dashboard": DashboardScreen(),
         "calendar": CalendarScreen(),
         "mail": MailScreen(),
-        "todos": TodoScreen(),
+        "todos": TodoScreen(todos_client),
         "books": BooksScreen(),
         "settings": SettingsScreen(),
     })

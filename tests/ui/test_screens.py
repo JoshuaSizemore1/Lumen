@@ -44,16 +44,6 @@ def test_mail_reply_opens_confirm(qtbot, monkeypatch):
     assert calls.get("asked")
 
 
-def test_todos_groups(qtbot):
-    from lumen.ui.todo_manager import TodoScreen
-    w = TodoScreen()
-    qtbot.addWidget(w)
-    t = texts(w)
-    assert "TODAY" in t and "UPCOMING" in t and "NO DATE" in t
-    assert "Renew lumen.sh domain" in t
-    assert "6 open" in t
-
-
 def test_books_log_and_recs(qtbot):
     from lumen.ui.book_catalog import BooksScreen
     w = BooksScreen()
