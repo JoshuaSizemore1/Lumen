@@ -50,6 +50,12 @@ def test_invalid_dates_stay_in_text():
     assert due is None and text == "x @feb30 @13-45"
 
 
+def test_leap_day_rolls_to_next_leap_year():
+    # 2027 is not a leap year (Feb 29 2027 is invalid); 2028 is.
+    text, due, _ = parse_todo_input("x @feb29", date(2027, 1, 1))
+    assert due == "2028-02-29" and text == "x"
+
+
 def test_tags_lowercased_deduped_stripped():
     text, _, tags = parse("Renew domain #Admin #admin #work")
     assert tags == ["admin", "work"] and text == "Renew domain"

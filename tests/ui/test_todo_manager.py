@@ -26,6 +26,19 @@ class FakeClient(QObject):
         on_result(self.rows)
 
 
+class SilentFakeClient(QObject):
+    """Simulates an offline/no-response daemon: records requests but never
+    invokes on_result, so callers' success-path state never advances."""
+    error = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.requests: list[tuple[str, dict]] = []
+
+    def request(self, type_, payload, on_result):
+        self.requests.append((type_, payload))
+
+
 def make_screen(qtbot, rows=None):
     client = FakeClient(rows)
     screen = TodoScreen(client)
@@ -93,6 +106,26 @@ def test_empty_add_is_noop(qtbot):
     screen.field.setText("   ")
     screen._add()
     assert all(t != "todos.add" for t, _ in client.requests)
+
+
+def test_offline_first_load_retries_on_next_show(qtbot):
+    client = SilentFakeClient()
+    screen = TodoScreen(client)
+    qtbot.addWidget(screen)
+    screen.show()  # showEvent -> todos.list, but daemon never responds
+    screen.hide()
+    screen.show()  # re-shown: since it never loaded, must retry
+    assert [t for t, _ in client.requests].count("todos.list") == 2
+
+
+def test_offline_add_keeps_typed_text_in_field(qtbot):
+    client = SilentFakeClient()
+    screen = TodoScreen(client)
+    qtbot.addWidget(screen)
+    screen.field.setText("renew domain @jul9 #admin")
+    screen._add()
+    assert ("todos.add", {"text": "renew domain @jul9 #admin"}) in client.requests
+    assert screen.field.text() == "renew domain @jul9 #admin"
 
 
 def test_toggle_sends_request(qtbot):

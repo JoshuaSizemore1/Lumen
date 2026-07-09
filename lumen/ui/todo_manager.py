@@ -101,17 +101,20 @@ class TodoScreen(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         if not self._loaded:
-            self._loaded = True
             self._client.request("todos.list", {}, self._set_todos)
 
     def _add(self) -> None:
         text = self.field.text().strip()
         if not text:
             return
-        self._client.request("todos.add", {"text": text}, self._set_todos)
+        self._client.request("todos.add", {"text": text}, self._on_added)
+
+    def _on_added(self, rows: list[dict]) -> None:
         self.field.clear()
+        self._set_todos(rows)
 
     def _set_todos(self, rows: list[dict]) -> None:
+        self._loaded = True
         self._todos = rows
         self.status.hide()
         self._rebuild()

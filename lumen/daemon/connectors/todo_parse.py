@@ -23,7 +23,7 @@ def _month_day(month: int, day: int, today: date) -> date | None:
         try:
             candidate = date(year, month, day)
         except ValueError:
-            return None
+            continue
         if candidate >= today:
             return candidate
     return None
