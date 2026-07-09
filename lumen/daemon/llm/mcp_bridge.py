@@ -129,19 +129,44 @@ async def connect_servers(servers: list[MCPServerConfig]) -> MCPBridge:
 
 class LazyBridge:
     """Defers connect_servers until the first tool need (power discipline: an
-    MCP-enabled daemon that never gets a tool question spawns nothing)."""
+    MCP-enabled daemon that never gets a tool question spawns nothing). The MCP
+    sessions' cancel scopes must be entered and exited by the same asyncio task
+    (anyio rule), so a dedicated owner task holds them from connect to close."""
 
     def __init__(self, servers: list):
         self._servers = servers
         self._bridge: MCPBridge | None = None
         self._lock = asyncio.Lock()
+        self._close = asyncio.Event()
+        self._owner: asyncio.Task | None = None
+
+    async def _own(self, ready: asyncio.Event, result: dict) -> None:
+        """Owner task: enters the MCP contexts, holds them, exits them itself."""
+        try:
+            bridge = await connect_servers(self._servers)
+        except Exception as e:
+            result["error"] = e
+            ready.set()
+            return
+        result["bridge"] = bridge
+        ready.set()
+        await self._close.wait()
+        await bridge.aclose()
 
     async def ensure_started(self) -> None:
         if self._bridge is not None:
             return
         async with self._lock:
             if self._bridge is None:
-                self._bridge = await connect_servers(self._servers)
+                ready = asyncio.Event()
+                result: dict = {}
+                self._close = asyncio.Event()
+                self._owner = asyncio.create_task(self._own(ready, result))
+                await ready.wait()
+                if "error" in result:
+                    self._owner = None
+                    raise result["error"]
+                self._bridge = result["bridge"]
 
     def ollama_tools(self) -> list[dict]:
         return self._bridge.ollama_tools() if self._bridge else []
@@ -150,6 +175,9 @@ class LazyBridge:
         return await self._bridge.call(name, arguments)
 
     async def aclose(self) -> None:
-        if self._bridge is not None:
-            await self._bridge.aclose()
-            self._bridge = None
+        if self._owner is None:
+            return
+        self._close.set()
+        await self._owner
+        self._owner = None
+        self._bridge = None

@@ -117,6 +117,7 @@ async def test_lazy_bridge_connects_once(monkeypatch):
     await lazy.ensure_started()
     await lazy.ensure_started()
     assert calls["n"] == 1                     # connected exactly once
+    await lazy.aclose()
 
 
 async def test_lazy_bridge_concurrent_ensure_started_connects_once(monkeypatch):
@@ -135,3 +136,31 @@ async def test_lazy_bridge_concurrent_ensure_started_connects_once(monkeypatch):
     lazy = mod.LazyBridge([])
     await asyncio.gather(lazy.ensure_started(), lazy.ensure_started())
     assert calls["n"] == 1              # lock prevents a double-connect
+    await lazy.aclose()
+
+
+async def test_lazy_bridge_closes_in_owner_task(monkeypatch):
+    import asyncio
+    from lumen.daemon.llm import mcp_bridge as mod
+    tasks = {}
+
+    class TaskRecordingBridge(MCPBridge):
+        async def aclose(self):
+            tasks["close"] = asyncio.current_task()
+
+    async def fake_connect(servers):
+        tasks["connect"] = asyncio.current_task()
+        b = TaskRecordingBridge({}, {})
+        await b.load_tools()
+        return b
+
+    monkeypatch.setattr(mod, "connect_servers", fake_connect)
+    lazy = mod.LazyBridge([])
+
+    async def handler():          # simulates an IPC connection handler task
+        await lazy.ensure_started()
+
+    await asyncio.create_task(handler())
+    await lazy.aclose()           # from the "main" task, like daemon shutdown
+    assert tasks["connect"] is tasks["close"]              # same owner task
+    assert tasks["connect"] is not asyncio.current_task()  # not the caller
