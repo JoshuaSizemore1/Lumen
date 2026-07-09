@@ -34,7 +34,14 @@ async def _search(client: httpx.AsyncClient, query: str, limit: int) -> str:
 
 
 async def _get(client: httpx.AsyncClient, olid_or_isbn: str) -> str:
-    path = olid_or_isbn if olid_or_isbn.startswith("/") else f"/works/{olid_or_isbn}"
+    cleaned = olid_or_isbn.replace("-", "")
+    if olid_or_isbn.startswith("/"):
+        path = olid_or_isbn
+    elif cleaned.isdigit() and len(cleaned) in (10, 13) or (
+            len(cleaned) == 10 and cleaned[:9].isdigit() and cleaned[9] in "Xx"):
+        path = f"/isbn/{cleaned}"
+    else:
+        path = f"/works/{olid_or_isbn}"
     try:
         resp = await client.get(f"{path}.json")
         resp.raise_for_status()
