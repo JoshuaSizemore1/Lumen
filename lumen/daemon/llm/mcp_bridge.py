@@ -41,12 +41,12 @@ def flatten_content(blocks) -> str:
 
 
 class MCPBridge:
-    def __init__(self, clients: dict, allowlists: dict):
+    def __init__(self, clients: dict, allowlists: dict, stack=None):
         self._clients = clients                 # server_name -> client
         self._allow = allowlists                # server_name -> tuple[str,...] | None
         self._schemas: list[dict] = []          # Ollama tool schemas (namespaced names)
         self._registry: dict[str, tuple] = {}   # exposed_name -> (server_name, original_name)
-        self._stack = None                      # AsyncExitStack owning subprocess lifetime, if any
+        self._stack = stack                     # AsyncExitStack owning subprocess lifetime, if any
 
     async def load_tools(self) -> None:
         """List tools from every client, apply allowlists, and resolve name collisions."""
@@ -117,7 +117,10 @@ async def connect_servers(servers: list[MCPServerConfig]) -> MCPBridge:
             allowlists[cfg.name] = cfg.tools
         except Exception:
             log.exception("MCP server %r failed to start — skipping", cfg.name)
-    bridge = MCPBridge(clients, allowlists)
-    bridge._stack = stack  # own the subprocesses' lifetime
-    await bridge.load_tools()
+    bridge = MCPBridge(clients, allowlists, stack=stack)
+    try:
+        await bridge.load_tools()
+    except Exception:
+        await stack.aclose()
+        raise
     return bridge
