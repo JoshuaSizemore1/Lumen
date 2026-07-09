@@ -1,7 +1,8 @@
 import pytest
 
+from lumen.daemon.config import MCPServerConfig
 from lumen.daemon.llm.mcp_bridge import (
-    MCPBridge, ToolCallError, flatten_content, tool_to_ollama_schema,
+    MCPBridge, ToolCallError, flatten_content, server_params, tool_to_ollama_schema,
 )
 
 
@@ -91,3 +92,10 @@ async def test_collision_namespaced_by_server():
     assert names == {"fs__search", "books__search"}
     await bridge.call("books__search", {"q": "x"})
     assert b.calls == [("search", {"q": "x"})]
+
+
+def test_server_params_builds_stdio_command():
+    cfg = MCPServerConfig("fs", "npx", ["-y", "pkg", "~/notes"], ("read_file",))
+    p = server_params(cfg)
+    assert p.command == "npx"
+    assert p.args == ["-y", "pkg", "~/notes"]

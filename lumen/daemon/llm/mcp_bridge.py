@@ -3,7 +3,16 @@ routes tool calls to the owning server, and flattens results to text. The stdio
 subprocess wiring lives in connect_servers (Task 3); MCPBridge itself is pure
 aggregation over injected clients so it unit-tests without a subprocess."""
 
+import logging
 from collections import Counter
+from contextlib import AsyncExitStack
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
+from lumen.daemon.config import MCPServerConfig
+
+log = logging.getLogger(__name__)
 
 
 class ToolCallError(Exception):
@@ -37,6 +46,7 @@ class MCPBridge:
         self._allow = allowlists                # server_name -> tuple[str,...] | None
         self._schemas: list[dict] = []          # Ollama tool schemas (namespaced names)
         self._registry: dict[str, tuple] = {}   # exposed_name -> (server_name, original_name)
+        self._stack = None                      # AsyncExitStack owning subprocess lifetime, if any
 
     async def load_tools(self) -> None:
         """List tools from every client, apply allowlists, and resolve name collisions."""
@@ -69,3 +79,45 @@ class MCPBridge:
         if getattr(result, "isError", False):
             raise ToolCallError(f"{name} failed: {flatten_content(result.content)[:200]}")
         return flatten_content(result.content)
+
+    async def aclose(self) -> None:
+        if self._stack is not None:
+            await self._stack.aclose()
+            self._stack = None
+
+
+def server_params(cfg: MCPServerConfig) -> StdioServerParameters:
+    return StdioServerParameters(command=cfg.command, args=list(cfg.args))
+
+
+class MCPClient:
+    """One connected MCP server session. Normalizes results to the shapes MCPBridge expects."""
+
+    def __init__(self, session: ClientSession):
+        self._session = session
+
+    async def list_tools(self):
+        return (await self._session.list_tools()).tools
+
+    async def call_tool(self, name: str, arguments: dict):
+        return await self._session.call_tool(name, arguments)
+
+
+async def connect_servers(servers: list[MCPServerConfig]) -> MCPBridge:
+    """Spawn each server's stdio subprocess and return a loaded MCPBridge.
+    A server that fails to launch is logged and skipped, never crashing the daemon."""
+    stack = AsyncExitStack()
+    clients, allowlists = {}, {}
+    for cfg in servers:
+        try:
+            read, write = await stack.enter_async_context(stdio_client(server_params(cfg)))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            clients[cfg.name] = MCPClient(session)
+            allowlists[cfg.name] = cfg.tools
+        except Exception:
+            log.exception("MCP server %r failed to start — skipping", cfg.name)
+    bridge = MCPBridge(clients, allowlists)
+    bridge._stack = stack  # own the subprocesses' lifetime
+    await bridge.load_tools()
+    return bridge
