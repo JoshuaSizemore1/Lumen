@@ -15,6 +15,8 @@ from lumen.daemon.config import MCPServerConfig
 
 log = logging.getLogger(__name__)
 
+MCP_CONNECT_TIMEOUT_S = 30.0
+
 
 class ToolCallError(Exception):
     """A tool call could not be completed (unknown tool, or the server flagged an error)."""
@@ -140,18 +142,22 @@ class LazyBridge:
         self._close = asyncio.Event()
         self._owner: asyncio.Task | None = None
 
-    async def _own(self, ready: asyncio.Event, result: dict) -> None:
+    async def _own(self, ready: asyncio.Event, close: asyncio.Event, result: dict) -> None:
         """Owner task: enters the MCP contexts, holds them, exits them itself."""
         try:
-            bridge = await connect_servers(self._servers)
-        except Exception as e:
-            result["error"] = e
+            try:
+                bridge = await connect_servers(self._servers)
+            except Exception as e:
+                result["error"] = e
+                return
+            result["bridge"] = bridge
+        finally:
             ready.set()
-            return
-        result["bridge"] = bridge
-        ready.set()
-        await self._close.wait()
-        await bridge.aclose()
+        await close.wait()
+        try:
+            await bridge.aclose()
+        except Exception:
+            log.exception("MCP teardown failed — subprocesses die with the daemon")
 
     async def ensure_started(self) -> None:
         if self._bridge is not None:
@@ -161,11 +167,16 @@ class LazyBridge:
                 ready = asyncio.Event()
                 result: dict = {}
                 self._close = asyncio.Event()
-                self._owner = asyncio.create_task(self._own(ready, result))
-                await ready.wait()
-                if "error" in result:
+                self._owner = asyncio.create_task(self._own(ready, self._close, result))
+                try:
+                    await asyncio.wait_for(ready.wait(), MCP_CONNECT_TIMEOUT_S)
+                except TimeoutError:
+                    self._owner.cancel()
                     self._owner = None
-                    raise result["error"]
+                    raise ToolCallError("MCP servers took too long to start")
+                if "bridge" not in result:
+                    self._owner = None
+                    raise result.get("error") or ToolCallError("MCP servers failed to start")
                 self._bridge = result["bridge"]
 
     def ollama_tools(self) -> list[dict]:
@@ -175,9 +186,10 @@ class LazyBridge:
         return await self._bridge.call(name, arguments)
 
     async def aclose(self) -> None:
-        if self._owner is None:
-            return
-        self._close.set()
-        await self._owner
-        self._owner = None
-        self._bridge = None
+        async with self._lock:
+            if self._owner is None:
+                return
+            self._close.set()
+            await self._owner
+            self._owner = None
+            self._bridge = None

@@ -251,6 +251,46 @@ async def test_chat_empty_tools_falls_back_and_injects_todo_context():
     assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
 
 
+async def test_chat_bridge_start_failure_falls_back_to_plain_chat():
+    class BrokenBridge(FakeBridge):
+        async def ensure_started(self):
+            raise RuntimeError("npx exploded")
+
+    llm = FakeLLM()
+    out = await collect(Router(llm, FakeStore(), bridge=BrokenBridge(), model_router=FakeModelRouter()),
+                        "chat", {"message": "look up files"})
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_chat_transport_error_in_tool_call_fed_back():
+    class TransportFailBridge(FakeBridge):
+        async def call(self, name, args):
+            raise RuntimeError("BrokenResourceError: server died")
+
+    captured = {}
+
+    class ErrLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            yield {"tool_call": {"name": "list_directory", "arguments": {}}}
+            captured["text"] = await executor("list_directory", {})
+            yield {"content": "recovered"}
+
+    logrec = []
+
+    class FakeToolLog:
+        def write(self, tool, arguments, ok, result, duration_ms):
+            logrec.append((tool, ok))
+
+    out = await collect(Router(ErrLLM(), FakeStore(), bridge=TransportFailBridge(),
+                               model_router=FakeModelRouter(), tool_log=FakeToolLog()),
+                        "chat", {"message": "look up files"})
+    assert captured["text"].startswith("tool error:")
+    assert logrec == [("list_directory", False)]
+    assert out[-1] == {"done": True}
+
+
 async def test_model_router_choice_reaches_chat_with_tools():
     captured = {}
 

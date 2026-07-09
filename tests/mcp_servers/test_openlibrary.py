@@ -67,6 +67,13 @@ async def test_get_book_degrades_on_http_error():
     assert "look up" in (await _get(_client(handler), "/works/OL893415W")).lower()
 
 
+async def test_search_degrades_on_non_json_200():
+    def handler(request):
+        return httpx.Response(200, content=b"<html>maintenance</html>")
+
+    assert "look up" in (await _search(_client(handler), "dune", 5)).lower()
+
+
 async def test_get_book_dict_description():
     def handler(request):
         return httpx.Response(200, json={"title": "Dune",

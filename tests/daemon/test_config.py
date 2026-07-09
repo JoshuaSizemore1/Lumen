@@ -128,3 +128,17 @@ def test_mcp_server_without_tools_has_none_allowlist(tmp_path):
 def test_default_tool_log_path_honors_xdg_state(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     assert default_tool_log_path() == tmp_path / "lumen" / "tool-calls.jsonl"
+
+
+def test_mcp_server_missing_command_exits_friendly(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[mcp]\nenabled = true\n[[mcp.servers]]\nname = "fs"\n')
+    with pytest.raises(SystemExit, match="name and command"):
+        load_config(p)
+
+
+def test_mcp_nonpositive_max_iterations_exits(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[mcp]\nenabled = true\nmax_iterations = 0\n')
+    with pytest.raises(SystemExit, match="max_iterations"):
+        load_config(p)

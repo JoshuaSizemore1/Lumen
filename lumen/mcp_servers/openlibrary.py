@@ -18,7 +18,7 @@ async def _search(client: httpx.AsyncClient, query: str, limit: int) -> str:
                                         "fields": "title,author_name,first_publish_year,key,isbn"})
         resp.raise_for_status()
         docs = resp.json().get("docs", [])
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ValueError):
         return "Couldn't look up books right now (Open Library request failed)."
     if not docs:
         return f"No results for {query!r}."
@@ -46,7 +46,7 @@ async def _get(client: httpx.AsyncClient, olid_or_isbn: str) -> str:
         resp = await client.get(f"{path}.json")
         resp.raise_for_status()
         d = resp.json()
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ValueError):
         return "Couldn't look up that book (Open Library request failed)."
     desc = d.get("description")
     if isinstance(desc, dict):

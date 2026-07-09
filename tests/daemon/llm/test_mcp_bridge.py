@@ -164,3 +164,58 @@ async def test_lazy_bridge_closes_in_owner_task(monkeypatch):
     await lazy.aclose()           # from the "main" task, like daemon shutdown
     assert tasks["connect"] is tasks["close"]              # same owner task
     assert tasks["connect"] is not asyncio.current_task()  # not the caller
+
+
+async def test_lazy_bridge_aclose_survives_teardown_failure(monkeypatch):
+    from lumen.daemon.llm import mcp_bridge as mod
+
+    class ExplodingCloseBridge(MCPBridge):
+        async def aclose(self):
+            raise RuntimeError("anyio teardown burp")
+
+    async def fake_connect(servers):
+        b = ExplodingCloseBridge({}, {})
+        await b.load_tools()
+        return b
+
+    monkeypatch.setattr(mod, "connect_servers", fake_connect)
+    lazy = mod.LazyBridge([])
+    await lazy.ensure_started()
+    await lazy.aclose()          # must not raise — daemon shutdown stays clean
+    assert lazy.ollama_tools() == []
+
+
+async def test_lazy_bridge_connect_timeout_raises_friendly_error(monkeypatch):
+    import asyncio
+    from lumen.daemon.llm import mcp_bridge as mod
+
+    async def hung_connect(servers):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(mod, "connect_servers", hung_connect)
+    monkeypatch.setattr(mod, "MCP_CONNECT_TIMEOUT_S", 0.05)
+    lazy = mod.LazyBridge([])
+    with pytest.raises(ToolCallError):
+        await lazy.ensure_started()
+    await lazy.aclose()          # owner was cancelled; aclose is a clean no-op
+
+
+async def test_lazy_bridge_connect_failure_raises_and_allows_retry(monkeypatch):
+    from lumen.daemon.llm import mcp_bridge as mod
+    attempts = {"n": 0}
+
+    async def flaky_connect(servers):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("first connect fails")
+        b = MCPBridge({}, {})
+        await b.load_tools()
+        return b
+
+    monkeypatch.setattr(mod, "connect_servers", flaky_connect)
+    lazy = mod.LazyBridge([])
+    with pytest.raises(RuntimeError):
+        await lazy.ensure_started()
+    await lazy.ensure_started()   # retry succeeds
+    assert attempts["n"] == 2
+    await lazy.aclose()

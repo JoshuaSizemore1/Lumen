@@ -1,6 +1,7 @@
 """Request router: chat streaming, sleep, and todos.* one-shot CRUD.
 Tool-call vs direct-answer classification arrives with the MCP phase."""
 
+import logging
 import re
 import time
 from collections.abc import AsyncIterator
@@ -8,6 +9,8 @@ from datetime import date
 
 from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.mcp_bridge import ToolCallError
+
+log = logging.getLogger(__name__)
 
 TODO_HINT = re.compile(r"\b(?:todos?|tasks?|due|overdue)\b", re.IGNORECASE)
 
@@ -88,8 +91,12 @@ class Router:
             yield {"error": f"unknown request type: {type_}"}
 
     async def _chat_with_tools(self, message: str):
-        await self._bridge.ensure_started()
-        tools = self._bridge.ollama_tools()
+        try:
+            await self._bridge.ensure_started()
+            tools = self._bridge.ollama_tools()
+        except Exception:
+            log.exception("MCP bridge unavailable — answering without tools")
+            tools = []
         if not tools:                      # no servers came up → fall back to plain chat
             messages = []
             if TODO_HINT.search(message):
@@ -110,8 +117,10 @@ class Router:
             try:
                 text = await self._bridge.call(name, args)
                 ok = True
-            except ToolCallError as e:
+            except Exception as e:
                 text, ok = f"tool error: {e}", False
+                if not isinstance(e, ToolCallError):
+                    log.exception("tool call %r failed unexpectedly", name)
             if self._tool_log is not None:
                 self._tool_log.write(name, args, ok, text,
                                      int((time.monotonic() - start) * 1000))

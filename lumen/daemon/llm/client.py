@@ -2,7 +2,7 @@
 even if the service-level OLLAMA_KEEP_ALIVE override is lost. Never -1."""
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import httpx
 
@@ -84,7 +84,15 @@ class OllamaClient:
                 "service running? (systemctl --user status ollama)"
             ) from e
 
-    async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        executor: Callable[[str, dict], Awaitable[str]],
+        *,
+        model: str | None = None,
+        max_iterations: int = 4,
+    ) -> AsyncIterator[dict]:
         """Agentic loop: non-streamed turns detect tool_calls, execute them via
         `executor`, feed results back, and repeat until the model answers (or the cap)."""
         convo = list(messages)
@@ -100,6 +108,11 @@ class OllamaClient:
                 fn = call.get("function", {})
                 name = fn.get("name", "")
                 args = fn.get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = {}
                 yield {"tool_call": {"name": name, "arguments": args}}
                 result_text = await executor(name, args)
                 convo.append({"role": "tool", "content": result_text, "tool_name": name})

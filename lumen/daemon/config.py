@@ -83,20 +83,24 @@ def load_config(path: Path | None = None) -> Config:
         kwargs["db_path"] = Path(storage["db_path"]).expanduser()
     mcp_raw = data.get("mcp")
     if mcp_raw is not None:
-        servers = tuple(
-            MCPServerConfig(
+        servers = []
+        for s in mcp_raw.get("servers", []):
+            if "name" not in s or "command" not in s:
+                raise SystemExit("lumen: each [[mcp.servers]] entry needs name and command")
+            servers.append(MCPServerConfig(
                 name=s["name"],
                 command=s["command"],
                 args=tuple(s.get("args", [])),
                 tools=tuple(s["tools"]) if "tools" in s else None,
-            )
-            for s in mcp_raw.get("servers", [])
-        )
+            ))
+        servers = tuple(servers)
         mcp_kwargs = {"enabled": bool(mcp_raw.get("enabled", False)), "servers": servers}
         if "max_iterations" in mcp_raw:
             mcp_kwargs["max_iterations"] = int(mcp_raw["max_iterations"])
         if mcp_raw.get("log_path"):
             mcp_kwargs["log_path"] = Path(mcp_raw["log_path"]).expanduser()
+        if mcp_kwargs.get("max_iterations", 4) <= 0:
+            raise SystemExit("lumen: [mcp] max_iterations must be positive")
         kwargs["mcp"] = MCPConfig(**mcp_kwargs)
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:

@@ -14,7 +14,7 @@ class ToolLog:
     def write(self, tool: str, arguments: dict, ok: bool, result: str, duration_ms: int) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         record = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "tool": tool,
             "arguments": arguments,
             "ok": ok,

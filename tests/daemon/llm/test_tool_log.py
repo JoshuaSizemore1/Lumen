@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 from lumen.daemon.llm.tool_log import ToolLog
 
@@ -17,6 +18,7 @@ def test_write_appends_jsonl_line(tmp_path):
     assert first["result_excerpt"] == "a.txt\nb.txt"
     assert first["duration_ms"] == 12
     assert "ts" in first
+    assert datetime.fromisoformat(first["ts"]).tzinfo is not None
 
 
 def test_write_truncates_long_results(tmp_path):
