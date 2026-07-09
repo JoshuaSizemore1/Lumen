@@ -61,6 +61,50 @@ class OllamaClient:
                 "service running? (systemctl --user status ollama)"
             ) from e
 
+    async def _post_chat(self, messages: list[dict], tools: list[dict], model: str | None) -> dict:
+        body = {
+            "model": model or self.model,
+            "messages": messages,
+            "tools": tools,
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "think": self.think,
+        }
+        try:
+            resp = await self._http.post("/api/chat", json=body)
+            if resp.status_code == 404:
+                raise LLMUnavailable(
+                    f"model '{model or self.model}' not found — run: ollama pull {model or self.model}"
+                )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            raise LLMUnavailable(
+                f"Ollama request failed ({type(e).__name__}) at {self.base_url} — is the "
+                "service running? (systemctl --user status ollama)"
+            ) from e
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+        """Agentic loop: non-streamed turns detect tool_calls, execute them via
+        `executor`, feed results back, and repeat until the model answers (or the cap)."""
+        convo = list(messages)
+        for _ in range(max_iterations):
+            data = await self._post_chat(convo, tools, model)
+            msg = data.get("message", {})
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                yield {"content": msg.get("content", "")}
+                return
+            convo.append(msg)
+            for call in calls:
+                fn = call.get("function", {})
+                name = fn.get("name", "")
+                args = fn.get("arguments") or {}
+                yield {"tool_call": {"name": name, "arguments": args}}
+                result_text = await executor(name, args)
+                convo.append({"role": "tool", "content": result_text, "tool_name": name})
+        yield {"content": "", "capped": True}
+
     async def unload(self) -> None:
         """Evict the model from RAM now (the 'sleep' command)."""
         try:

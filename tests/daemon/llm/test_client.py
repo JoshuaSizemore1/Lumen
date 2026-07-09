@@ -95,3 +95,88 @@ async def test_unload_swallows_transport_errors():
     client = make_client(handler)
     await client.unload()  # must not raise
     await client.aclose()
+
+
+async def test_chat_with_tools_executes_then_answers():
+    turns = iter([
+        # turn 1: model asks for a tool
+        httpx.Response(200, json={"message": {"role": "assistant", "content": "",
+            "tool_calls": [{"function": {"name": "list_directory", "arguments": {"path": "/n"}}}]},
+            "done": True}),
+        # turn 2: model answers using the tool result
+        httpx.Response(200, json={"message": {"role": "assistant", "content": "You have a.txt and b.txt."},
+            "done": True}),
+    ])
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return next(turns)
+
+    executed = []
+
+    async def executor(name, args):
+        executed.append((name, args))
+        return "a.txt\nb.txt"
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "what files are in /n"}],
+        tools=[{"type": "function", "function": {"name": "list_directory"}}],
+        executor=executor)]
+    assert executed == [("list_directory", {"path": "/n"})]
+    assert {"tool_call": {"name": "list_directory", "arguments": {"path": "/n"}}} in events
+    assert events[-1] == {"content": "You have a.txt and b.txt."}
+    # tools attached and keep_alive still enforced on the tool turn
+    assert sent[0]["tools"][0]["function"]["name"] == "list_directory"
+    assert sent[0]["keep_alive"] == "10m"
+    assert sent[0]["stream"] is False
+    # tool result fed back as a role:tool message
+    assert any(m.get("role") == "tool" and m.get("content") == "a.txt\nb.txt"
+               for m in sent[1]["messages"])
+    await client.aclose()
+
+
+async def test_chat_with_tools_direct_answer_no_tool():
+    def handler(request):
+        return httpx.Response(200, json={"message": {"content": "42"}, "done": True})
+
+    async def executor(name, args):
+        raise AssertionError("should not be called")
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "2+2*20"}], tools=[], executor=executor)]
+    assert events == [{"content": "42"}]
+    await client.aclose()
+
+
+async def test_chat_with_tools_respects_iteration_cap():
+    def handler(request):  # always asks for another tool → would loop forever
+        return httpx.Response(200, json={"message": {"content": "",
+            "tool_calls": [{"function": {"name": "t", "arguments": {}}}]}, "done": True})
+
+    async def executor(name, args):
+        return "again"
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "x"}], tools=[{"type": "function", "function": {"name": "t"}}],
+        executor=executor, max_iterations=2)]
+    assert events[-1] == {"content": "", "capped": True}
+    assert sum(1 for e in events if "tool_call" in e) == 2
+    await client.aclose()
+
+
+async def test_chat_with_tools_unreachable_raises():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    async def executor(name, args):
+        return ""
+
+    client = make_client(handler)
+    with pytest.raises(LLMUnavailable):
+        async for _ in client.chat_with_tools([{"role": "user", "content": "hi"}], [], executor):
+            pass
+    await client.aclose()
