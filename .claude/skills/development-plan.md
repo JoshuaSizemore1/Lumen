@@ -15,9 +15,10 @@ Before touching Gmail/Calendar, prove the MCP bridge works against something low
 **Success**: the LLM calls a read-only MCP tool and returns a result that's visibly grounded in the actual tool output (not something it could have hallucinated) — you should be able to verify this by checking the returned info against the tool call log.
 **Verified**: live end-to-end against real Ollama (`qwen3:4b-instruct`) — filesystem ("what files are in my notes folder?" → `list_directory`, named the actual files) and Open Library ("who wrote Dune..." → `search_books`, correctly answered Frank Herbert/1965) both produced a `tool_used` event and a matching `tool-calls.jsonl` line. See `mcp-integration.md` for the bridge decision and `llm-serving.md` for model behavior.
 
-## Phase 4 — Book catalog + recommendations
+## Phase 4 — Book catalog + recommendations — DONE (2026-07-10)
 Schema, add-book UI, and the recommendation flow using the now-proven MCP pattern.
 **Success**: log a handful of real books, ask for a recommendation, and every suggestion returned is a real, correctly-attributed book with a rationale tied to specific entries in your catalog — none invented.
+**Verified**: live end-to-end over the real socket against real Ollama (`qwen3:4b-instruct`) + Open Library — logged 3 real books via IPC, both entry points produced grounded sets (button: Ficciones/Driftglass/Invisible Planets; chat "what should I read next?": three Le Guin titles), every suggestion cross-checked present in `tool-calls.jsonl` results and absent from the catalog. The honest-failure path fired live when searches came up empty (cache preserved), which exposed and fixed a query-quality issue (see 2026-07-10 commit "Steer rec searches..."). Grounding is enforced mechanically in `daemon/llm/book_recs.py::validate_recs`, not by prompt. User still owes a visual pass of the Books screen against the mockup.
 
 ## Phase 4.5 — PC file access (filesystem MCP)
 Committed 2026-07-09 (user decision — permission model in `mcp-integration.md`). Filesystem-wide read tools, no sandbox root, no per-read prompting. Writes gated per file: first write to a path surfaces the standard confirmation; approving records the path in a plain-text grants file and that file never prompts again; declining denies once. File read/write only — no shell command execution.
