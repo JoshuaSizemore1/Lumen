@@ -26,6 +26,29 @@ async def test_search_handles_no_results():
     assert "no results" in (await _search(_client(handler), "zzzz", 5)).lower()
 
 
+async def test_search_clamps_out_of_range_limit():
+    seen = {}
+
+    def handler(request):
+        seen["limit"] = request.url.params["limit"]
+        return httpx.Response(200, json={"docs": [
+            {"title": "Dune", "author_name": ["Frank Herbert"],
+             "first_publish_year": 1965, "key": "/works/OL893415W"}]})
+
+    await _search(_client(handler), "dune", -1)      # model sent nonsense (seen live)
+    assert seen["limit"] == "1"
+    await _search(_client(handler), "dune", 500)
+    assert seen["limit"] == "20"
+
+
+async def test_search_no_results_hints_at_simpler_query():
+    def handler(request):
+        return httpx.Response(200, json={"docs": []})
+
+    out = await _search(_client(handler), "worldbuilding slow burn vibes", 5)
+    assert "author name" in out  # steers the model's next attempt
+
+
 async def test_search_degrades_on_http_error():
     def handler(request):
         raise httpx.ConnectError("down")

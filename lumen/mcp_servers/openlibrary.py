@@ -13,6 +13,10 @@ mcp = FastMCP("openlibrary")
 
 async def _search(client: httpx.AsyncClient, query: str, limit: int) -> str:
     try:
+        limit = max(1, min(int(limit), 20))  # models send nonsense like -1 → HTTP 422
+    except (TypeError, ValueError):
+        limit = 5
+    try:
         resp = await client.get("/search.json",
                                 params={"q": query, "limit": limit,
                                         "fields": "title,author_name,first_publish_year,key,isbn"})
@@ -21,7 +25,8 @@ async def _search(client: httpx.AsyncClient, query: str, limit: int) -> str:
     except (httpx.HTTPError, ValueError):
         return "Couldn't look up books right now (Open Library request failed)."
     if not docs:
-        return f"No results for {query!r}."
+        return (f"No results for {query!r}. Try a simpler query: "
+                "an author name, a book title, or a plain genre like 'science fiction'.")
     lines = []
     for d in docs[:limit]:
         authors = ", ".join(d.get("author_name", []) or ["unknown author"])
@@ -57,8 +62,10 @@ async def _get(client: httpx.AsyncClient, olid_or_isbn: str) -> str:
 
 @mcp.tool()
 async def search_books(query: str, limit: int = 5) -> str:
-    """Search Open Library for books by title/author/keyword. Returns real titles,
-    authors, publish years, and ISBNs — use this instead of guessing book facts."""
+    """Search Open Library for books. Query must be something a library catalog can
+    match: a title, an author name, or a short genre phrase like 'science fiction' —
+    not a pile of adjectives. Returns real titles, authors, publish years, and
+    ISBNs — use this instead of guessing book facts."""
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT) as client:
         return await _search(client, query, limit)
 

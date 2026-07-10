@@ -49,8 +49,11 @@ REC_TOOL_NAMES = frozenset({"search_books", "get_book"})
 
 SYSTEM_PROMPT = (
     "You help the user pick their next book. Use ONLY the search_books/get_book "
-    "tools to find candidates — never answer from memory. Search for themes, "
-    "authors, or genres the log shows the user enjoys (weight highly rated books). "
+    "tools to find candidates — never answer from memory. "
+    "Search with queries a library catalog can match: an author's name from the "
+    "user's log (e.g. 'Ursula K. Le Guin'), a plain genre ('science fiction'), or "
+    "a specific title — a few words, never the user's notes verbatim. If a search "
+    "returns no results, retry with a simpler, broader query. "
     "Never suggest a book already in their log.\n\n"
     "After searching, respond ONLY with up to 3 lines, one per suggestion, exactly:\n"
     "Title | Author | one short reason tied to specific books in the user's log\n"
