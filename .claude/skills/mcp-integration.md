@@ -27,3 +27,12 @@ Tool-calling reliability scales with model size. As of 2026, community consensus
 
 ## Safety
 MCP doesn't change the write-confirmation rule already in CLAUDE.md — any tool call that sends, creates, deletes, or modifies still surfaces a confirmation in the UI before executing, regardless of which MCP server it's routed through.
+
+One decided exception, scoped to the filesystem server (below): a per-file write grant, once given, persists — that file no longer prompts.
+
+## Filesystem server permission model (decided 2026-07-09)
+User decision for PC file access (scheduled as Phase 4.5 in `development-plan.md`):
+- **Reads: unrestricted.** Expose the filesystem read tools over everything the user account can read — no sandbox root, no per-read prompting. Known accepted trade-off: this includes sensitive files (e.g. `.env` files, keys); the user accepted filesystem-wide read explicitly.
+- **Writes: per-file persistent grants.** The stock filesystem server has no per-file gating, so enforcement lives in the daemon (the `MCPBridge` dispatch path, same seam as the existing write-confirmation flow): when the model calls a write-capable tool on a path not yet granted, surface the standard confirmation dialog. Approve → append the path to a plain-text grants file (XDG data dir); that exact file is writable without prompting for good. Decline → deny that one call, nothing stored, asks again next time. Revoking = deleting the line from the grants file (editable-not-black-box principle).
+- Shell command execution is NOT part of this — file read/write only.
+- Model routing: filesystem write tasks route to the escalation model per the size reality check above.

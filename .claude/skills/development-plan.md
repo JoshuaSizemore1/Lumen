@@ -19,6 +19,10 @@ Before touching Gmail/Calendar, prove the MCP bridge works against something low
 Schema, add-book UI, and the recommendation flow using the now-proven MCP pattern.
 **Success**: log a handful of real books, ask for a recommendation, and every suggestion returned is a real, correctly-attributed book with a rationale tied to specific entries in your catalog — none invented.
 
+## Phase 4.5 — PC file access (filesystem MCP)
+Committed 2026-07-09 (user decision — permission model in `mcp-integration.md`). Filesystem-wide read tools, no sandbox root, no per-read prompting. Writes gated per file: first write to a path surfaces the standard confirmation; approving records the path in a plain-text grants file and that file never prompts again; declining denies once. File read/write only — no shell command execution.
+**Success**: "find that PDF I downloaded" answers from real tool calls; a write to an ungranted file always prompts; after one approval, a second write to the same file proceeds without a prompt; deleting the grants-file line restores prompting.
+
 ## Phase 5 — Calendar (read, then write)
 Google OAuth + calendar MCP server. Read-only first: dashboard view, "what's on my calendar," meeting prep. Then add write (event creation) behind the confirmation flow.
 **Success (read)**: dashboard accurately shows today's real events. **Success (write)**: proposing an event via chat shows a confirmation dialog with correct details, and nothing gets created without you explicitly confirming.
