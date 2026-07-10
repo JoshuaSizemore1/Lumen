@@ -51,7 +51,7 @@ Read the relevant skill in `.claude/skills/` before touching that subsystem:
 - `writing-style.md` — derive-once/apply-often approach to writing in your own style
 - `project-scope.md` — full scope: what Lumen is and is not, in/out of scope, discussed-but-not-committed ideas
 
-See also `development-plan.md` (project root) for build order and success criteria per phase.
+See also `.claude/skills/development-plan.md` for build order and success criteria per phase.
 
 ## Dev protocol
 Use your existing Development Protocol (researcher → architect → implementer → tester → code-reviewer) for new features, and Debugging Protocol for bugs. If reusing the versions from Manabi/AgentForge, drop them in here — this file intentionally leaves that section for you to paste in rather than guessing at your exact wording.

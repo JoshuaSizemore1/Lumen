@@ -4,7 +4,8 @@
 MCP (Model Context Protocol) standardizes how an LLM discovers and calls external tools. Rather than writing bespoke Gmail/Calendar API wrappers, the daemon connects to MCP servers that already expose these as tools, and the LLM calls them directly through the router.
 
 ## Servers to use
-- **Gmail + Calendar**: `mcp-google-workspace` (community, runs locally via `npx`, single OAuth setup covers both) is the simplest self-hosted path. Google's official remote servers (`gmailmcp.googleapis.com`, `calendarmcp.googleapis.com`) are the alternative if a full Google Cloud Console OAuth consent-screen setup is preferred — more enterprise-flavored than a single-user app needs, but an option.
+- **Calendar (decided 2026-07-10, Phase 5)**: custom in-repo `lumen/mcp_servers/gcal.py`, NOT the community `mcp-google-workspace` this file previously defaulted to. Reason: the bulk-sync constraint already forces the poller onto the Google API client directly, so a community server would add a second OAuth stack, a second consent prompt, and coupling to its token-file format — the thin custom server shares `daemon/connectors/google_auth.py` (one client, one token) and keeps the write surface explicit. Phase 6 Gmail should extend the same pattern (same auth module; a `lumen/mcp_servers/gmail.py` if the LLM needs live mail tools).
+- ~~**Gmail + Calendar**: `mcp-google-workspace`~~ (superseded by the above; Google's official remote servers remain a fallback if a custom server ever becomes untenable).
 - **Research/lookup**: Brave Search MCP server (requires a free-tier API key) for "look this up" queries. A DuckDuckGo MCP server is a no-signup alternative if that's preferred.
 - **Books lookup**: Open Library API (no key required) for grounding book recommendations — see `book-catalog.md`. Wrap it as a thin custom MCP server to keep it consistent with the rest of the integration pattern.
 
@@ -27,6 +28,8 @@ Tool-calling reliability scales with model size. As of 2026, community consensus
 
 ## Safety
 MCP doesn't change the write-confirmation rule already in CLAUDE.md — any tool call that sends, creates, deletes, or modifies still surfaces a confirmation in the UI before executing, regardless of which MCP server it's routed through.
+
+**Enforcement convention (Phase 5)**: write-capable tool names live in `router.WRITE_TOOLS` and are filtered out of the tool list the generic chat loop offers the model — the model can never invoke a write tool directly. Writes execute only through a daemon-side gated path (`Router._gated_create` today) after `ConfirmBroker` (`daemon/confirm.py`) gets an explicit approval over IPC; timeout (120s) and UI disconnect deny. Phase 4.5's per-file grants slot into the same seam: check the grants file before `broker` — granted paths skip the dialog, everything else goes through it.
 
 One decided exception, scoped to the filesystem server (below): a per-file write grant, once given, persists — that file no longer prompts.
 

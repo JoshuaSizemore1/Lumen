@@ -791,3 +791,32 @@ async def test_generic_tool_loop_never_offers_write_tools():
     names = [t["function"]["name"] for t in seen["tools"]]
     assert "create_event" not in names and "gcal__create_event" not in names
     assert "list_events" in names
+
+
+async def test_create_chat_tool_side_failure_reports_not_created():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    bridge = FakeBridge(result="Google Calendar isn't connected yet — run auth.")
+    cal = SyncingFakeCal()
+    router = create_router(bridge=bridge, cal=cal, broker=broker)
+    from datetime import datetime, timedelta
+    start = (datetime.now().astimezone() + timedelta(days=1)).replace(
+        hour=16, minute=30, second=0, microsecond=0)
+    proposal = {"title": "X", "start": start.isoformat(),
+                "end": (start + timedelta(hours=1)).isoformat()}
+    events = []
+
+    async def consume():
+        async for ev in router.handle("calendar.create", {"proposal": proposal}):
+            events.append(ev)
+
+    task = _aio.ensure_future(consume())
+    for _ in range(200):
+        await _aio.sleep(0)
+        req = next((e for e in events if "confirm_request" in e), None)
+        if req is not None:
+            broker.resolve(req["confirm_id"], True)
+            break
+    await _aio.wait_for(task, timeout=2)
+    assert events[-1]["result"]["created"] is False
+    assert cal.synced == 0            # nothing created -> no eager re-sync

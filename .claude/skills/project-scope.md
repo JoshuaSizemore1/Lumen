@@ -48,4 +48,4 @@ These came up as brainstorm ideas, but only the book catalog was actually built 
 - Daily "one thing" learning prompt
 
 ## Reference
-See `.claude/skills/` for implementation detail per subsystem, and `development-plan.md` (project root) for build order and success criteria.
+See `.claude/skills/` for implementation detail per subsystem, and `.claude/skills/development-plan.md` for build order and success criteria.

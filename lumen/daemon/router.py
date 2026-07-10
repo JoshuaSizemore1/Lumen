@@ -1,6 +1,7 @@
-"""Request router: chat streaming (plain, tool-augmented, and book-rec paths),
-sleep, and todos.*/books.* one-shot CRUD. Tool-call vs direct-answer
-classification is the regex hints below — cheap heuristics, no LLM pre-pass."""
+"""Request router: chat streaming (plain, tool-augmented, book-rec, and
+event-creation paths), sleep, todos.*/books.*/calendar.* one-shots, and
+confirm.response resolution. Tool-call vs direct-answer classification is the
+regex hints below — cheap heuristics, no LLM pre-pass."""
 
 import logging
 import re
@@ -324,6 +325,9 @@ class Router:
         if self._tool_log is not None:
             self._tool_log.write("create_event", args, ok, text,
                                  int((time.monotonic() - start_t) * 1000))
+        # our gcal server degrades gracefully with message strings; only a
+        # "Created:" reply means an event actually exists now
+        ok = ok and text.startswith("Created:")
         if ok and hasattr(self._calendar, "sync_once"):
             try:
                 await self._calendar.sync_once()   # show the new event promptly
