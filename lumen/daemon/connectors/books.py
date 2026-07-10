@@ -53,6 +53,22 @@ class BookStore:
             lines.append(f"- {b['title']}{author}{rating}{notes}")
         return "\n".join(lines)
 
+    def save_recs(self, recs: list[dict]) -> None:
+        """Replace the cached suggestion set (only the latest set is kept)."""
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._conn:
+            self._conn.execute("DELETE FROM book_recs")
+            self._conn.executemany(
+                "INSERT INTO book_recs (title, author, rationale, generated_at) "
+                "VALUES (?, ?, ?, ?)",
+                [(r["title"], r.get("author"), r.get("rationale"), now) for r in recs])
+
+    def latest_recs(self) -> dict:
+        rows = self._conn.execute("SELECT * FROM book_recs ORDER BY id").fetchall()
+        return {"recs": [{"title": r["title"], "author": r["author"],
+                          "rationale": r["rationale"]} for r in rows],
+                "generated_at": rows[0]["generated_at"] if rows else None}
+
     @staticmethod
     def _to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)

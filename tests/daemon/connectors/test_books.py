@@ -66,3 +66,17 @@ def test_catalog_context_lists_entries(tmp_path):
 
 def test_catalog_context_empty_marker(tmp_path):
     assert "empty" in make_store(tmp_path).catalog_context()
+
+
+def test_save_recs_replaces_set_and_latest_returns_it(tmp_path):
+    store = make_store(tmp_path)
+    store.save_recs([{"title": "Solaris", "author": "Stanislaw Lem", "rationale": "mood"}])
+    store.save_recs([{"title": "A Fire Upon the Deep", "author": None, "rationale": "scope"}])
+    latest = store.latest_recs()
+    assert latest["recs"] == [
+        {"title": "A Fire Upon the Deep", "author": None, "rationale": "scope"}]
+    assert latest["generated_at"]
+
+
+def test_latest_recs_empty_when_never_generated(tmp_path):
+    assert make_store(tmp_path).latest_recs() == {"recs": [], "generated_at": None}
