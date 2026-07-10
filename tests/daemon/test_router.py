@@ -291,6 +291,50 @@ async def test_chat_transport_error_in_tool_call_fed_back():
     assert out[-1] == {"done": True}
 
 
+class FakeBookStore:
+    def __init__(self, context="The user's reading log is empty."):
+        self._context = context
+
+    def catalog_context(self):
+        return self._context
+
+
+def test_book_hint_matches_reading_vocab():
+    from lumen.daemon.router import BOOK_HINT
+    assert BOOK_HINT.search("what books have I read?")
+    assert BOOK_HINT.search("what did I rate Piranesi")
+    assert BOOK_HINT.search("have I read Dune")
+    assert not BOOK_HINT.search("what's due tomorrow")
+
+
+async def test_chat_book_question_injects_catalog_context():
+    llm = FakeLLM()
+    books = FakeBookStore("The user's reading log (books they have read):\n- Piranesi")
+    await collect(Router(llm, FakeStore(), books), "chat",
+                  {"message": "what did I rate Piranesi"})
+    assert llm.messages[0]["role"] == "system"
+    assert "- Piranesi" in llm.messages[0]["content"]
+
+
+async def test_chat_todo_and_book_hints_share_one_system_message():
+    llm = FakeLLM()
+    store = FakeStore(rows=[{"id": 1, "text": "call dentist", "due_date": None,
+                             "completed": False, "created_at": "2026-07-09T09:00:00",
+                             "source": "manual", "tags": []}])
+    await collect(Router(llm, store, FakeBookStore("READING-LOG-MARKER")), "chat",
+                  {"message": "any tasks due? also have I read Dune"})
+    systems = [m for m in llm.messages if m["role"] == "system"]
+    assert len(systems) == 1
+    assert "call dentist" in systems[0]["content"]
+    assert "READING-LOG-MARKER" in systems[0]["content"]
+
+
+async def test_chat_without_books_store_never_injects():
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "chat", {"message": "have I read Dune"})
+    assert llm.messages == [{"role": "user", "content": "have I read Dune"}]
+
+
 async def test_model_router_choice_reaches_chat_with_tools():
     captured = {}
 

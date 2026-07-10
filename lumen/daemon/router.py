@@ -20,6 +20,8 @@ TOOL_HINT = re.compile(
     re.IGNORECASE,
 )
 
+BOOK_HINT = re.compile(r"\b(books?|novels?|reading|read|rated?|author)\b", re.IGNORECASE)
+
 
 def todo_context(todos: list[dict], today: date) -> str:
     """System-message context: today's date + one line per open todo, or an
@@ -37,14 +39,27 @@ def todo_context(todos: list[dict], today: date) -> str:
 
 
 class Router:
-    def __init__(self, llm, todos, *, bridge=None, model_router=None, tool_log=None,
-                 max_iterations=4):
+    def __init__(self, llm, todos, books=None, *, bridge=None, model_router=None,
+                 tool_log=None, max_iterations=4):
         self._llm = llm
         self._todos = todos
+        self._books = books
         self._bridge = bridge
         self._model_router = model_router
         self._tool_log = tool_log
         self._max_iterations = max_iterations
+
+    def _base_messages(self, message: str) -> list[dict]:
+        """Shared system-context + user message for every chat path."""
+        context = []
+        if TODO_HINT.search(message):
+            context.append(todo_context(self._todos.open_todos(), date.today()))
+        if self._books is not None and BOOK_HINT.search(message):
+            context.append(self._books.catalog_context())
+        messages = ([{"role": "system", "content": "\n\n".join(context)}]
+                    if context else [])
+        messages.append({"role": "user", "content": message})
+        return messages
 
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
@@ -53,12 +68,7 @@ class Router:
                 async for ev in self._chat_with_tools(message):
                     yield ev
                 return
-            messages = []
-            if TODO_HINT.search(message):
-                messages.append({"role": "system",
-                                 "content": todo_context(self._todos.open_todos(),
-                                                         date.today())})
-            messages.append({"role": "user", "content": message})
+            messages = self._base_messages(message)
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
@@ -98,11 +108,7 @@ class Router:
             log.exception("MCP bridge unavailable — answering without tools")
             tools = []
         if not tools:                      # no servers came up → fall back to plain chat
-            messages = []
-            if TODO_HINT.search(message):
-                messages.append({"role": "system",
-                                 "content": todo_context(self._todos.open_todos(), date.today())})
-            messages.append({"role": "user", "content": message})
+            messages = self._base_messages(message)
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
@@ -126,11 +132,7 @@ class Router:
                                      int((time.monotonic() - start) * 1000))
             return text
 
-        messages = []
-        if TODO_HINT.search(message):
-            messages.append({"role": "system",
-                             "content": todo_context(self._todos.open_todos(), date.today())})
-        messages.append({"role": "user", "content": message})
+        messages = self._base_messages(message)
         model = self._model_router.pick_model(message, needs_tools=True) \
             if self._model_router else None
         try:
