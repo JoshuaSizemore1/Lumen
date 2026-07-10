@@ -24,3 +24,19 @@ def test_wal_mode_and_row_factory(tmp_path):
     row = conn.execute("SELECT * FROM todos").fetchone()
     assert row["text"] == "x" and row["tags"] == "[]" and row["source"] == "manual"
     conn.close()
+
+
+def test_books_tables_exist_with_defaults(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO books (title, created_at) VALUES ('Dune', '2026-07-09T10:00:00')")
+    conn.execute(
+        "INSERT INTO book_recs (title, author, rationale, generated_at) "
+        "VALUES ('Solaris', 'Stanislaw Lem', 'because', '2026-07-09T10:00:00')")
+    conn.commit()
+    book = conn.execute("SELECT * FROM books").fetchone()
+    assert book["title"] == "Dune" and book["tags"] == "[]"
+    assert book["author"] is None and book["rating"] is None
+    rec = conn.execute("SELECT * FROM book_recs").fetchone()
+    assert rec["author"] == "Stanislaw Lem" and rec["generated_at"]
+    conn.close()
