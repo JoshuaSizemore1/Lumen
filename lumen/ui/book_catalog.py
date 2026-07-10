@@ -201,17 +201,63 @@ class BooksScreen(QWidget):
         self._list_area.deleteLater()
         self._list_area = fresh
 
-    # ----- recs half (behavior lands with the recs-panel task) -----
+    # ----- recs half -----
 
     def _suggest(self) -> None:
-        pass
+        self.suggest_btn.setEnabled(False)
+        self.suggest_btn.setText("generating…")
+        self._client.request("books.recommend", {}, self._on_recommended)
 
     def _reset_suggest(self) -> None:
-        pass
+        self.suggest_btn.setEnabled(True)
+        self.suggest_btn.setText("Suggest next")
+
+    def _on_recommended(self, result: dict) -> None:
+        self._reset_suggest()
+        self._set_recs(result)
+
+    def _prefill(self, rec: dict) -> None:
+        self.title_field.setText(rec["title"])
+        self.author_field.setText(rec["author"] or "")
+        self.notes_field.setFocus()
 
     def _set_recs(self, result: dict) -> None:
         self._recs = result
         self._rebuild_recs()
 
     def _rebuild_recs(self) -> None:
-        pass
+        fresh = QWidget()
+        holder = QVBoxLayout(fresh)
+        holder.setContentsMargins(0, 0, 0, 0)
+        box = QFrame()
+        box.setStyleSheet(
+            "background: #16141f; border: 1px dashed #3b3155; border-radius: 9px;")
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(14, 9, 14, 12)
+        eye = label("◆ SUGGESTED — NOT YET READ", "eyebrow")
+        eye.setStyleSheet("color: #6b5d8f;")
+        bv.addWidget(eye)
+        if not self._recs["recs"]:
+            bv.addWidget(label("no suggestions yet — press Suggest next", "dim"))
+        for r in self._recs["recs"]:
+            row1 = QHBoxLayout()
+            t_lab = label(r["title"], "secondary")
+            t_lab.setStyleSheet("color: #c9b8f0;")
+            row1.addWidget(t_lab)
+            if r["author"]:
+                row1.addWidget(label(r["author"], "faint"))
+            row1.addStretch()
+            bv.addLayout(row1)
+            why = label(f"↳ {r['rationale']}", "sans", wrap=True)
+            why.setStyleSheet(f"color: {theme.BOOK_DIM}; font-size: 12px;")
+            bv.addWidget(why)
+            add = button("+ add to log", "ghost")
+            add.clicked.connect(lambda _, rec=r: self._prefill(rec))
+            bv.addWidget(add)
+        if self._recs["generated_at"]:
+            stamp = self._recs["generated_at"][:16].replace("T", " ")
+            bv.addWidget(label(f"generated {stamp} · refresh with Suggest next", "faint"))
+        holder.addWidget(box)
+        self._recs_layout.replaceWidget(self._recs_area, fresh)
+        self._recs_area.deleteLater()
+        self._recs_area = fresh

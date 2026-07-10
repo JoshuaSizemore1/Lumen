@@ -94,3 +94,46 @@ def test_star_rating_click_sets_and_toggle_clears(qtbot):
     assert stars.value() == 3
     stars._clicked(3)
     assert stars.value() is None
+
+
+RECS = {"recs": [{"title": "Solaris", "author": "Stanislaw Lem",
+                  "rationale": "uncanny like Piranesi"}],
+        "generated_at": "2026-07-09T12:30:00"}
+
+
+def test_cached_recs_render_with_generated_stamp(qtbot):
+    screen, _ = make_screen(qtbot, recs=RECS)
+    t = texts(screen)
+    assert "Solaris" in t and "uncanny like Piranesi" in t
+    assert "SUGGESTED — NOT YET READ" in t
+    assert "generated" in t
+
+
+def test_no_recs_yet_shows_hint(qtbot):
+    screen, _ = make_screen(qtbot)
+    assert "press Suggest next" in texts(screen)
+
+
+def test_suggest_disables_button_until_result(qtbot):
+    screen, client = make_screen(qtbot)
+    screen.suggest_btn.click()
+    assert not screen.suggest_btn.isEnabled()
+    assert ("books.recommend", {}) in client.requests
+    client.held["books.recommend"](RECS)      # daemon answers
+    assert screen.suggest_btn.isEnabled()
+    assert "Solaris" in texts(screen)
+
+
+def test_error_during_suggest_reenables_button(qtbot):
+    screen, client = make_screen(qtbot)
+    screen.suggest_btn.click()
+    assert not screen.suggest_btn.isEnabled()
+    client.error.emit("couldn't get grounded suggestions right now — try again")
+    assert screen.suggest_btn.isEnabled()
+
+
+def test_add_to_log_prefills_form(qtbot):
+    screen, _ = make_screen(qtbot, recs=RECS)
+    screen._prefill(RECS["recs"][0])
+    assert screen.title_field.text() == "Solaris"
+    assert screen.author_field.text() == "Stanislaw Lem"
