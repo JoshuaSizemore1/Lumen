@@ -31,6 +31,25 @@ CREATE TABLE IF NOT EXISTS book_recs (
     rationale TEXT,
     generated_at TEXT NOT NULL              -- ISO timestamp, same for the whole set
 );
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT NOT NULL,                       -- Google event/instance id
+    calendar_id TEXT NOT NULL,
+    calendar_name TEXT,
+    color TEXT,                             -- calendar-level color, hex
+    title TEXT,
+    start_at TEXT NOT NULL,                 -- RFC3339 as given; ISO date if all-day
+    end_at TEXT,
+    all_day INTEGER NOT NULL DEFAULT 0,
+    location TEXT,
+    description TEXT,
+    attendees TEXT NOT NULL DEFAULT '[]',   -- JSON [{email, name, self}]
+    status TEXT,                            -- confirmed | tentative
+    PRIMARY KEY (calendar_id, id)
+);
+CREATE TABLE IF NOT EXISTS sync_state (     -- KV; email sync shares it in Phase 6
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
