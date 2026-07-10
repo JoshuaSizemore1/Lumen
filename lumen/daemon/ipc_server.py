@@ -14,6 +14,7 @@ class IPCServer:
         self._path = Path(socket_path)
         self._router = router
         self._server: asyncio.Server | None = None
+        self._tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -24,10 +25,17 @@ class IPCServer:
     async def stop(self) -> None:
         if self._server:
             self._server.close()
+            # A persistent client (the UI) parks its handler in readline() forever;
+            # wait_closed() would wait on it, so cancel in-flight handlers first.
+            for task in list(self._tasks):
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
             await self._server.wait_closed()
         self._path.unlink(missing_ok=True)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        self._tasks.add(task)
         try:
             while raw := await reader.readline():
                 try:
@@ -52,6 +60,7 @@ class IPCServer:
         except (ConnectionResetError, BrokenPipeError):
             pass  # UI went away mid-stream; nothing to do
         finally:
+            self._tasks.discard(task)
             writer.close()
             try:
                 await writer.wait_closed()

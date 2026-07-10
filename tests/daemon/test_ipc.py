@@ -117,3 +117,15 @@ async def test_one_shot_result_line(server, tmp_path):
     assert msg == {"id": 9, "result": ["fake-row"]}
     writer.close()
     await writer.wait_closed()
+
+
+async def test_stop_completes_with_idle_persistent_connection(tmp_path):
+    srv = IPCServer(tmp_path / "d.sock", FakeRouter())
+    await srv.start()
+    reader, writer = await asyncio.open_unix_connection(str(tmp_path / "d.sock"))
+    # prove the handler is live, then sit idle with the connection open — like the UI
+    writer.write(json.dumps({"id": 1, "type": "todos.list", "payload": {}}).encode() + b"\n")
+    await writer.drain()
+    await asyncio.wait_for(reader.readline(), timeout=2)
+    await asyncio.wait_for(srv.stop(), timeout=2)   # pre-fix: hangs in wait_closed
+    writer.close()
