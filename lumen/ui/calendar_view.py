@@ -5,7 +5,8 @@ The + Event button is created here and wired in the Phase 5 write half."""
 import calendar as cal_mod
 from datetime import date, datetime
 
-from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout,
+                             QLineEdit, QVBoxLayout, QWidget)
 
 from lumen.ui import theme
 from lumen.ui.widgets import button, chip, label
@@ -25,6 +26,46 @@ def event_date(e: dict) -> str:
     if e["all_day"]:
         return e["start_at"][:10]
     return datetime.fromisoformat(e["start_at"]).astimezone().date().isoformat()
+
+
+class EventForm(QDialog):
+    """Minimal + Event form. The daemon validates the proposal and the standard
+    confirm dialog still gates the actual write — consistency beats shaving a
+    click. Times are free text; garbage comes back as an honest daemon error."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle("New event")
+        root = QVBoxLayout(self)
+        root.addWidget(label("New event", "h2"))
+        self.title_field = QLineEdit()
+        self.title_field.setPlaceholderText("Title")
+        self.date_field = QLineEdit(date.today().isoformat())
+        self.start_field = QLineEdit()
+        self.start_field.setPlaceholderText("start · 14:00")
+        self.end_field = QLineEdit()
+        self.end_field.setPlaceholderText("end · 15:00")
+        self.location_field = QLineEdit()
+        self.location_field.setPlaceholderText("Location (optional)")
+        for w in (self.title_field, self.date_field, self.start_field,
+                  self.end_field, self.location_field):
+            root.addWidget(w)
+        actions = QHBoxLayout()
+        cancel = button("Cancel", "ghost")
+        cancel.clicked.connect(self.reject)
+        create = button("Create…", "primary")
+        create.clicked.connect(self.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(create)
+        root.addLayout(actions)
+
+    def proposal(self) -> dict:
+        day = self.date_field.text().strip()
+        return {"title": self.title_field.text().strip(),
+                "start": f"{day}T{self.start_field.text().strip()}",
+                "end": f"{day}T{self.end_field.text().strip()}",
+                "location": self.location_field.text().strip() or None}
 
 
 class CalendarScreen(QWidget):
@@ -58,7 +99,7 @@ class CalendarScreen(QWidget):
         self._legend = QWidget()
         bar.addWidget(self._legend)
         self.add_event_btn = button("+ Event", "primary")
-        self.add_event_btn.setEnabled(False)   # wired in the write half
+        self.add_event_btn.clicked.connect(self._open_event_form)
         bar.addWidget(self.add_event_btn)
         root.addLayout(bar)
         self._bar = bar
@@ -105,6 +146,20 @@ class CalendarScreen(QWidget):
     def _on_error(self, msg: str) -> None:
         self.status.setText(msg)
         self.status.show()
+
+    def _open_event_form(self) -> None:
+        form = EventForm(self)
+        if form.exec() == QDialog.DialogCode.Accepted:
+            self._submit_event(form.proposal())
+
+    def _submit_event(self, proposal: dict) -> None:
+        self._client.request("calendar.create", {"proposal": proposal},
+                             self._on_created)
+
+    def _on_created(self, result: dict) -> None:
+        self.status.setText(result.get("message", ""))
+        self.status.show()
+        self._request()   # show the new event without waiting for the poller
 
     def _nav(self, delta: int) -> None:
         if delta == 0:

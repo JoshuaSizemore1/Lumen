@@ -120,9 +120,41 @@ def test_outside_window_note_when_month_exits_window(qtbot):
     assert "outside synced range" in texts(screen)
 
 
-def test_week_day_toggles_gone_and_event_button_present_but_inert(qtbot):
+def test_week_day_toggles_gone_and_event_button_present(qtbot):
     screen, _ = make_screen(qtbot)
     btn_texts = [b.text() for b in screen.findChildren(type(screen.add_event_btn))]
     assert not any(t in ("Week", "Day") for t in btn_texts)
     assert screen.add_event_btn.text() == "+ Event"
-    assert not screen.add_event_btn.isEnabled()   # wired in the write half
+    assert screen.add_event_btn.isEnabled()
+
+
+# ---- + Event form (write half) ----
+
+from lumen.ui.calendar_view import EventForm
+
+
+def test_event_form_builds_proposal(qtbot):
+    form = EventForm()
+    qtbot.addWidget(form)
+    form.title_field.setText("Focus block")
+    form.date_field.setText("2026-07-14")
+    form.start_field.setText("16:30")
+    form.end_field.setText("17:30")
+    assert form.proposal() == {"title": "Focus block",
+                               "start": "2026-07-14T16:30",
+                               "end": "2026-07-14T17:30", "location": None}
+
+
+def test_submit_event_sends_one_shot_and_result_refreshes(qtbot):
+    screen, client = make_screen(qtbot)
+    client.requests.clear()
+    screen._submit_event({"title": "Focus block", "start": "2026-07-14T16:30",
+                          "end": "2026-07-14T17:30", "location": None})
+    assert client.requests[0] == ("calendar.create",
+                                  {"proposal": {"title": "Focus block",
+                                                "start": "2026-07-14T16:30",
+                                                "end": "2026-07-14T17:30",
+                                                "location": None}})
+    screen._on_created({"created": True, "message": "Created: Focus block"})
+    assert "Created: Focus block" in screen.status.text()
+    assert any(t == "calendar.list" for t, _ in client.requests[1:])
