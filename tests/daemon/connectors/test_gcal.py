@@ -61,3 +61,120 @@ def test_last_sync_roundtrip(tmp_path):
     store.set_last_sync("2026-07-10T14:00:00")
     store.set_last_sync("2026-07-10T14:05:00")
     assert store.last_sync() == "2026-07-10T14:05:00"
+
+
+# ---- CalendarSync (fake service objects, no network) ----
+
+from types import SimpleNamespace
+
+from lumen.daemon.config import GoogleConfig, SyncConfig
+from lumen.daemon.connectors.gcal import CalendarSync
+
+
+class FakeExec:
+    def __init__(self, payload):
+        self._p = payload
+
+    def execute(self):
+        if isinstance(self._p, Exception):
+            raise self._p
+        return self._p
+
+
+class FakeEventsAPI:
+    def __init__(self, pages_by_cal):
+        self._pages = pages_by_cal
+        self.seen_kwargs = []
+
+    def list(self, calendarId, pageToken=None, **kw):
+        self.seen_kwargs.append({"calendarId": calendarId, "pageToken": pageToken, **kw})
+        pages = self._pages[calendarId]
+        return FakeExec(pages[0 if pageToken is None else int(pageToken)])
+
+
+class FakeService:
+    def __init__(self, cals, pages_by_cal):
+        self._cals = cals
+        self.events_api = FakeEventsAPI(pages_by_cal)
+
+    def calendarList(self):
+        return SimpleNamespace(list=lambda: FakeExec({"items": self._cals}))
+
+    def events(self):
+        return self.events_api
+
+
+CALS = [
+    {"id": "primary", "summary": "Personal", "backgroundColor": "#7986cb"},
+    {"id": "work@group", "summary": "Work", "backgroundColor": "#f6bf26"},
+    {"id": "spam", "summary": "Hidden one", "hidden": True},
+]
+
+TIMED = {"id": "t1", "summary": "Standup",
+         "start": {"dateTime": "2026-07-10T09:30:00+02:00"},
+         "end": {"dateTime": "2026-07-10T10:00:00+02:00"},
+         "status": "confirmed", "location": "Meet",
+         "attendees": [{"email": "p@x.com", "displayName": "Priya", "self": False}]}
+ALLDAY = {"id": "a1", "summary": "PTO",
+          "start": {"date": "2026-07-20"}, "end": {"date": "2026-07-21"},
+          "status": "confirmed"}
+
+
+def make_sync(tmp_path, service, connected=True):
+    store = make_store(tmp_path)
+    factory = (lambda: service) if connected else (lambda: None)
+    sync = CalendarSync(store, GoogleConfig(client_secret_path=tmp_path / "cs",
+                                            token_path=tmp_path / "tok"),
+                        SyncConfig(), service_factory=factory)
+    return store, sync
+
+
+async def test_sync_once_merges_calendars_skips_hidden_and_normalizes(tmp_path):
+    service = FakeService(CALS, {"primary": [{"items": [TIMED]}],
+                                 "work@group": [{"items": [ALLDAY]}]})
+    store, sync = make_sync(tmp_path, service)
+    assert await sync.sync_once() is True
+    rows = store.list_range("2026-01-01", "2026-12-31")
+    assert {r["id"] for r in rows} == {"t1", "a1"}
+    timed = next(r for r in rows if r["id"] == "t1")
+    assert timed["calendar_id"] == "primary" and timed["calendar_name"] == "Personal"
+    assert timed["color"] == "#7986cb" and timed["all_day"] is False
+    assert timed["start_at"] == "2026-07-10T09:30:00+02:00"
+    assert timed["attendees"] == [{"email": "p@x.com", "name": "Priya", "self": False}]
+    allday = next(r for r in rows if r["id"] == "a1")
+    assert allday["all_day"] is True and allday["start_at"] == "2026-07-20"
+    assert store.last_sync() is not None
+    # hidden calendar never queried
+    assert all(k["calendarId"] != "spam" for k in service.events_api.seen_kwargs)
+    # singleEvents so recurring events arrive expanded
+    assert all(k["singleEvents"] is True for k in service.events_api.seen_kwargs)
+
+
+async def test_sync_once_follows_pagination(tmp_path):
+    pages = {"primary": [{"items": [TIMED], "nextPageToken": "1"},
+                         {"items": [ALLDAY]}]}
+    service = FakeService([CALS[0]], pages)
+    store, sync = make_sync(tmp_path, service)
+    assert await sync.sync_once() is True
+    assert len(store.list_range("2026-01-01", "2026-12-31")) == 2
+
+
+async def test_sync_once_not_connected_is_a_quiet_no_op(tmp_path):
+    store, sync = make_sync(tmp_path, None, connected=False)
+    assert await sync.sync_once() is False
+    assert store.list_range("2026-01-01", "2026-12-31") == []
+    assert store.last_sync() is None
+
+
+async def test_sync_once_api_error_keeps_stale_cache(tmp_path):
+    good = FakeService([CALS[0]], {"primary": [{"items": [TIMED]}]})
+    store, sync = make_sync(tmp_path, good)
+    await sync.sync_once()
+    before = store.last_sync()
+    bad = FakeService([CALS[0]], {"primary": [RuntimeError("boom")]})
+    sync2 = CalendarSync(store, GoogleConfig(client_secret_path=tmp_path / "cs",
+                                             token_path=tmp_path / "tok"),
+                         SyncConfig(), service_factory=lambda: bad)
+    assert await sync2.sync_once() is False
+    assert [r["id"] for r in store.list_range("2026-01-01", "2026-12-31")] == ["t1"]
+    assert store.last_sync() == before

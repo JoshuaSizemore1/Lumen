@@ -8,6 +8,7 @@ import signal
 from lumen.daemon import db
 from lumen.daemon.config import load_config
 from lumen.daemon.connectors.books import BookStore
+from lumen.daemon.connectors.gcal import CalendarSync, EventStore
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
 from lumen.daemon.llm.client import OllamaClient
@@ -26,11 +27,14 @@ async def run() -> None:
     bridge = LazyBridge(list(cfg.mcp.servers)) if cfg.mcp.enabled else None
     model_router = ModelRouter(cfg.model)
     tool_log = ToolLog(cfg.mcp.log_path) if cfg.mcp.enabled else None
+    events = EventStore(conn)
+    calendar = CalendarSync(events, cfg.google, cfg.sync)
     router = Router(llm, TodoStore(conn), BookStore(conn), bridge=bridge,
                     model_router=model_router, tool_log=tool_log,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()
+    poll_task = asyncio.create_task(calendar.poll_forever())
     log.info("listening on %s (model=%s, keep_alive=%s, db=%s)",
              cfg.socket_path, cfg.model, cfg.keep_alive, cfg.db_path)
 
@@ -41,6 +45,8 @@ async def run() -> None:
     await stop.wait()
 
     log.info("shutting down")
+    poll_task.cancel()
+    await asyncio.gather(poll_task, return_exceptions=True)
     await server.stop()
     await llm.aclose()
     if bridge is not None:
