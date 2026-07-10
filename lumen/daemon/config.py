@@ -25,6 +25,27 @@ def default_tool_log_path() -> Path:
     return root / "lumen" / "tool-calls.jsonl"
 
 
+def default_google_dir() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "google"
+
+
+@dataclass(frozen=True)
+class GoogleConfig:
+    client_secret_path: Path = field(
+        default_factory=lambda: default_google_dir() / "client_secret.json")
+    token_path: Path = field(
+        default_factory=lambda: default_google_dir() / "token.json")
+
+
+@dataclass(frozen=True)
+class SyncConfig:
+    calendar_poll_minutes: int = 5
+    calendar_window_past_days: int = 30
+    calendar_window_future_days: int = 60
+
+
 @dataclass(frozen=True)
 class MCPServerConfig:
     name: str
@@ -50,6 +71,8 @@ class Config:
     socket_path: Path = field(default_factory=default_socket_path)
     db_path: Path = field(default_factory=default_db_path)
     mcp: "MCPConfig" = field(default_factory=lambda: MCPConfig())
+    google: "GoogleConfig" = field(default_factory=lambda: GoogleConfig())
+    sync: "SyncConfig" = field(default_factory=lambda: SyncConfig())
 
     @property
     def keep_alive(self) -> str:
@@ -102,6 +125,28 @@ def load_config(path: Path | None = None) -> Config:
         if mcp_kwargs.get("max_iterations", 4) <= 0:
             raise SystemExit("lumen: [mcp] max_iterations must be positive")
         kwargs["mcp"] = MCPConfig(**mcp_kwargs)
+    google_raw = data.get("google")
+    if google_raw is not None:
+        g_kwargs = {}
+        if "client_secret_path" in google_raw:
+            g_kwargs["client_secret_path"] = Path(google_raw["client_secret_path"]).expanduser()
+        if "token_path" in google_raw:
+            g_kwargs["token_path"] = Path(google_raw["token_path"]).expanduser()
+        kwargs["google"] = GoogleConfig(**g_kwargs)
+    sync_raw = data.get("sync")
+    if sync_raw is not None:
+        s_kwargs = {k: int(sync_raw[k]) for k in
+                    ("calendar_poll_minutes", "calendar_window_past_days",
+                     "calendar_window_future_days") if k in sync_raw}
+        sync_cfg = SyncConfig(**s_kwargs)
+        if sync_cfg.calendar_poll_minutes < 5:
+            raise SystemExit(
+                f"lumen: calendar_poll_minutes must be at least 5 "
+                f"(got {sync_cfg.calendar_poll_minutes}) — no tight polling loops")
+        if (sync_cfg.calendar_window_past_days < 0
+                or sync_cfg.calendar_window_future_days < 0):
+            raise SystemExit("lumen: calendar sync window days must be non-negative")
+        kwargs["sync"] = sync_cfg
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:
         raise SystemExit(

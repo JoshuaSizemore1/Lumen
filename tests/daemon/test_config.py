@@ -142,3 +142,50 @@ def test_mcp_nonpositive_max_iterations_exits(tmp_path):
     p.write_text('[mcp]\nenabled = true\nmax_iterations = 0\n')
     with pytest.raises(SystemExit, match="max_iterations"):
         load_config(p)
+
+
+def test_google_defaults_in_xdg_data_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    cfg = load_config(tmp_path / "nope.toml")
+    assert cfg.google.client_secret_path == tmp_path / "lumen" / "google" / "client_secret.json"
+    assert cfg.google.token_path == tmp_path / "lumen" / "google" / "token.json"
+
+
+def test_google_paths_from_toml_expand_user(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[google]\nclient_secret_path = "~/secrets/cs.json"\n'
+                 'token_path = "~/secrets/tok.json"\n')
+    cfg = load_config(p)
+    assert cfg.google.client_secret_path == Path.home() / "secrets" / "cs.json"
+    assert cfg.google.token_path == Path.home() / "secrets" / "tok.json"
+
+
+def test_sync_defaults(tmp_path):
+    cfg = load_config(tmp_path / "nope.toml")
+    assert cfg.sync.calendar_poll_minutes == 5
+    assert cfg.sync.calendar_window_past_days == 30
+    assert cfg.sync.calendar_window_future_days == 60
+
+
+def test_sync_overrides_from_toml(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[sync]\ncalendar_poll_minutes = 15\n"
+                 "calendar_window_past_days = 7\ncalendar_window_future_days = 90\n")
+    cfg = load_config(p)
+    assert cfg.sync.calendar_poll_minutes == 15
+    assert cfg.sync.calendar_window_past_days == 7
+    assert cfg.sync.calendar_window_future_days == 90
+
+
+def test_sync_poll_tighter_than_five_minutes_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[sync]\ncalendar_poll_minutes = 4\n")
+    with pytest.raises(SystemExit, match="calendar_poll_minutes"):
+        load_config(p)
+
+
+def test_sync_negative_window_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[sync]\ncalendar_window_past_days = -1\n")
+    with pytest.raises(SystemExit, match="window"):
+        load_config(p)
