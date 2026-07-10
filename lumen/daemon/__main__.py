@@ -7,6 +7,7 @@ import signal
 
 from lumen.daemon import db
 from lumen.daemon.config import load_config
+from lumen.daemon.connectors.books import BookStore
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
 from lumen.daemon.llm.client import OllamaClient
@@ -25,8 +26,9 @@ async def run() -> None:
     bridge = LazyBridge(list(cfg.mcp.servers)) if cfg.mcp.enabled else None
     model_router = ModelRouter(cfg.model)
     tool_log = ToolLog(cfg.mcp.log_path) if cfg.mcp.enabled else None
-    router = Router(llm, TodoStore(conn), bridge=bridge, model_router=model_router,
-                    tool_log=tool_log, max_iterations=cfg.mcp.max_iterations)
+    router = Router(llm, TodoStore(conn), BookStore(conn), bridge=bridge,
+                    model_router=model_router, tool_log=tool_log,
+                    max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()
     log.info("listening on %s (model=%s, keep_alive=%s, db=%s)",

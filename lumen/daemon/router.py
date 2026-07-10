@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import date
 
+from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 
@@ -21,6 +22,12 @@ TOOL_HINT = re.compile(
 )
 
 BOOK_HINT = re.compile(r"\b(books?|novels?|reading|read|rated?|author)\b", re.IGNORECASE)
+
+REC_HINT = re.compile(
+    r"\b(?:recommend|suggest(?:ion)?s?)\b.*\b(?:books?|novels?|read(?:ing)?)\b"
+    r"|\bwhat should i read\b|\bread next\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def todo_context(todos: list[dict], today: date) -> str:
@@ -64,6 +71,11 @@ class Router:
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
             message = payload.get("message", "")
+            if (self._books is not None and self._bridge is not None
+                    and REC_HINT.search(message)):
+                async for ev in self._recommend_chat(message):
+                    yield ev
+                return
             if self._bridge is not None and TOOL_HINT.search(message):
                 async for ev in self._chat_with_tools(message):
                     yield ev
@@ -79,6 +91,35 @@ class Router:
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
+        elif type_.startswith("books.") and self._books is None:
+            yield {"error": "book catalog unavailable"}
+        elif type_ == "books.list":
+            yield {"result": self._books.list_all()}
+        elif type_ == "books.add":
+            try:
+                yield {"result": self._books.add(
+                    payload.get("title", ""), payload.get("author"),
+                    int(payload["rating"]) if payload.get("rating") else None,
+                    payload.get("notes"))}
+            except (TypeError, ValueError) as e:
+                yield {"error": str(e)}
+        elif type_ == "books.delete":
+            try:
+                yield {"result": self._books.delete(int(payload["id"]))}
+            except (KeyError, TypeError, ValueError):
+                yield {"error": "books.delete needs {id}"}
+        elif type_ == "books.recs":
+            yield {"result": self._books.latest_recs()}
+        elif type_ == "books.recommend":
+            try:
+                result = await self._recommend()
+            except LLMUnavailable as e:
+                yield {"error": str(e)}
+                return
+            if "error" in result:
+                yield {"error": result["error"]}
+            else:
+                yield {"result": result}
         elif type_ == "todos.list":
             yield {"result": self._todos.list_all()}
         elif type_ == "todos.add":
@@ -99,6 +140,33 @@ class Router:
                 yield {"error": "todos.delete needs {id}"}
         else:
             yield {"error": f"unknown request type: {type_}"}
+
+    def _pick_model(self, message: str):
+        return (self._model_router.pick_model(message, needs_tools=True)
+                if self._model_router else None)
+
+    async def _recommend(self, request: str | None = None) -> dict:
+        return await recommend(
+            self._llm, self._bridge, self._books,
+            model=self._pick_model(request or "recommend books"),
+            tool_log=self._tool_log, request=request,
+            max_iterations=self._max_iterations)
+
+    async def _recommend_chat(self, message: str):
+        try:
+            result = await self._recommend(message)
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if "error" in result:
+            yield {"chunk": result["error"]}   # honest failure is an answer, not an IPC error
+        else:
+            lines = ["Suggested next:"]
+            for r in result["recs"]:
+                author = f" — {r['author']}" if r["author"] else ""
+                lines.append(f"• {r['title']}{author} — {r['rationale']}")
+            yield {"chunk": "\n".join(lines)}
+        yield {"done": True}
 
     async def _chat_with_tools(self, message: str):
         try:
@@ -133,8 +201,7 @@ class Router:
             return text
 
         messages = self._base_messages(message)
-        model = self._model_router.pick_model(message, needs_tools=True) \
-            if self._model_router else None
+        model = self._pick_model(message)
         try:
             async for ev in self._llm.chat_with_tools(
                 messages, tools, executor, model=model, max_iterations=self._max_iterations):

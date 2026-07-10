@@ -335,6 +335,131 @@ async def test_chat_without_books_store_never_injects():
     assert llm.messages == [{"role": "user", "content": "have I read Dune"}]
 
 
+class FullFakeBookStore(FakeBookStore):
+    def __init__(self, rows=None, recs=None):
+        super().__init__()
+        self.rows = rows or []
+        self.recs = recs or {"recs": [], "generated_at": None}
+        self.calls = []
+
+    def list_all(self):
+        return self.rows
+
+    def add(self, title, author=None, rating=None, notes=None, date_finished=None):
+        self.calls.append(("add", title, author, rating, notes))
+        if not (title or "").strip():
+            raise ValueError("empty book title")
+        return self.rows
+
+    def delete(self, book_id):
+        self.calls.append(("delete", book_id))
+        return self.rows
+
+    def latest_recs(self):
+        return self.recs
+
+    def save_recs(self, recs):
+        self.calls.append(("save_recs", recs))
+
+
+def test_rec_hint_matches_recommendation_asks_only():
+    from lumen.daemon.router import REC_HINT
+    assert REC_HINT.search("what should I read next?")
+    assert REC_HINT.search("recommend me a book")
+    assert REC_HINT.search("suggest a novel for me")
+    assert not REC_HINT.search("who wrote Dune")
+    assert not REC_HINT.search("read my notes folder")
+
+
+async def test_books_list_add_delete_and_recs_one_shots():
+    books = FullFakeBookStore(rows=[{"id": 1, "title": "Dune"}],
+                              recs={"recs": [], "generated_at": None})
+    router = Router(FakeLLM(), FakeStore(), books)
+    assert await collect(router, "books.list", {}) == [{"result": [{"id": 1, "title": "Dune"}]}]
+    out = await collect(router, "books.add", {"title": "Dune", "rating": 5})
+    assert out == [{"result": [{"id": 1, "title": "Dune"}]}]
+    assert ("add", "Dune", None, 5, None) in books.calls
+    out = await collect(router, "books.add", {"title": "  "})
+    assert "empty book" in out[0]["error"]
+    await collect(router, "books.delete", {"id": 1})
+    assert ("delete", 1) in books.calls
+    out = await collect(router, "books.delete", {})
+    assert "error" in out[0]
+    assert await collect(router, "books.recs", {}) == [
+        {"result": {"recs": [], "generated_at": None}}]
+
+
+async def test_books_one_shots_without_store_error_cleanly():
+    out = await collect(Router(FakeLLM(), FakeStore()), "books.list", {})
+    assert "unavailable" in out[0]["error"]
+
+
+async def test_books_recommend_returns_result(monkeypatch):
+    from lumen.daemon import router as router_mod
+
+    async def fake_recommend(llm, bridge, books, **kw):
+        return {"recs": [{"title": "Solaris", "author": "Lem", "rationale": "mood"}],
+                "generated_at": "2026-07-09T12:00:00"}
+
+    monkeypatch.setattr(router_mod, "recommend", fake_recommend)
+    router = Router(FakeLLM(), FakeStore(), FullFakeBookStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "books.recommend", {})
+    assert out[0]["result"]["recs"][0]["title"] == "Solaris"
+
+
+async def test_books_recommend_maps_pipeline_error(monkeypatch):
+    from lumen.daemon import router as router_mod
+
+    async def fake_recommend(llm, bridge, books, **kw):
+        return {"error": "couldn't get grounded suggestions right now — try again"}
+
+    monkeypatch.setattr(router_mod, "recommend", fake_recommend)
+    router = Router(FakeLLM(), FakeStore(), FullFakeBookStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "books.recommend", {})
+    assert "grounded suggestions" in out[0]["error"]
+
+
+async def test_chat_rec_ask_routes_to_pipeline_and_formats(monkeypatch):
+    from lumen.daemon import router as router_mod
+    seen = {}
+
+    async def fake_recommend(llm, bridge, books, **kw):
+        seen["request"] = kw.get("request")
+        return {"recs": [{"title": "Solaris", "author": "Lem", "rationale": "mood"}],
+                "generated_at": "2026-07-09T12:00:00"}
+
+    monkeypatch.setattr(router_mod, "recommend", fake_recommend)
+    router = Router(FakeLLM(), FakeStore(), FullFakeBookStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "what should I read next?"})
+    assert seen["request"] == "what should I read next?"
+    assert any("Solaris — Lem" in o.get("chunk", "") for o in out)
+    assert out[-1] == {"done": True}
+
+
+async def test_chat_rec_ask_pipeline_error_is_a_normal_answer(monkeypatch):
+    from lumen.daemon import router as router_mod
+
+    async def fake_recommend(llm, bridge, books, **kw):
+        return {"error": "log a few books first"}
+
+    monkeypatch.setattr(router_mod, "recommend", fake_recommend)
+    router = Router(FakeLLM(), FakeStore(), FullFakeBookStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "recommend me a book"})
+    assert any("log a few books" in o.get("chunk", "") for o in out)
+    assert out[-1] == {"done": True}
+
+
+async def test_chat_rec_ask_without_bridge_falls_through_to_plain_chat():
+    llm = FakeLLM()
+    out = await collect(Router(llm, FakeStore(), FullFakeBookStore()), "chat",
+                        {"message": "recommend me a book"})
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
 async def test_model_router_choice_reaches_chat_with_tools():
     captured = {}
 
