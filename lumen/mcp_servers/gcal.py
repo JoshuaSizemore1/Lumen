@@ -1,9 +1,9 @@
-"""Google Calendar MCP server — the LLM's live window for what the local cache
-can't answer (events beyond the sync window). Shares the poller's OAuth token via
-google_auth; read-only until the Phase 5 write half adds create_event.
-Run: python -m lumen.mcp_servers.gcal"""
+"""Google Calendar MCP server: list_events for what the local cache can't
+answer, and create_event — which the daemon only ever calls after the user
+approved the exact event in a confirm dialog. Shares the poller's OAuth token
+via google_auth. Run: python -m lumen.mcp_servers.gcal"""
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
@@ -71,12 +71,57 @@ def _list_events(service, start: str, end: str) -> str:
     return "\n".join(sorted(lines))
 
 
+def _create_event(service, title: str, start: str, end: str, all_day: bool,
+                  location: str, description: str, attendees: list[str],
+                  recurrence: str) -> str:
+    if service is None:
+        return NOT_CONNECTED
+    body: dict = {"summary": title}
+    if location:
+        body["location"] = location
+    if description:
+        body["description"] = description
+    if all_day:
+        # Google all-day ends are exclusive; our proposals carry inclusive dates
+        end_excl = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
+        body["start"], body["end"] = {"date": start}, {"date": end_excl}
+    else:
+        body["start"], body["end"] = {"dateTime": start}, {"dateTime": end}
+    if attendees:
+        body["attendees"] = [{"email": a} for a in attendees]
+    if recurrence:
+        rule = recurrence if recurrence.startswith("RRULE") else f"RRULE:{recurrence}"
+        body["recurrence"] = [rule]
+    try:
+        created = service.events().insert(
+            calendarId="primary", body=body,
+            sendUpdates="all" if attendees else "none").execute()
+    except Exception:
+        return FAILED
+    link = created.get("htmlLink", "")
+    return (f"Created: {created.get('summary', title)} — {start}"
+            + (f" ({link})" if link else ""))
+
+
 @mcp.tool()
 def list_events(start: str, end: str) -> str:
     """List the user's Google Calendar events between two ISO dates (inclusive),
     e.g. start='2026-09-01' end='2026-09-30'. Use this only for dates the
     assistant's calendar context doesn't already cover."""
     return _list_events(_service(), start, end)
+
+
+@mcp.tool()
+def create_event(title: str, start: str, end: str, all_day: bool = False,
+                 location: str = "", description: str = "",
+                 attendees: list[str] = [], recurrence: str = "") -> str:
+    """Create an event on the user's primary Google Calendar. The daemon calls
+    this only after the user explicitly confirmed the exact details in a dialog
+    — never call it speculatively."""
+    from lumen.daemon.connectors import google_auth
+    return _create_event(_service(google_auth.WRITE_SCOPES), title, start, end,
+                         all_day, location, description, list(attendees),
+                         recurrence)
 
 
 if __name__ == "__main__":

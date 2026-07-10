@@ -7,9 +7,9 @@ from pathlib import Path
 
 READ_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
 WRITE_SCOPES = READ_SCOPES + ("https://www.googleapis.com/auth/calendar.events",)
-# What lumen-google-auth requests today. Stays read-only until the write half
-# of Phase 5 lands (staged scopes — never request ahead of the feature).
-SCOPES = READ_SCOPES
+# What lumen-google-auth requests today. Write scope joined when the Phase 5
+# write half shipped (staged scopes — never request ahead of the feature).
+SCOPES = WRITE_SCOPES
 
 
 def load_credentials(google_cfg, scopes=READ_SCOPES):

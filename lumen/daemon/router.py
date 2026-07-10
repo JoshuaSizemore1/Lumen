@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta
 
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.client import LLMUnavailable
+from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
+                                           validate_proposal)
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 
 log = logging.getLogger(__name__)
@@ -35,7 +37,18 @@ CAL_HINT = re.compile(
     re.IGNORECASE,
 )
 
+EVENT_HINT = re.compile(
+    r"\b(book|schedule|create|add|set ?up|put)\b"
+    r".*\b(meeting|call|event|appointment|lunch|dinner|coffee|calendar)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
+
+# Write-capable tools stay callable by the daemon (after a confirm) but are
+# never offered to the model in the generic tool loop — the confirm gate is
+# mechanical, not prompt-enforced.
+WRITE_TOOLS = frozenset({"create_event"})
 
 
 def calendar_context(events: list[dict], now: datetime, window_end: date) -> str:
@@ -122,6 +135,11 @@ class Router:
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
             message = payload.get("message", "")
+            if (self._confirm is not None and self._bridge is not None
+                    and self._calendar is not None and EVENT_HINT.search(message)):
+                async for ev in self._create_event_chat(message):
+                    yield ev
+                return
             if (self._books is not None and self._bridge is not None
                     and REC_HINT.search(message)):
                 async for ev in self._recommend_chat(message):
@@ -179,6 +197,23 @@ class Router:
                 yield {"error": result["error"]}
             else:
                 yield {"result": result}
+        elif type_ == "calendar.create":
+            if (self._calendar is None or self._bridge is None
+                    or self._confirm is None):
+                yield {"error": "calendar creation unavailable"}
+                return
+            now = datetime.now().astimezone()
+            proposal, err = validate_proposal(payload.get("proposal", {}) or {},
+                                              now=now, user_message="")
+            if proposal is None:
+                yield {"error": err}
+                return
+            async for ev in self._gated_create(proposal):
+                if "_outcome" in ev:
+                    created, text = ev["_outcome"]
+                    yield {"result": {"created": created, "message": text}}
+                else:
+                    yield ev
         elif type_ == "calendar.list":
             if self._calendar is None:
                 yield {"error": "calendar unavailable"}
@@ -238,10 +273,70 @@ class Router:
             yield {"chunk": "\n".join(lines)}
         yield {"done": True}
 
+    async def _create_event_chat(self, message: str):
+        """NL event creation: extract → validate → confirm dialog → create."""
+        now = datetime.now().astimezone()
+        try:
+            proposal, err = await propose_event(self._llm, message, now=now)
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if proposal is None:
+            yield {"chunk": err}     # honest failure is an answer, not an IPC error
+            yield {"done": True}
+            return
+        async for ev in self._gated_create(proposal):
+            if "_outcome" in ev:
+                yield {"chunk": ev["_outcome"][1]}
+            else:
+                yield ev
+        yield {"done": True}
+
+    async def _gated_create(self, proposal: dict):
+        """Confirm-over-IPC then execute. Yields the confirm_request event and
+        finally {"_outcome": (created, message)} for the caller to render."""
+        confirm_id = self._confirm.begin()
+        yield {"confirm_request": confirm_payload(proposal),
+               "confirm_id": confirm_id}
+        if not await self._confirm.wait(confirm_id):
+            yield {"_outcome": (False, "Cancelled — nothing was created.")}
+            return
+        try:
+            await self._bridge.ensure_started()
+        except Exception:
+            log.exception("MCP bridge unavailable for event creation")
+            yield {"_outcome": (False, "calendar tools are unavailable right now")}
+            return
+        args = {"title": proposal["title"], "start": proposal["start"],
+                "end": proposal["end"], "all_day": proposal["all_day"],
+                "location": proposal["location"] or "",
+                "description": proposal["description"] or "",
+                "attendees": proposal["attendees"],
+                "recurrence": proposal["recurrence"] or ""}
+        start_t = time.monotonic()
+        try:
+            text = await self._bridge.call("create_event", args)
+            ok = True
+        except Exception as e:
+            text, ok = f"tool error: {e}", False
+            if not isinstance(e, ToolCallError):
+                log.exception("create_event failed unexpectedly")
+        if self._tool_log is not None:
+            self._tool_log.write("create_event", args, ok, text,
+                                 int((time.monotonic() - start_t) * 1000))
+        if ok and hasattr(self._calendar, "sync_once"):
+            try:
+                await self._calendar.sync_once()   # show the new event promptly
+            except Exception:
+                log.exception("post-create sync failed")
+        yield {"_outcome": (ok, text)}
+
     async def _chat_with_tools(self, message: str):
         try:
             await self._bridge.ensure_started()
-            tools = self._bridge.ollama_tools()
+            tools = [t for t in self._bridge.ollama_tools()
+                     if t.get("function", {}).get("name", "").split("__")[-1]
+                     not in WRITE_TOOLS]
         except Exception:
             log.exception("MCP bridge unavailable — answering without tools")
             tools = []

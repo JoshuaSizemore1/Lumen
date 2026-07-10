@@ -65,3 +65,73 @@ def test_no_events_is_an_explicit_answer():
     out = _list_events(FakeService([CALS[0]], {"primary": [{"items": []}]}),
                        "2026-09-01", "2026-09-30")
     assert "No events between 2026-09-01 and 2026-09-30" in out
+
+
+# ---- create_event (write half) ----
+
+from lumen.mcp_servers.gcal import _create_event
+
+
+class InsertCapture:
+    def __init__(self, fail=False):
+        self.kwargs = None
+        self._fail = fail
+
+    def insert(self, **kwargs):
+        self.kwargs = kwargs
+        return FakeExec(RuntimeError("boom") if self._fail
+                        else {"summary": kwargs["body"]["summary"],
+                              "htmlLink": "https://cal/e1"})
+
+
+class WriteService:
+    def __init__(self, fail=False):
+        self.api = InsertCapture(fail)
+
+    def events(self):
+        return self.api
+
+
+def make_args(**kw):
+    args = {"title": "Call with Sam", "start": "2026-07-11T14:00:00-06:00",
+            "end": "2026-07-11T14:30:00-06:00", "all_day": False,
+            "location": "", "description": "", "attendees": [], "recurrence": ""}
+    args.update(kw)
+    return args
+
+
+def test_create_timed_event_no_attendees_sends_no_invites():
+    svc = WriteService()
+    out = _create_event(svc, **make_args())
+    assert "Created: Call with Sam" in out and "https://cal/e1" in out
+    assert svc.api.kwargs["calendarId"] == "primary"
+    assert svc.api.kwargs["sendUpdates"] == "none"
+    assert svc.api.kwargs["body"]["start"] == {"dateTime": "2026-07-11T14:00:00-06:00"}
+
+
+def test_create_with_attendees_emails_invites():
+    svc = WriteService()
+    _create_event(svc, **make_args(attendees=["p@x.com"]))
+    assert svc.api.kwargs["sendUpdates"] == "all"
+    assert svc.api.kwargs["body"]["attendees"] == [{"email": "p@x.com"}]
+
+
+def test_create_all_day_uses_exclusive_end_date():
+    svc = WriteService()
+    _create_event(svc, **make_args(start="2026-07-20", end="2026-07-20",
+                                   all_day=True))
+    assert svc.api.kwargs["body"]["start"] == {"date": "2026-07-20"}
+    assert svc.api.kwargs["body"]["end"] == {"date": "2026-07-21"}   # Google: exclusive
+
+
+def test_create_recurrence_gets_rrule_prefix_once():
+    svc = WriteService()
+    _create_event(svc, **make_args(recurrence="RRULE:FREQ=WEEKLY;BYDAY=MO"))
+    assert svc.api.kwargs["body"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO"]
+    _create_event(svc, **make_args(recurrence="FREQ=WEEKLY;BYDAY=MO"))
+    assert svc.api.kwargs["body"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO"]
+
+
+def test_create_not_connected_and_failure_degrade_gracefully():
+    assert "isn't connected" in _create_event(None, **make_args())
+    assert "Couldn't" in _create_event(WriteService(fail=True), **make_args())

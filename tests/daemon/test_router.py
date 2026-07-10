@@ -621,3 +621,173 @@ async def test_on_disconnect_denies_pending():
     await asyncio.sleep(0)
     router.on_disconnect()
     assert await waiter is False
+
+
+# ---- Phase 5 write half: NL event creation behind the confirm gate ----
+
+import asyncio as _aio
+
+
+def test_event_hint_vocabulary():
+    from lumen.daemon.router import EVENT_HINT
+    for msg in ("book a call with Sam Friday afternoon",
+                "schedule a meeting with priya tomorrow",
+                "add lunch with alex to my calendar",
+                "set up a dentist appointment for the 20th",
+                "put a focus block on my calendar tomorrow"):
+        assert EVENT_HINT.search(msg), msg
+    for msg in ("what's on my calendar today", "am I free at 3pm",
+                "any meetings tomorrow?", "what should I read next?"):
+        assert not EVENT_HINT.search(msg), msg
+
+
+class SyncingFakeCal(FakeCal):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.synced = 0
+
+    async def sync_once(self):
+        self.synced += 1
+        return True
+
+
+class FakeToolLog:
+    def __init__(self):
+        self.entries = []
+
+    def write(self, tool, arguments, ok, result, duration_ms):
+        self.entries.append((tool, ok))
+
+
+VALID_JSON = ('{"title": "Call with Sam", "start": "2026-07-11T14:00", '
+              '"end": "2026-07-11T14:30"}')
+
+
+def create_router(llm=None, bridge=None, cal=None, broker=None, tool_log=None):
+    from lumen.daemon.confirm import ConfirmBroker
+    return Router(llm or FakeLLM(chunks=(VALID_JSON,)), FakeStore(),
+                  calendar=cal if cal is not None else SyncingFakeCal(),
+                  bridge=bridge if bridge is not None else FakeBridge(
+                      result="Created: Call with Sam — 2026-07-11T14:00"),
+                  confirm=broker or ConfirmBroker(),
+                  model_router=FakeModelRouter(), tool_log=tool_log)
+
+
+async def drive(router, message, broker, approve):
+    """Consume the chat stream, answering the confirm_request when it appears."""
+    events = []
+
+    async def consume():
+        async for ev in router.handle("chat", {"message": message}):
+            events.append(ev)
+
+    task = _aio.ensure_future(consume())
+    for _ in range(200):
+        await _aio.sleep(0)
+        req = next((e for e in events if "confirm_request" in e), None)
+        if req is not None:
+            broker.resolve(req["confirm_id"], approve)
+            break
+    await _aio.wait_for(task, timeout=2)
+    return events
+
+
+async def test_create_chat_approved_creates_logs_and_syncs():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal()
+    bridge = FakeBridge(result="Created: Call with Sam — 2026-07-11T14:00")
+    tool_log = FakeToolLog()
+    router = create_router(bridge=bridge, cal=cal, broker=broker, tool_log=tool_log)
+    events = await drive(router, "book a call with Sam tomorrow 2pm", broker, True)
+    req = next(e for e in events if "confirm_request" in e)
+    rows = dict(req["confirm_request"]["rows"])
+    assert rows["Title"] == "Call with Sam"
+    assert bridge.calls and bridge.calls[0][0] == "create_event"
+    assert bridge.calls[0][1]["title"] == "Call with Sam"
+    assert tool_log.entries == [("create_event", True)]
+    assert cal.synced == 1
+    assert any("Created:" in e.get("chunk", "") for e in events)
+    assert events[-1] == {"done": True}
+
+
+async def test_create_chat_declined_creates_nothing():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    bridge = FakeBridge()
+    cal = SyncingFakeCal()
+    router = create_router(bridge=bridge, cal=cal, broker=broker)
+    events = await drive(router, "book a call with Sam tomorrow 2pm", broker, False)
+    assert bridge.calls == [] and cal.synced == 0
+    assert any("Cancelled" in e.get("chunk", "") for e in events)
+    assert events[-1] == {"done": True}
+
+
+async def test_create_chat_invalid_proposal_never_reaches_confirm():
+    router = create_router(llm=FakeLLM(chunks=("no json here",)))
+    out = await collect(router, "chat", {"message": "book a call with Sam"})
+    assert not any("confirm_request" in e for e in out)
+    assert any("couldn't turn that into an event" in e.get("chunk", "") for e in out)
+
+
+async def test_create_chat_without_confirm_broker_falls_through():
+    # no broker wired -> the create path must not hijack the message
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), calendar=FakeCal(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "schedule a meeting with sam"})
+    assert out[-1] == {"done": True}
+
+
+async def test_calendar_create_one_shot_approved():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    bridge = FakeBridge(result="Created: Focus block — 2026-07-11T16:30")
+    router = create_router(bridge=bridge, broker=broker)
+    from datetime import datetime, timedelta
+    start = (datetime.now().astimezone() + timedelta(days=1)).replace(
+        hour=16, minute=30, second=0, microsecond=0)
+    proposal = {"title": "Focus block", "start": start.isoformat(),
+                "end": (start + timedelta(hours=1)).isoformat()}
+    events = []
+
+    async def consume():
+        async for ev in router.handle("calendar.create", {"proposal": proposal}):
+            events.append(ev)
+
+    task = _aio.ensure_future(consume())
+    for _ in range(200):
+        await _aio.sleep(0)
+        req = next((e for e in events if "confirm_request" in e), None)
+        if req is not None:
+            broker.resolve(req["confirm_id"], True)
+            break
+    await _aio.wait_for(task, timeout=2)
+    assert events[-1]["result"]["created"] is True
+    assert bridge.calls[0][0] == "create_event"
+
+
+async def test_calendar_create_one_shot_invalid_is_an_error():
+    router = create_router()
+    out = await collect(router, "calendar.create",
+                        {"proposal": {"title": "", "start": "2026-07-11T14:00"}})
+    assert "error" in out[0]
+
+
+async def test_generic_tool_loop_never_offers_write_tools():
+    seen = {}
+
+    class CaptureLLM:
+        async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                                  max_iterations=4):
+            seen["tools"] = tools
+            yield {"content": "hi"}
+
+    bridge = FakeBridge(tools=(("list_events", {}), ("create_event", {}),
+                               ("gcal__create_event", {})))
+    router = Router(CaptureLLM(), FakeStore(), bridge=bridge,
+                    model_router=FakeModelRouter())
+    await collect(router, "chat", {"message": "search my files"})
+    names = [t["function"]["name"] for t in seen["tools"]]
+    assert "create_event" not in names and "gcal__create_event" not in names
+    assert "list_events" in names

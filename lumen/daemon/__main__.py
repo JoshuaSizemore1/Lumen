@@ -7,6 +7,7 @@ import signal
 
 from lumen.daemon import db
 from lumen.daemon.config import load_config
+from lumen.daemon.confirm import ConfirmBroker
 from lumen.daemon.connectors.books import BookStore
 from lumen.daemon.connectors.gcal import CalendarSync, EventStore
 from lumen.daemon.connectors.todos import TodoStore
@@ -30,7 +31,8 @@ async def run() -> None:
     events = EventStore(conn)
     calendar = CalendarSync(events, cfg.google, cfg.sync)
     router = Router(llm, TodoStore(conn), BookStore(conn), calendar=calendar,
-                    bridge=bridge, model_router=model_router, tool_log=tool_log,
+                    bridge=bridge, confirm=ConfirmBroker(),
+                    model_router=model_router, tool_log=tool_log,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()
