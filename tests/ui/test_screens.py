@@ -1,18 +1,11 @@
 from PyQt6.QtWidgets import QLabel
 
-from lumen.ui.dashboard import DashboardScreen
-
 
 def texts(widget) -> str:
     return " | ".join(lab.text() for lab in widget.findChildren(QLabel))
 
 
-def test_dashboard_has_three_columns(qtbot):
-    w = DashboardScreen()
-    qtbot.addWidget(w)
-    t = texts(w)
-    assert "TODAY · TODOS" in t and "TODAY · CALENDAR" in t and "UNREAD · MAIL" in t
-    assert "Call the dentist" in t
+# Dashboard coverage lives in test_dashboard.py since the Phase 5 live wiring.
 
 
 def test_calendar_month_grid(qtbot):

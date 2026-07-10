@@ -1,22 +1,50 @@
-"""Dashboard: today at a glance. Static skeleton — real data lands in Phases 2/5/6."""
+"""Dashboard: today at a glance. Todos + calendar are live via daemon one-shots;
+the mail column is a labeled placeholder until Phase 6. No business logic —
+render what the daemon returns."""
 
-from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from datetime import date, datetime
+
+from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
 from lumen.ui import theme
 from lumen.ui.widgets import Panel, button, chip, label
 
-TODOS = [("Call the dentist", "personal", False),
-         ("Reply to Priya re: sync defaults", "work", False),
-         ("Water the plants", "home", True)]
-EVENTS = [("09:30", "Standup — Platform", 75, 22, False),
-          ("11:00", "1:1 with Priya", 150, 22, False),
-          ("13:00", "Lunch", 250, 47, False),
-          ("15:30", "Design review: Lumen", 375, 34, True),
-          ("18:00", "Gym", 500, 47, False)]
-MAIL = [("GitHub", "08:12", "PR #142: swap to local model runtime"),
-        ("Priya Nair", "07:40", "Re: sync interval defaults"),
-        ("Dr. Okafor's office", "Tue", "Appointment reminder — Jul 9"),
-        ("Sarah Chen", "Mon", "Book club: next pick?")]
+MAIL_PLACEHOLDER = [("GitHub", "08:12", "PR #142: swap to local model runtime"),
+                    ("Priya Nair", "07:40", "Re: sync interval defaults"),
+                    ("Dr. Okafor's office", "Tue", "Appointment reminder — Jul 9"),
+                    ("Sarah Chen", "Mon", "Book club: next pick?")]
+
+PX_PER_HOUR = 50
+NOT_CONNECTED_MSG = ("Google Calendar not connected —\n"
+                     "see docs/google-oauth-setup.md")
+
+
+def hour_range(events: list[dict]) -> tuple[int, int]:
+    """Visible hours: 08–20 by default, widened to fit outliers."""
+    lo, hi = 8, 20
+    for e in events:
+        if e["all_day"]:
+            continue
+        s = datetime.fromisoformat(e["start_at"]).astimezone()
+        lo = min(lo, s.hour)
+        end = e.get("end_at")
+        if end:
+            en = datetime.fromisoformat(end).astimezone()
+            hi = max(hi, en.hour + (1 if (en.minute or en.second) else 0))
+        else:
+            hi = max(hi, s.hour + 1)
+    return lo, hi
+
+
+def format_synced(last_iso: str | None, now: datetime) -> str:
+    if not last_iso:
+        return "not synced yet"
+    mins = int((now - datetime.fromisoformat(last_iso)).total_seconds() // 60)
+    if mins < 1:
+        return "● synced just now"
+    if mins < 60:
+        return f"● synced {mins}m ago"
+    return f"● synced {mins // 60}h ago"
 
 
 def _col_head(eye: str, n: str) -> QWidget:
@@ -30,87 +58,169 @@ def _col_head(eye: str, n: str) -> QWidget:
 
 
 class DashboardScreen(QWidget):
-    def __init__(self):
+    def __init__(self, client):
         super().__init__()
+        self._client = client
+        self._todos: list[dict] = []
+        self._cal: dict = {"events": [], "connected": True, "last_sync": None}
+        client.error.connect(self._on_error)
+
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 24)
 
         head = QHBoxLayout()
-        head.addWidget(label("Mon · Jul 6", "h2"))
+        head.addWidget(label(date.today().strftime("%a · %b %-d"), "h2"))
         head.addWidget(label("today at a glance", "sub"))
         head.addStretch()
-        head.addWidget(label("● synced 2m ago", "faint"))
+        self.sync_label = label("", "faint")
+        head.addWidget(self.sync_label)
         root.addLayout(head)
 
-        grid = QGridLayout()
+        self.status = label("", "status")
+        self.status.hide()
+        root.addWidget(self.status)
+
+        self._content = QWidget()
+        root.addWidget(self._content, 1)
+        self._root = root
+        self._rebuild()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self) -> None:
+        today = date.today().isoformat()
+        self._client.request("todos.list", {}, self._set_todos)
+        self._client.request("calendar.list", {"from": today, "to": today},
+                             self._set_calendar)
+
+    def _set_todos(self, rows: list[dict]) -> None:
+        self._todos = rows
+        self.status.hide()
+        self._rebuild()
+
+    def _set_calendar(self, result: dict) -> None:
+        self._cal = result
+        self.status.hide()
+        self._rebuild()
+
+    def _on_error(self, msg: str) -> None:
+        self.status.setText(msg)
+        self.status.show()
+
+    def _rebuild(self) -> None:
+        self.sync_label.setText(
+            "calendar not connected" if not self._cal.get("connected")
+            else format_synced(self._cal.get("last_sync"), datetime.now()))
+
+        fresh = QWidget()
+        grid = QGridLayout(fresh)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(22)
         grid.setColumnMinimumWidth(0, 290)
         grid.setColumnStretch(1, 1)
         grid.setColumnMinimumWidth(2, 320)
+        for col, layout in enumerate((self._todos_col(), self._calendar_col(),
+                                      self._mail_col())):
+            holder = QWidget()
+            holder.setLayout(layout)
+            grid.addWidget(holder, 0, col)
+        self._root.replaceWidget(self._content, fresh)
+        self._content.deleteLater()
+        self._content = fresh
 
-        # 1 · todos
-        todos = QVBoxLayout()
-        todos.addWidget(_col_head("TODAY · TODOS", "5 open"))
-        for text, tag, done in TODOS:
+    # ---- columns ----
+
+    def _todos_col(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        open_todos = [t for t in self._todos if not t["completed"]]
+        col.addWidget(_col_head("TODAY · TODOS", f"{len(open_todos)} open"))
+        if not self._todos:
+            col.addWidget(label("no todos yet", "dim"))
+        for t in self._todos[:8]:
             row = QHBoxLayout()
-            box = QLabel("✓" if done else "")
-            box.setFixedSize(15, 15)
-            box.setStyleSheet(
-                f"background: {theme.ACCENT if done else 'transparent'};"
-                f"border: 1px solid {theme.ACCENT if done else theme.TEXT_FAINT}; border-radius: 3px;"
-                f"color: {theme.BG_WINDOW}; font-size: 10px;")
-            item = label(text, "secondary" if not done else "dim")
-            row.addWidget(box)
-            row.addWidget(item, 1)
-            row.addWidget(chip(tag, theme.TAG_COLORS[tag]))
-            todos.addLayout(row)
-        todos.addWidget(button("Manage todos →", "link"))
-        todos.addStretch()
+            mark = label("✓" if t["completed"] else "○", "dim")
+            row.addWidget(mark)
+            row.addWidget(label(t["text"], "dim" if t["completed"] else "secondary"), 1)
+            for tag in t["tags"]:
+                row.addWidget(chip(tag, theme.TAG_COLORS.get(tag, theme.TEXT_MUTED)))
+            col.addLayout(row)
+        col.addStretch()
+        return col
 
-        # 2 · day calendar: fixed-height panel, absolutely positioned blocks
-        cal = QVBoxLayout()
-        cal.addWidget(_col_head("TODAY · CALENDAR", "5 events"))
+    def _calendar_col(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        events = self._cal.get("events", [])
+        col.addWidget(_col_head("TODAY · CALENDAR", f"{len(events)} events"))
+        if not self._cal.get("connected"):
+            box = Panel("panel-alt")
+            v = QVBoxLayout(box)
+            v.addWidget(label(NOT_CONNECTED_MSG, "dim", wrap=True))
+            v.addStretch()
+            box.setFixedHeight(160)
+            col.addWidget(box)
+            col.addStretch()
+            return col
+
+        for e in (e for e in events if e["all_day"]):
+            row = QHBoxLayout()
+            row.addWidget(chip(e["title"] or "Untitled", e.get("color") or theme.ACCENT))
+            row.addWidget(label("all day", "faint"))
+            row.addStretch()
+            col.addLayout(row)
+
+        timed = [e for e in events if not e["all_day"]]
+        lo, hi = hour_range(timed)
         canvas = Panel("panel-alt")
-        canvas.setFixedHeight(620)
-        for hour in range(8, 21):                       # 08:00–20:00, 50px/hr
-            y = (hour - 8) * 50 + 6
+        canvas.setFixedHeight((hi - lo) * PX_PER_HOUR + 12)
+        for hour in range(lo, hi + 1):
+            y = (hour - lo) * PX_PER_HOUR + 6
             lab = label(f"{hour:02d}:00", "faint")
             lab.setParent(canvas)
             lab.move(10, y)
             line = QFrame(canvas)
             line.setStyleSheet(f"background: {theme.BORDER_FAINT};")
             line.setGeometry(52, y + 7, 10_000, 1)
-        for time, title, top, height, is_next in EVENTS:
+        now = datetime.now().astimezone()
+        for e in timed:
+            s = datetime.fromisoformat(e["start_at"]).astimezone()
+            en = (datetime.fromisoformat(e["end_at"]).astimezone()
+                  if e.get("end_at") else None)
+            top = int((s.hour + s.minute / 60 - lo) * PX_PER_HOUR) + 6
+            height = (max(20, int((en - s).total_seconds() / 3600 * PX_PER_HOUR))
+                      if en else 24)
+            is_next = en is not None and s <= now <= en
             block = QFrame(canvas)
             block.setStyleSheet(
                 f"background: {theme.ACCENT_MID if is_next else theme.ACCENT_SOFT};"
-                f"border-left: 2px solid {theme.ACCENT}; border-radius: 5px;")
-            block.setGeometry(58, top + 6, 480, height)
+                f"border-left: 2px solid {e.get('color') or theme.ACCENT};"
+                "border-radius: 5px;")
+            block.setGeometry(58, top, 480, height)
             v = QVBoxLayout(block)
             v.setContentsMargins(9, 2, 9, 2)
             v.setSpacing(0)
-            v.addWidget(label(title, "secondary"))
-            v.addWidget(label(f"{time}", "faint"))
-        now = QFrame(canvas)
-        now.setStyleSheet(f"background: {theme.NOW};")
-        now.setGeometry(52, 106, 10_000, 1)
-        cal.addWidget(canvas)
+            v.addWidget(label(e["title"] or "Untitled", "secondary"))
+            v.addWidget(label(s.strftime("%H:%M"), "faint"))
+        if lo <= now.hour < hi:
+            line = QFrame(canvas)
+            line.setStyleSheet(f"background: {theme.NOW};")
+            line.setGeometry(52, int((now.hour + now.minute / 60 - lo)
+                                     * PX_PER_HOUR) + 6, 10_000, 1)
+        col.addWidget(canvas)
+        col.addStretch()
+        return col
 
-        # 3 · unread mail
-        mail = QVBoxLayout()
-        mail.addWidget(_col_head("UNREAD · MAIL", "4 unread"))
-        for sender, when, subj in MAIL:
+    def _mail_col(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        col.addWidget(_col_head("UNREAD · MAIL", "placeholder — live in Phase 6"))
+        for sender, when, subj in MAIL_PLACEHOLDER:
             top_row = QHBoxLayout()
             top_row.addWidget(label(f"● {sender}", "secondary"))
             top_row.addStretch()
             top_row.addWidget(label(when, "faint"))
-            mail.addLayout(top_row)
-            mail.addWidget(label(subj, "muted"))
-        mail.addWidget(button("Open mail →", "link"))
-        mail.addStretch()
-
-        for col, layout in enumerate((todos, cal, mail)):
-            holder = QWidget()
-            holder.setLayout(layout)
-            grid.addWidget(holder, 0, col)
-        root.addLayout(grid, 1)
+            col.addLayout(top_row)
+            col.addWidget(label(subj, "muted"))
+        col.addWidget(button("Open mail →", "link"))
+        col.addStretch()
+        return col
