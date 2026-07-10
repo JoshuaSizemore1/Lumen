@@ -61,6 +61,9 @@ class IPCServer:
             pass  # UI went away mid-stream; nothing to do
         finally:
             self._tasks.discard(task)
+            on_disconnect = getattr(self._router, "on_disconnect", None)
+            if on_disconnect is not None:
+                on_disconnect()   # deny any confirmation still waiting on this UI
             writer.close()
             try:
                 await writer.wait_closed()

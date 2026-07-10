@@ -584,3 +584,40 @@ async def test_calendar_list_defaults_to_today():
 async def test_calendar_list_without_calendar_errors():
     out = await collect(Router(FakeLLM(), FakeStore()), "calendar.list", {})
     assert "unavailable" in out[0]["error"]
+
+
+# ---- Phase 5 write half: confirm.response routing ----
+
+from lumen.daemon.confirm import ConfirmBroker
+
+
+async def test_confirm_response_resolves_pending_confirm():
+    import asyncio
+    broker = ConfirmBroker()
+    router = Router(FakeLLM(), FakeStore(), confirm=broker)
+    cid = broker.begin()
+    waiter = asyncio.ensure_future(broker.wait(cid))
+    await asyncio.sleep(0)
+    out = await collect(router, "confirm.response",
+                        {"confirm_id": cid, "approved": True})
+    assert out == []                     # silent ack
+    assert await waiter is True
+
+
+async def test_confirm_response_malformed_or_unbrokered_is_harmless():
+    broker = ConfirmBroker()
+    assert await collect(Router(FakeLLM(), FakeStore(), confirm=broker),
+                         "confirm.response", {"nope": 1}) == []
+    assert await collect(Router(FakeLLM(), FakeStore()),
+                         "confirm.response", {"confirm_id": 1, "approved": True}) == []
+
+
+async def test_on_disconnect_denies_pending():
+    import asyncio
+    broker = ConfirmBroker()
+    router = Router(FakeLLM(), FakeStore(), confirm=broker)
+    cid = broker.begin()
+    waiter = asyncio.ensure_future(broker.wait(cid))
+    await asyncio.sleep(0)
+    router.on_disconnect()
+    assert await waiter is False

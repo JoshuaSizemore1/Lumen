@@ -85,15 +85,21 @@ def todo_context(todos: list[dict], today: date) -> str:
 
 class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, bridge=None,
-                 model_router=None, tool_log=None, max_iterations=4):
+                 confirm=None, model_router=None, tool_log=None, max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
         self._calendar = calendar   # CalendarSync facade: list_range/last_sync/connected
         self._bridge = bridge
+        self._confirm = confirm     # ConfirmBroker — gates every external write
         self._model_router = model_router
         self._tool_log = tool_log
         self._max_iterations = max_iterations
+
+    def on_disconnect(self) -> None:
+        """A UI connection died — deny anything still waiting on a dialog."""
+        if self._confirm is not None:
+            self._confirm.deny_all()
 
     def _base_messages(self, message: str) -> list[dict]:
         """Shared system-context + user message for every chat path."""
@@ -136,6 +142,14 @@ class Router:
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
+        elif type_ == "confirm.response":
+            # Silent ack: the answer unblocks whichever handler is awaiting it.
+            if self._confirm is not None:
+                try:
+                    self._confirm.resolve(int(payload["confirm_id"]),
+                                          bool(payload["approved"]))
+                except (KeyError, TypeError, ValueError):
+                    log.warning("malformed confirm.response payload: %r", payload)
         elif type_.startswith("books.") and self._books is None:
             yield {"error": "book catalog unavailable"}
         elif type_ == "books.list":
