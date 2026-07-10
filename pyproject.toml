@@ -5,13 +5,17 @@ description = "Local-first daily assistant"
 requires-python = ">=3.12"
 dependencies = [
     "PyQt6>=6.6",
+    "google-api-python-client>=2.198.0",
+    "google-auth-oauthlib>=1.4.0",
     "httpx>=0.27",
     "mcp>=1.28.1",
+    "python-dateutil>=2.9.0.post0",
 ]
 
 [project.scripts]
 lumen-daemon = "lumen.daemon.__main__:main"
 lumen-ui = "lumen.ui.__main__:main"
+lumen-google-auth = "lumen.daemon.connectors.google_auth:main"
 
 [dependency-groups]
 dev = [
