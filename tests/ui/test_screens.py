@@ -5,17 +5,8 @@ def texts(widget) -> str:
     return " | ".join(lab.text() for lab in widget.findChildren(QLabel))
 
 
-# Dashboard coverage lives in test_dashboard.py since the Phase 5 live wiring.
-
-
-def test_calendar_month_grid(qtbot):
-    from lumen.ui.calendar_view import CalendarScreen
-    w = CalendarScreen()
-    qtbot.addWidget(w)
-    t = texts(w)
-    assert "July 2026" in t and "MON" in t and "SUN" in t
-    assert "Standup — Platf…" in t
-    assert "+2 more" in t
+# Dashboard and calendar coverage live in test_dashboard.py / test_calendar_view.py
+# since the Phase 5 live wiring.
 
 
 def test_mail_two_pane(qtbot):

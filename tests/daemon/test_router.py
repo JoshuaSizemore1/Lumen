@@ -502,6 +502,9 @@ class FakeCal:
     def last_sync(self):
         return self._last
 
+    def window(self):
+        return ("2026-06-10", "2026-09-08")
+
     @property
     def connected(self):
         return self._connected
@@ -566,7 +569,8 @@ async def test_calendar_list_one_shot():
     out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
                         "calendar.list", {"from": "2026-07-01", "to": "2026-07-31"})
     assert out == [{"result": {"events": [CAL_ROW], "connected": True,
-                               "last_sync": "2026-07-10T14:00:00"}}]
+                               "last_sync": "2026-07-10T14:00:00",
+                               "window": ["2026-06-10", "2026-09-08"]}}]
     assert cal.seen == [("2026-07-01", "2026-07-31")]
 
 

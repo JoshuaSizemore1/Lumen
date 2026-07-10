@@ -174,7 +174,8 @@ class Router:
                     "events": self._calendar.list_range(
                         payload.get("from", today), payload.get("to", today)),
                     "connected": self._calendar.connected,
-                    "last_sync": self._calendar.last_sync()}}
+                    "last_sync": self._calendar.last_sync(),
+                    "window": list(self._calendar.window())}}
         elif type_ == "todos.list":
             yield {"result": self._todos.list_all()}
         elif type_ == "todos.add":

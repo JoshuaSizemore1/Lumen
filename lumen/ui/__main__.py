@@ -36,11 +36,12 @@ def main() -> None:
     todos_client = DaemonClient(socket_path)
     books_client = DaemonClient(socket_path)
     dash_client = DaemonClient(socket_path)
+    cal_client = DaemonClient(socket_path)
 
     win = MainWindow({
         "launcher": LauncherScreen(tab_client),
         "dashboard": DashboardScreen(dash_client),
-        "calendar": CalendarScreen(),
+        "calendar": CalendarScreen(cal_client),
         "mail": MailScreen(),
         "todos": TodoScreen(todos_client),
         "books": BooksScreen(books_client),
