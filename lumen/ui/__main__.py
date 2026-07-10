@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication
 from lumen.daemon.config import load_config
 from lumen.ui.book_catalog import BooksScreen
 from lumen.ui.calendar_view import CalendarScreen
+from lumen.ui.confirm_dialog import ConfirmDialog
 from lumen.ui.daemon_client import DaemonClient
 from lumen.ui.dashboard import DashboardScreen
 from lumen.ui.launcher import LauncherOverlay, LauncherScreen
@@ -49,6 +50,24 @@ def main() -> None:
     })
     overlay = LauncherOverlay(overlay_client)
     win.sleep_requested.connect(tab_client.sleep_model)
+
+    # Confirm-over-IPC: requests can arrive on any screen's connection, but the
+    # answer must travel on its own connection — the requesting one is paused
+    # daemon-side awaiting this very reply.
+    confirm_client = DaemonClient(socket_path)
+
+    def on_confirm_request(payload: dict) -> None:
+        approved = ConfirmDialog.ask(
+            payload.get("title", "Confirm action"),
+            payload.get("intro", ""),
+            [tuple(row) for row in payload.get("rows", [])],
+            payload.get("confirm_label", "Confirm"),
+            parent=win)
+        confirm_client.respond_confirm(payload["confirm_id"], approved)
+
+    for c in (tab_client, overlay_client, todos_client, books_client,
+              dash_client, cal_client):
+        c.confirm_requested.connect(on_confirm_request)
 
     def dispatch(command: str) -> None:
         if command == "toggle-launcher":

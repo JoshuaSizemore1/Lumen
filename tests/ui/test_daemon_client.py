@@ -142,3 +142,35 @@ def test_tool_used_line_emits_signal(qtbot):
     client._buf = b'{"id": 1, "tool_used": "search_books"}\n'
     client._process_buffer()
     assert seen == ["search_books"]
+
+
+def test_confirm_request_line_emits_signal(qtbot, tmp_path):
+    client = DaemonClient(str(tmp_path / "d.sock"))
+    payloads = []
+    client.confirm_requested.connect(payloads.append)
+    client._buf = (json.dumps({
+        "id": 3, "confirm_id": 9,
+        "confirm_request": {"title": "Create calendar event",
+                            "rows": [["Title", "Focus block"]]}}).encode() + b"\n")
+    client._process_buffer()
+    assert payloads == [{"confirm_id": 9, "title": "Create calendar event",
+                         "rows": [["Title", "Focus block"]]}]
+
+
+def test_respond_confirm_writes_confirm_response_line(qtbot, tmp_path):
+    path = str(tmp_path / "d.sock")
+    server = QLocalServer()
+    assert server.listen(path)
+    received = []
+
+    def on_new_conn():
+        conn = server.nextPendingConnection()
+        conn.readyRead.connect(lambda: received.append(json.loads(bytes(conn.readLine()))))
+
+    server.newConnection.connect(on_new_conn)
+    client = DaemonClient(path)
+    client.respond_confirm(9, True)
+    qtbot.waitUntil(lambda: received != [], timeout=2000)
+    assert received[0]["type"] == "confirm.response"
+    assert received[0]["payload"] == {"confirm_id": 9, "approved": True}
+    server.close()

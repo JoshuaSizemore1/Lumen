@@ -16,6 +16,7 @@ class DaemonClient(QObject):
     done = pyqtSignal()
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
+    confirm_requested = pyqtSignal(dict)  # payload rows + confirm_id
 
     def __init__(self, socket_path: str, parent=None):
         super().__init__(parent)
@@ -50,6 +51,12 @@ class DaemonClient(QObject):
     def sleep_model(self) -> None:
         self.send("sleep", {})
 
+    def respond_confirm(self, confirm_id: int, approved: bool) -> None:
+        """Answer a daemon confirm_request. Must be sent on a client whose
+        connection is NOT the one paused awaiting this answer — the shell keeps
+        a dedicated client for it."""
+        self.send("confirm.response", {"confirm_id": confirm_id, "approved": approved})
+
     def _on_error(self, _err) -> None:
         self._pending.clear()  # a send that failed is dead — never burst stale messages later
         self._buf = b""        # a partial line from a daemon that died mid-stream is dead too
@@ -81,6 +88,9 @@ class DaemonClient(QObject):
                     cb(msg["result"])
             elif msg.get("done"):
                 self.done.emit()
+            elif "confirm_request" in msg:
+                self.confirm_requested.emit(
+                    {"confirm_id": msg.get("confirm_id"), **msg["confirm_request"]})
             elif "tool_used" in msg:
                 self.tool_used.emit(msg["tool_used"])
             elif "chunk" in msg:
