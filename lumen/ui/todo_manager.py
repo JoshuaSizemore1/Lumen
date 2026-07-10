@@ -3,12 +3,12 @@ every response carries the fresh full list, so render = replace everything."""
 
 from datetime import date
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit,
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (QCheckBox, QHBoxLayout, QLineEdit,
                              QVBoxLayout, QWidget)
 
 from lumen.ui import theme
-from lumen.ui.widgets import Panel, button, chip, label
+from lumen.ui.widgets import ClickableLabel, Panel, button, chip, label
 
 GROUP_COLORS = {"TODAY": theme.ACCENT, "UPCOMING": theme.WARN, "NO DATE": theme.TEXT_DIM}
 
@@ -38,19 +38,6 @@ def format_due(due_iso: str, today: date) -> str:
     if 0 < (due - today).days <= 6:
         return due.strftime("%a")
     return f"{due.strftime('%b')} {due.day}"
-
-
-class ClickableLabel(QLabel):
-    clicked = pyqtSignal()
-
-    def __init__(self, text: str, role: str):
-        super().__init__(text)
-        self.setProperty("role", role)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
 
 
 class TodoScreen(QWidget):
