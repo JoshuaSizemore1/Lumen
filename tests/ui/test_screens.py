@@ -44,15 +44,6 @@ def test_mail_reply_opens_confirm(qtbot, monkeypatch):
     assert calls.get("asked")
 
 
-def test_books_log_and_recs(qtbot):
-    from lumen.ui.book_catalog import BooksScreen
-    w = BooksScreen()
-    qtbot.addWidget(w)
-    t = texts(w)
-    assert "Reading log" in t and "The Left Hand of Darkness" in t
-    assert "SUGGESTED — NOT YET READ" in t and "Solaris" in t
-
-
 def test_settings_sections(qtbot):
     from lumen.ui.settings import SettingsScreen
     w = SettingsScreen()

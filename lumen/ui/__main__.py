@@ -34,6 +34,7 @@ def main() -> None:
     tab_client = DaemonClient(socket_path)
     overlay_client = DaemonClient(socket_path)
     todos_client = DaemonClient(socket_path)
+    books_client = DaemonClient(socket_path)
 
     win = MainWindow({
         "launcher": LauncherScreen(tab_client),
@@ -41,7 +42,7 @@ def main() -> None:
         "calendar": CalendarScreen(),
         "mail": MailScreen(),
         "todos": TodoScreen(todos_client),
-        "books": BooksScreen(),
+        "books": BooksScreen(books_client),
         "settings": SettingsScreen(),
     })
     overlay = LauncherOverlay(overlay_client)
