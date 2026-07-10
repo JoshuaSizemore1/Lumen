@@ -29,8 +29,8 @@ async def run() -> None:
     tool_log = ToolLog(cfg.mcp.log_path) if cfg.mcp.enabled else None
     events = EventStore(conn)
     calendar = CalendarSync(events, cfg.google, cfg.sync)
-    router = Router(llm, TodoStore(conn), BookStore(conn), bridge=bridge,
-                    model_router=model_router, tool_log=tool_log,
+    router = Router(llm, TodoStore(conn), BookStore(conn), calendar=calendar,
+                    bridge=bridge, model_router=model_router, tool_log=tool_log,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

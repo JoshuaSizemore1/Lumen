@@ -477,3 +477,106 @@ async def test_model_router_choice_reaches_chat_with_tools():
     await collect(Router(CapModelLLM(), FakeStore(), bridge=FakeBridge(), model_router=MR()),
                   "chat", {"message": "look up files"})
     assert captured["model"] == "escalated-xyz"
+
+
+# ---- Phase 5: calendar reads (cache-backed one-shot + chat context) ----
+
+from datetime import date, datetime, timezone, timedelta as _td
+
+from lumen.daemon.router import CAL_HINT, calendar_context
+
+
+class FakeCal:
+    """Stands in for CalendarSync-as-facade: list_range/last_sync/connected."""
+
+    def __init__(self, rows=None, connected=True, last="2026-07-10T14:00:00"):
+        self.rows = rows or []
+        self._connected = connected
+        self._last = last
+        self.seen = []
+
+    def list_range(self, a, b):
+        self.seen.append((a, b))
+        return self.rows
+
+    def last_sync(self):
+        return self._last
+
+    @property
+    def connected(self):
+        return self._connected
+
+
+CAL_ROW = {"id": "t1", "calendar_id": "primary", "calendar_name": "Personal",
+           "color": "#7986cb", "title": "Standup",
+           "start_at": "2026-07-10T09:30:00+02:00",
+           "end_at": "2026-07-10T10:00:00+02:00", "all_day": False,
+           "location": "Meet", "description": None,
+           "attendees": [{"email": "p@x.com", "name": "Priya", "self": False}],
+           "status": "confirmed"}
+ALLDAY_ROW = dict(CAL_ROW, id="a1", title="PTO", start_at="2026-07-11",
+                  end_at="2026-07-12", all_day=True, attendees=[], location=None)
+
+
+def test_cal_hint_vocabulary():
+    for msg in ("what's on my calendar", "when is my next meeting",
+                "am I free at 3pm thursday", "what's my schedule this week",
+                "any appointments tomorrow", "how busy is friday"):
+        assert CAL_HINT.search(msg), msg
+    assert not CAL_HINT.search("what should I read next?")
+    assert not CAL_HINT.search("list the files in my notes folder")
+
+
+def test_calendar_context_lines_bounds_and_tz():
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone(_td(hours=2)))
+    ctx = calendar_context([CAL_ROW, ALLDAY_ROW], now, date(2026, 7, 24))
+    assert "2026-07-10 14:32" in ctx and "Friday" in ctx
+    assert "through 2026-07-24" in ctx and "say so" in ctx
+    assert "09:30" in ctx and "Standup" in ctx and "[Personal]" in ctx
+    assert "Priya" in ctx and "Meet" in ctx
+    assert "(all day)" in ctx and "PTO" in ctx
+
+
+def test_calendar_context_empty_marker():
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
+    assert "no events" in calendar_context([], now, date(2026, 7, 24)).lower()
+
+
+async def test_chat_calendar_question_injects_context():
+    llm = FakeLLM()
+    cal = FakeCal(rows=[CAL_ROW])
+    await collect(Router(llm, FakeStore(), calendar=cal), "chat",
+                  {"message": "what's on my calendar today?"})
+    assert llm.messages[0]["role"] == "system"
+    assert "Standup" in llm.messages[0]["content"]
+    # injection window is today -> +14 days
+    a, b = cal.seen[0]
+    assert a == date.today().isoformat()
+    assert b == (date.today() + _td(days=14)).isoformat()
+
+
+async def test_chat_without_calendar_never_injects():
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "chat", {"message": "am I free at 3pm?"})
+    assert llm.messages == [{"role": "user", "content": "am I free at 3pm?"}]
+
+
+async def test_calendar_list_one_shot():
+    cal = FakeCal(rows=[CAL_ROW])
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
+                        "calendar.list", {"from": "2026-07-01", "to": "2026-07-31"})
+    assert out == [{"result": {"events": [CAL_ROW], "connected": True,
+                               "last_sync": "2026-07-10T14:00:00"}}]
+    assert cal.seen == [("2026-07-01", "2026-07-31")]
+
+
+async def test_calendar_list_defaults_to_today():
+    cal = FakeCal()
+    await collect(Router(FakeLLM(), FakeStore(), calendar=cal), "calendar.list", {})
+    today = date.today().isoformat()
+    assert cal.seen == [(today, today)]
+
+
+async def test_calendar_list_without_calendar_errors():
+    out = await collect(Router(FakeLLM(), FakeStore()), "calendar.list", {})
+    assert "unavailable" in out[0]["error"]

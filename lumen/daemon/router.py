@@ -1,11 +1,12 @@
-"""Request router: chat streaming, sleep, and todos.* one-shot CRUD.
-Tool-call vs direct-answer classification arrives with the MCP phase."""
+"""Request router: chat streaming (plain, tool-augmented, and book-rec paths),
+sleep, and todos.*/books.* one-shot CRUD. Tool-call vs direct-answer
+classification is the regex hints below — cheap heuristics, no LLM pre-pass."""
 
 import logging
 import re
 import time
 from collections.abc import AsyncIterator
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.client import LLMUnavailable
@@ -29,6 +30,43 @@ REC_HINT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+CAL_HINT = re.compile(
+    r"\b(calendar|meetings?|events?|schedule|agenda|appointments?|free|busy)\b",
+    re.IGNORECASE,
+)
+
+CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
+
+
+def calendar_context(events: list[dict], now: datetime, window_end: date) -> str:
+    """System-message context: current local time, a hard bounds statement so the
+    model can't guess outside the window, one compact line per event, and an
+    explicit empty marker."""
+    lines = [f"Now: {now.strftime('%Y-%m-%d %H:%M')} ({now.strftime('%A')}), "
+             f"local timezone UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}.",
+             f"The user's calendar from {now.date().isoformat()} through "
+             f"{window_end.isoformat()} (events outside this range are not shown — "
+             "say so if asked about them):"]
+    if not events:
+        lines.append("No events in this range.")
+        return "\n".join(lines)
+    for e in events:
+        cal = f" [{e['calendar_name']}]" if e.get("calendar_name") else ""
+        loc = f" at {e['location']}" if e.get("location") else ""
+        names = ", ".join(a["name"] or a["email"] for a in e.get("attendees", [])
+                          if not a.get("self"))
+        who = f" — with {names}" if names else ""
+        if e["all_day"]:
+            d = date.fromisoformat(e["start_at"][:10])
+            when = f"{d.strftime('%a')} {d.isoformat()} (all day)"
+        else:
+            s = datetime.fromisoformat(e["start_at"]).astimezone(now.tzinfo)
+            when = f"{s.strftime('%a')} {s.date().isoformat()} {s.strftime('%H:%M')}"
+            if e.get("end_at"):
+                when += f"–{datetime.fromisoformat(e['end_at']).astimezone(now.tzinfo).strftime('%H:%M')}"
+        lines.append(f"- {when}: {e['title']}{cal}{loc}{who}")
+    return "\n".join(lines)
+
 
 def todo_context(todos: list[dict], today: date) -> str:
     """System-message context: today's date + one line per open todo, or an
@@ -46,11 +84,12 @@ def todo_context(todos: list[dict], today: date) -> str:
 
 
 class Router:
-    def __init__(self, llm, todos, books=None, *, bridge=None, model_router=None,
-                 tool_log=None, max_iterations=4):
+    def __init__(self, llm, todos, books=None, *, calendar=None, bridge=None,
+                 model_router=None, tool_log=None, max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
+        self._calendar = calendar   # CalendarSync facade: list_range/last_sync/connected
         self._bridge = bridge
         self._model_router = model_router
         self._tool_log = tool_log
@@ -63,6 +102,12 @@ class Router:
             context.append(todo_context(self._todos.open_todos(), date.today()))
         if self._books is not None and BOOK_HINT.search(message):
             context.append(self._books.catalog_context())
+        if self._calendar is not None and CAL_HINT.search(message):
+            now = datetime.now().astimezone()
+            end = now.date() + timedelta(days=CAL_CONTEXT_DAYS)
+            context.append(calendar_context(
+                self._calendar.list_range(now.date().isoformat(), end.isoformat()),
+                now, end))
         messages = ([{"role": "system", "content": "\n\n".join(context)}]
                     if context else [])
         messages.append({"role": "user", "content": message})
@@ -120,6 +165,16 @@ class Router:
                 yield {"error": result["error"]}
             else:
                 yield {"result": result}
+        elif type_ == "calendar.list":
+            if self._calendar is None:
+                yield {"error": "calendar unavailable"}
+            else:
+                today = date.today().isoformat()
+                yield {"result": {
+                    "events": self._calendar.list_range(
+                        payload.get("from", today), payload.get("to", today)),
+                    "connected": self._calendar.connected,
+                    "last_sync": self._calendar.last_sync()}}
         elif type_ == "todos.list":
             yield {"result": self._todos.list_all()}
         elif type_ == "todos.add":

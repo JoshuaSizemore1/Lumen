@@ -77,6 +77,13 @@ class CalendarSync:
     def connected(self) -> bool:
         return google_auth.connected(self._google)
 
+    # Facade the router consumes — one object for cache reads + sync status.
+    def list_range(self, start_iso: str, end_iso: str) -> list[dict]:
+        return self._store.list_range(start_iso, end_iso)
+
+    def last_sync(self) -> str | None:
+        return self._store.last_sync()
+
     def window(self, today: date | None = None) -> tuple[str, str]:
         today = today or date.today()
         return ((today - timedelta(days=self._sync.calendar_window_past_days)).isoformat(),
