@@ -70,3 +70,126 @@ def test_validate_dedupes_and_caps_at_three():
 
 def test_validate_empty_tool_results_drops_everything():
     assert validate_recs([rec("Solaris")], [], []) == []
+
+
+from lumen.daemon.llm.book_recs import recommend  # noqa: E402
+
+
+class FakeBooks:
+    def __init__(self, catalog=None):
+        self.catalog = catalog if catalog is not None else [
+            {"title": "Piranesi", "author": "Susanna Clarke", "rating": 4,
+             "notes": "quiet", "date_finished": "2026-04-30", "tags": [], "id": 1,
+             "created_at": "2026-04-30T10:00:00"}]
+        self.saved = None
+
+    def list_all(self):
+        return self.catalog
+
+    def catalog_context(self):
+        return "The user's reading log (books they have read):\n- Piranesi"
+
+    def save_recs(self, recs):
+        self.saved = recs
+
+    def latest_recs(self):
+        return {"recs": self.saved or [], "generated_at": "2026-07-09T12:00:00"}
+
+
+class FakeBridge:
+    def __init__(self, fail_start=False, tool_names=("search_books", "get_book"),
+                 result=None):
+        self._fail_start = fail_start
+        self._tools = [{"type": "function", "function": {"name": n}} for n in tool_names]
+        self._result = result if result is not None else (
+            "- Solaris — Stanislaw Lem (1961) [/works/OL1]")
+        self.calls = []
+
+    async def ensure_started(self):
+        if self._fail_start:
+            raise RuntimeError("npx exploded")
+
+    def ollama_tools(self):
+        return self._tools
+
+    async def call(self, name, args):
+        self.calls.append((name, args))
+        return self._result
+
+
+class RecLLM:
+    """Calls search_books once, then answers in the pipe format."""
+
+    def __init__(self, answer="Solaris | Stanislaw Lem | uncanny like Piranesi"):
+        self._answer = answer
+        self.seen_messages = None
+        self.seen_model = None
+        self.seen_tools = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.seen_messages, self.seen_model, self.seen_tools = messages, model, tools
+        yield {"tool_call": {"name": "search_books", "arguments": {"query": "x"}}}
+        await executor("search_books", {"query": "x"})
+        yield {"content": self._answer}
+
+
+async def test_recommend_happy_path_saves_and_returns_grounded_set():
+    books, bridge = FakeBooks(), FakeBridge()
+    out = await recommend(RecLLM(), bridge, books)
+    assert out["recs"] == [{"title": "Solaris", "author": "Stanislaw Lem",
+                            "rationale": "uncanny like Piranesi"}]
+    assert books.saved and bridge.calls == [("search_books", {"query": "x"})]
+
+
+async def test_recommend_empty_catalog_short_circuits():
+    books = FakeBooks(catalog=[])
+    out = await recommend(RecLLM(), FakeBridge(), books)
+    assert "log a few books" in out["error"] and books.saved is None
+
+
+async def test_recommend_bridge_failure_is_an_honest_error():
+    out = await recommend(RecLLM(), FakeBridge(fail_start=True), FakeBooks())
+    assert "unavailable" in out["error"]
+
+
+async def test_recommend_without_book_tools_errors():
+    out = await recommend(RecLLM(), FakeBridge(tool_names=("list_directory",)),
+                          FakeBooks())
+    assert "unavailable" in out["error"]
+
+
+async def test_recommend_filters_tools_to_books_server_even_namespaced():
+    llm = RecLLM()
+    bridge = FakeBridge(tool_names=("list_directory", "books__search_books", "get_book"))
+    await recommend(llm, bridge, FakeBooks())
+    names = [t["function"]["name"] for t in llm.seen_tools]
+    assert names == ["books__search_books", "get_book"]
+
+
+async def test_recommend_invented_answer_yields_error_and_saves_nothing():
+    books = FakeBooks()
+    out = await recommend(RecLLM(answer="Made Up Book | Nobody | sounds nice"),
+                          FakeBridge(), books)
+    assert "couldn't get grounded suggestions" in out["error"]
+    assert books.saved is None
+
+
+async def test_recommend_injects_catalog_and_passes_model_and_request():
+    llm = RecLLM()
+    await recommend(llm, FakeBridge(), FakeBooks(), model="esc-14b",
+                    request="recommend me something spooky")
+    assert "Piranesi" in llm.seen_messages[0]["content"]
+    assert llm.seen_messages[-1]["content"] == "recommend me something spooky"
+    assert llm.seen_model == "esc-14b"
+
+
+async def test_recommend_writes_tool_log():
+    logged = []
+
+    class FakeToolLog:
+        def write(self, tool, arguments, ok, result, duration_ms):
+            logged.append((tool, ok))
+
+    await recommend(RecLLM(), FakeBridge(), FakeBooks(), tool_log=FakeToolLog())
+    assert logged == [("search_books", True)]
