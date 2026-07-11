@@ -3,10 +3,12 @@ event-creation paths), sleep, todos.*/books.*/calendar.* one-shots, and
 confirm.response resolution. Tool-call vs direct-answer classification is the
 regex hints below — cheap heuristics, no LLM pre-pass."""
 
+import asyncio
 import logging
 import re
 import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from datetime import date, datetime, timedelta
 
 from lumen.daemon.llm.book_recs import recommend
@@ -147,8 +149,11 @@ class Router:
                     yield ev
                 return
             if self._bridge is not None and TOOL_HINT.search(message):
-                async for ev in self._chat_with_tools(message):
-                    yield ev
+                # aclosing: closing this generator must synchronously close the
+                # tool loop too (it owns a pump task), not defer to GC.
+                async with aclosing(self._chat_with_tools(message)) as gen:
+                    async for ev in gen:
+                        yield ev
                 return
             messages = self._base_messages(message)
             try:
@@ -371,16 +376,38 @@ class Router:
 
         messages = self._base_messages(message)
         model = self._pick_model(message)
+        # chat_with_tools awaits the executor inline while this generator waits
+        # on the loop's next event, so anything the executor must surface
+        # mid-call (the write gate's confirm_request) travels via the queue.
+        queue: asyncio.Queue = asyncio.Queue()
+        done = object()
+
+        async def pump():
+            try:
+                async for ev in self._llm.chat_with_tools(
+                        messages, tools, executor, model=model,
+                        max_iterations=self._max_iterations):
+                    await queue.put(ev)
+            except LLMUnavailable as e:
+                await queue.put({"_pump_error": str(e)})
+            finally:
+                await queue.put(done)
+
+        task = asyncio.create_task(pump())
         try:
-            async for ev in self._llm.chat_with_tools(
-                messages, tools, executor, model=model, max_iterations=self._max_iterations):
-                if "tool_call" in ev:
+            while (ev := await queue.get()) is not done:
+                if "_pump_error" in ev:
+                    yield {"error": ev["_pump_error"]}
+                    return
+                if "confirm_request" in ev:
+                    yield ev
+                elif "tool_call" in ev:
                     yield {"tool_used": ev["tool_call"]["name"]}
                 elif ev.get("capped"):
                     yield {"chunk": "(stopped after several tool steps without a final answer)"}
                 elif "content" in ev:
                     yield {"chunk": ev["content"]}
-        except LLMUnavailable as e:
-            yield {"error": str(e)}
-            return
-        yield {"done": True}
+            yield {"done": True}
+        finally:
+            task.cancel()   # early close (UI disconnect) must not leak the loop
+            await asyncio.gather(task, return_exceptions=True)

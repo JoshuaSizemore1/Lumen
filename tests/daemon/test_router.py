@@ -291,6 +291,43 @@ async def test_chat_transport_error_in_tool_call_fed_back():
     assert out[-1] == {"done": True}
 
 
+async def test_chat_tool_loop_llm_down_yields_error():
+    class DownLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            raise LLMUnavailable("down")
+            yield  # unreachable; makes this an async generator
+
+    out = await collect(Router(DownLLM(), FakeStore(), bridge=FakeBridge(),
+                               model_router=FakeModelRouter()),
+                        "chat", {"message": "look up files"})
+    assert out == [{"error": "down"}]
+
+
+async def test_early_close_cancels_tool_loop():
+    import asyncio
+    state = {}
+
+    class HangLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            try:
+                yield {"tool_call": {"name": "list_directory", "arguments": {}}}
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+    router = Router(HangLLM(), FakeStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    gen = router.handle("chat", {"message": "look up files"})
+    assert await anext(gen) == {"tool_used": "list_directory"}
+    await gen.aclose()
+    assert state.get("cancelled") is True
+
+
 class FakeBookStore:
     def __init__(self, context="The user's reading log is empty."):
         self._context = context
