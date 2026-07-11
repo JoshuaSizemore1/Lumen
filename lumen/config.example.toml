@@ -2,6 +2,7 @@
 
 [llm]
 model = "qwen3:4b-instruct" # fast-path model; see .claude/skills/llm-serving.md for slots
+# escalation_model = "qwen3:14b"  # 14B-class slot for write-shaped file tasks — set only after benchmarking on this hardware
 idle_unload_minutes = 10    # model evicts from RAM after this much inactivity — never -1
 ollama_url = "http://127.0.0.1:11434"
 think = false               # reasoning toggle for thinking-capable models — fast path uses non-thinking qwen3:4b-instruct; keep false
@@ -16,14 +17,18 @@ think = false               # reasoning toggle for thinking-capable models — f
 # enabled = false            # attach MCP tools to chat when a message looks like a lookup
 # max_iterations = 4         # tool-loop safety cap per request
 # log_path = ""              # default: $XDG_STATE_HOME/lumen/tool-calls.jsonl (grounding-verification log)
+# grants_path = ""           # default: $XDG_DATA_HOME/lumen/write-grants.txt — one granted file per line, delete a line to revoke
 
-# One [[mcp.servers]] block per server. `tools` is a read-only allowlist:
-# if present, ONLY these tool names are exposed to the model (keeps Phase 3 read-only).
+# One [[mcp.servers]] block per server. `tools` is an allowlist: if present, ONLY
+# these tool names are exposed to the model. `write_tools` marks which of them are
+# write-capable (tool name -> its path argument names); every write to an ungranted
+# path pauses for the confirmation dialog, and approval grants that exact file for good.
 # [[mcp.servers]]
 # name = "fs"
 # command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "~/notes"]
-# tools = ["read_file", "read_multiple_files", "list_directory", "directory_tree", "search_files", "get_file_info", "list_allowed_directories"]
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/"]   # reads unrestricted by user decision (2026-07-09)
+# tools = ["read_file", "read_multiple_files", "list_directory", "directory_tree", "search_files", "get_file_info", "list_allowed_directories", "write_file", "edit_file", "create_directory", "move_file"]
+# write_tools = { write_file = ["path"], edit_file = ["path"], create_directory = ["path"], move_file = ["source", "destination"] }
 
 # [[mcp.servers]]
 # name = "books"

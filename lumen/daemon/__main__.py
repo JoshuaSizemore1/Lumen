@@ -17,6 +17,7 @@ from lumen.daemon.llm.mcp_bridge import LazyBridge
 from lumen.daemon.llm.model_router import ModelRouter
 from lumen.daemon.llm.tool_log import ToolLog
 from lumen.daemon.router import Router
+from lumen.daemon.write_gate import GrantStore, WriteGate, write_tools_map
 
 log = logging.getLogger("lumen.daemon")
 
@@ -26,12 +27,16 @@ async def run() -> None:
     conn = db.connect(cfg.db_path)
     llm = OllamaClient(cfg.ollama_url, cfg.model, cfg.keep_alive, think=cfg.think)
     bridge = LazyBridge(list(cfg.mcp.servers)) if cfg.mcp.enabled else None
-    model_router = ModelRouter(cfg.model)
+    model_router = ModelRouter(cfg.model, cfg.escalation_model)
     tool_log = ToolLog(cfg.mcp.log_path) if cfg.mcp.enabled else None
     events = EventStore(conn)
     calendar = CalendarSync(events, cfg.google, cfg.sync)
+    broker = ConfirmBroker()   # shared: router resolves, the write gate awaits
+    write_gate = (WriteGate(GrantStore(cfg.mcp.grants_path), broker,
+                            write_tools_map(cfg.mcp.servers))
+                  if cfg.mcp.enabled else None)
     router = Router(llm, TodoStore(conn), BookStore(conn), calendar=calendar,
-                    bridge=bridge, confirm=ConfirmBroker(),
+                    bridge=bridge, confirm=broker, write_gate=write_gate,
                     model_router=model_router, tool_log=tool_log,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
