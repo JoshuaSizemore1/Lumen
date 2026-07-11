@@ -1,7 +1,17 @@
-"""Picks which model handles a request. Phase 3: always the fast model — a single
-read-only tool call is within its ability. The escalation branch (14B for reliable
-multi-step tool chains) lands in Phase 5/6; this is the seam it plugs into, so the
-later change is config + one branch here, not a rewrite."""
+"""Picks which model handles a request. Fast model by default; Phase 4.5 adds
+the first real escalation — write-shaped filesystem tasks go to the 14B-class
+slot per mcp-integration.md, but only when config names one (benchmark-gated:
+llm-serving.md says never commit to a size unmeasured)."""
+
+import re
+
+# Write-shaped file request: a write verb plus something file-like (a filename
+# extension, a path separator, or the words file/folder/directory/notes).
+# Shared: router.py uses it to open the tool loop, pick_model to escalate.
+FS_WRITE_HINT = re.compile(
+    r"\b(save|write|append|edit|update|rename|move|create|make)\b"
+    r".*?(\bfiles?\b|\bfolder\b|\bdirectory\b|\bnotes?\b|/|\.\w{1,5}\b)",
+    re.IGNORECASE | re.DOTALL)
 
 
 class ModelRouter:
@@ -10,5 +20,7 @@ class ModelRouter:
         self._escalation = escalation_model
 
     def pick_model(self, message: str, *, needs_tools: bool) -> str:
-        # Phase 3: no escalation yet. When multi-step chains appear, escalate here.
+        if (self._escalation and needs_tools
+                and FS_WRITE_HINT.search(message or "")):
+            return self._escalation
         return self._fast

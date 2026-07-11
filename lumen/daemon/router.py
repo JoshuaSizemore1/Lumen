@@ -16,6 +16,7 @@ from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
                                            validate_proposal)
 from lumen.daemon.llm.mcp_bridge import ToolCallError
+from lumen.daemon.llm.model_router import FS_WRITE_HINT
 
 log = logging.getLogger(__name__)
 
@@ -101,13 +102,15 @@ def todo_context(todos: list[dict], today: date) -> str:
 
 class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, bridge=None,
-                 confirm=None, model_router=None, tool_log=None, max_iterations=4):
+                 confirm=None, write_gate=None, model_router=None, tool_log=None,
+                 max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
         self._calendar = calendar   # CalendarSync facade: list_range/last_sync/connected
         self._bridge = bridge
         self._confirm = confirm     # ConfirmBroker — gates every external write
+        self._write_gate = write_gate   # WriteGate — per-file grants for fs writes
         self._model_router = model_router
         self._tool_log = tool_log
         self._max_iterations = max_iterations
@@ -148,7 +151,8 @@ class Router:
                 async for ev in self._recommend_chat(message):
                     yield ev
                 return
-            if self._bridge is not None and TOOL_HINT.search(message):
+            if self._bridge is not None and (TOOL_HINT.search(message)
+                                             or FS_WRITE_HINT.search(message)):
                 # aclosing: closing this generator must synchronously close the
                 # tool loop too (it owns a pump task), not defer to GC.
                 async with aclosing(self._chat_with_tools(message)) as gen:
@@ -360,8 +364,24 @@ class Router:
             yield {"done": True}
             return
 
+        # chat_with_tools awaits the executor inline while this generator waits
+        # on the loop's next event, so anything the executor must surface
+        # mid-call (the write gate's confirm_request) travels via the queue.
+        queue: asyncio.Queue = asyncio.Queue()
+        done = object()
+
+        async def emit(ev: dict) -> None:
+            await queue.put(ev)
+
         async def executor(name, args):
             start = time.monotonic()
+            if self._write_gate is not None:
+                denial = await self._write_gate.check(name, args, emit)
+                if denial is not None:
+                    if self._tool_log is not None:
+                        self._tool_log.write(name, args, False, denial,
+                                             int((time.monotonic() - start) * 1000))
+                    return denial
             try:
                 text = await self._bridge.call(name, args)
                 ok = True
@@ -376,11 +396,6 @@ class Router:
 
         messages = self._base_messages(message)
         model = self._pick_model(message)
-        # chat_with_tools awaits the executor inline while this generator waits
-        # on the loop's next event, so anything the executor must surface
-        # mid-call (the write gate's confirm_request) travels via the queue.
-        queue: asyncio.Queue = asyncio.Queue()
-        done = object()
 
         async def pump():
             try:

@@ -328,6 +328,121 @@ async def test_early_close_cancels_tool_loop():
     assert state.get("cancelled") is True
 
 
+def test_fs_write_hint_vocabulary():
+    from lumen.daemon.llm.model_router import FS_WRITE_HINT
+    assert FS_WRITE_HINT.search("save this to notes.txt")
+    assert FS_WRITE_HINT.search("move draft.txt to final.txt")
+    assert FS_WRITE_HINT.search("write hello into /tmp/hello.txt")
+    assert FS_WRITE_HINT.search("create a folder called projects")
+    assert not FS_WRITE_HINT.search("write me a poem")
+    assert not FS_WRITE_HINT.search("how are you today")
+
+
+async def test_write_shaped_message_enters_tool_loop():
+    bridge = FakeBridge()
+    router = Router(ToolLLM(), FakeStore(), bridge=bridge,
+                    model_router=FakeModelRouter())
+    # "save … .txt" misses TOOL_HINT; FS_WRITE_HINT must open the loop
+    out = await collect(router, "chat", {"message": "save hello to /tmp/h.txt"})
+    assert bridge.started is True
+    assert out[-1] == {"done": True}
+
+
+async def test_event_hint_still_precedes_write_hint():
+    # "create a meeting …" must go to event creation, not the fs tool loop
+    from lumen.daemon.router import EVENT_HINT
+    from lumen.daemon.llm.model_router import FS_WRITE_HINT
+    msg = "create a meeting note file for Friday's call"
+    assert EVENT_HINT.search(msg) and FS_WRITE_HINT.search(msg)
+    # Router order: EVENT_HINT is checked first (needs confirm+bridge+calendar)
+
+
+class GateLLM:
+    """Calls one write tool, then answers with whatever the executor returned."""
+    model = None
+
+    def __init__(self, tool="write_file", args=None):
+        self._tool = tool
+        self._args = args or {}
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+        yield {"tool_call": {"name": self._tool, "arguments": self._args}}
+        text = await executor(self._tool, self._args)
+        yield {"content": f"result: {text}"}
+
+
+def gated_router(tmp_path, llm, bridge=None, tool_log=None):
+    from lumen.daemon.confirm import ConfirmBroker
+    from lumen.daemon.write_gate import GrantStore, WriteGate
+    broker = ConfirmBroker(timeout=5.0)
+    grants = GrantStore(tmp_path / "grants.txt")
+    gate = WriteGate(grants, broker,
+                     {"write_file": ("path",)})
+    router = Router(llm, FakeStore(),
+                    bridge=bridge or FakeBridge(tools=(("write_file", {}),)),
+                    confirm=broker, write_gate=gate,
+                    model_router=FakeModelRouter(), tool_log=tool_log)
+    return router, broker, grants
+
+
+async def test_ungranted_write_confirm_approve_calls_tool(tmp_path):
+    bridge = FakeBridge(tools=(("write_file", {}),), result="ok, written")
+    router, broker, grants = gated_router(
+        tmp_path, GateLLM(args={"path": str(tmp_path / "f.txt"), "content": "hi"}),
+        bridge=bridge)
+    events = []
+    async for ev in router.handle("chat", {"message": "save hello to /tmp/h.txt"}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], True)
+    assert any("confirm_request" in e for e in events)
+    assert bridge.calls == [("write_file",
+                             {"path": str(tmp_path / "f.txt"), "content": "hi"})]
+    assert grants.is_granted(str(tmp_path / "f.txt")) is True
+    assert any(e.get("chunk", "").startswith("result: ok, written") for e in events)
+
+
+async def test_ungranted_write_decline_never_calls_tool(tmp_path):
+    from lumen.daemon.write_gate import DENIAL
+    bridge = FakeBridge(tools=(("write_file", {}),))
+    logrec = []
+
+    class FakeLog:
+        def write(self, tool, arguments, ok, result, duration_ms):
+            logrec.append((tool, ok, result))
+
+    router, broker, grants = gated_router(
+        tmp_path, GateLLM(args={"path": str(tmp_path / "f.txt")}),
+        bridge=bridge, tool_log=FakeLog())
+    events = []
+    async for ev in router.handle("chat", {"message": "save hello to /tmp/h.txt"}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], False)
+    assert bridge.calls == []                       # write never executed
+    assert grants.is_granted(str(tmp_path / "f.txt")) is False
+    assert any(e.get("chunk") == f"result: {DENIAL}" for e in events)
+    assert ("write_file", False, DENIAL) in logrec  # denial logged like any call
+
+
+async def test_granted_write_skips_confirm_entirely(tmp_path):
+    bridge = FakeBridge(tools=(("write_file", {}),), result="ok")
+    router, broker, grants = gated_router(
+        tmp_path, GateLLM(args={"path": str(tmp_path / "f.txt")}), bridge=bridge)
+    grants.grant(str(tmp_path / "f.txt"))
+    events = await collect(router, "chat", {"message": "save hello to /tmp/h.txt"})
+    assert not any("confirm_request" in e for e in events)
+    assert len(bridge.calls) == 1
+
+
+async def test_read_tool_unaffected_by_gate(tmp_path):
+    bridge = FakeBridge()
+    router, broker, grants = gated_router(tmp_path, ToolLLM(), bridge=bridge)
+    events = await collect(router, "chat", {"message": "what files are in /n"})
+    assert not any("confirm_request" in e for e in events)
+    assert {"tool_used": "list_directory"} in events
+
+
 class FakeBookStore:
     def __init__(self, context="The user's reading log is empty."):
         self._context = context
