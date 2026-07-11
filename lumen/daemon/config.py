@@ -25,6 +25,12 @@ def default_tool_log_path() -> Path:
     return root / "lumen" / "tool-calls.jsonl"
 
 
+def default_grants_path() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "write-grants.txt"
+
+
 def default_google_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
@@ -52,6 +58,9 @@ class MCPServerConfig:
     command: str
     args: tuple[str, ...] = ()
     tools: tuple[str, ...] | None = None   # read-only allowlist; None = expose all
+    # tool name -> path-argument names; presence marks a tool write-capable,
+    # gated by the daemon's grant check (never guessed from names at runtime)
+    write_tools: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -59,12 +68,14 @@ class MCPConfig:
     enabled: bool = False
     max_iterations: int = 4
     log_path: Path = field(default_factory=default_tool_log_path)
+    grants_path: Path = field(default_factory=default_grants_path)
     servers: tuple[MCPServerConfig, ...] = ()
 
 
 @dataclass(frozen=True)
 class Config:
     model: str = "qwen3:4b-instruct"
+    escalation_model: str | None = None   # 14B-class slot; unset until benchmarked
     idle_unload_minutes: int = 10
     ollama_url: str = "http://127.0.0.1:11434"
     think: bool = False
@@ -93,6 +104,8 @@ def load_config(path: Path | None = None) -> Config:
     kwargs = {}
     if "model" in llm:
         kwargs["model"] = llm["model"]
+    if "escalation_model" in llm:
+        kwargs["escalation_model"] = llm["escalation_model"]
     if "idle_unload_minutes" in llm:
         kwargs["idle_unload_minutes"] = llm["idle_unload_minutes"]
     if "ollama_url" in llm:
@@ -110,11 +123,20 @@ def load_config(path: Path | None = None) -> Config:
         for s in mcp_raw.get("servers", []):
             if "name" not in s or "command" not in s:
                 raise SystemExit("lumen: each [[mcp.servers]] entry needs name and command")
+            write_tools = {}
+            for tool, path_args in s.get("write_tools", {}).items():
+                if (not isinstance(path_args, list) or not path_args
+                        or not all(isinstance(a, str) for a in path_args)):
+                    raise SystemExit(
+                        f"lumen: write_tools.{tool} needs its path argument names "
+                        "as a non-empty list of strings")
+                write_tools[tool] = tuple(path_args)
             servers.append(MCPServerConfig(
                 name=s["name"],
                 command=s["command"],
                 args=tuple(s.get("args", [])),
                 tools=tuple(s["tools"]) if "tools" in s else None,
+                write_tools=write_tools,
             ))
         servers = tuple(servers)
         mcp_kwargs = {"enabled": bool(mcp_raw.get("enabled", False)), "servers": servers}
@@ -122,6 +144,8 @@ def load_config(path: Path | None = None) -> Config:
             mcp_kwargs["max_iterations"] = int(mcp_raw["max_iterations"])
         if mcp_raw.get("log_path"):
             mcp_kwargs["log_path"] = Path(mcp_raw["log_path"]).expanduser()
+        if mcp_raw.get("grants_path"):
+            mcp_kwargs["grants_path"] = Path(mcp_raw["grants_path"]).expanduser()
         if mcp_kwargs.get("max_iterations", 4) <= 0:
             raise SystemExit("lumen: [mcp] max_iterations must be positive")
         kwargs["mcp"] = MCPConfig(**mcp_kwargs)

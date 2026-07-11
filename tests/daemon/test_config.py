@@ -144,6 +144,68 @@ def test_mcp_nonpositive_max_iterations_exits(tmp_path):
         load_config(p)
 
 
+def test_mcp_write_tools_default_empty(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[mcp]\nenabled = true\n[[mcp.servers]]\nname = "fs"\ncommand = "npx"\n')
+    assert load_config(p).mcp.servers[0].write_tools == {}
+
+
+def test_mcp_write_tools_parsed_as_tuples(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[mcp]\nenabled = true\n'
+        '[[mcp.servers]]\nname = "fs"\ncommand = "npx"\n'
+        'write_tools = { write_file = ["path"], move_file = ["source", "destination"] }\n'
+    )
+    cfg = load_config(p)
+    assert cfg.mcp.servers[0].write_tools == {
+        "write_file": ("path",), "move_file": ("source", "destination")}
+
+
+def test_mcp_write_tool_with_empty_path_args_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[mcp]\nenabled = true\n'
+        '[[mcp.servers]]\nname = "fs"\ncommand = "npx"\n'
+        'write_tools = { write_file = [] }\n'
+    )
+    with pytest.raises(SystemExit, match="path argument names"):
+        load_config(p)
+
+
+def test_mcp_write_tool_with_non_list_path_args_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[mcp]\nenabled = true\n'
+        '[[mcp.servers]]\nname = "fs"\ncommand = "npx"\n'
+        'write_tools = { write_file = "path" }\n'
+    )
+    with pytest.raises(SystemExit, match="path argument names"):
+        load_config(p)
+
+
+def test_default_grants_path_honors_xdg_data(monkeypatch, tmp_path):
+    from lumen.daemon.config import default_grants_path
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert default_grants_path() == tmp_path / "lumen" / "write-grants.txt"
+
+
+def test_grants_path_from_toml_expands_user(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[mcp]\nenabled = true\ngrants_path = "~/grants.txt"\n')
+    assert load_config(p).mcp.grants_path == Path.home() / "grants.txt"
+
+
+def test_escalation_model_defaults_none(tmp_path):
+    assert load_config(tmp_path / "nope.toml").escalation_model is None
+
+
+def test_escalation_model_from_toml(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[llm]\nescalation_model = "qwen3:14b"\n')
+    assert load_config(p).escalation_model == "qwen3:14b"
+
+
 def test_google_defaults_in_xdg_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     cfg = load_config(tmp_path / "nope.toml")
