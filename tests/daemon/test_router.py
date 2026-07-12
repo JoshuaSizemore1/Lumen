@@ -1,8 +1,14 @@
 import re
 
+from lumen.daemon import db
+from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 from lumen.daemon.router import IDENTITY, Router
+
+
+def conv_store(tmp_path):
+    return ConversationStore(db.connect(tmp_path / "conv.db"))
 
 
 class FakeLLM:
@@ -92,6 +98,111 @@ async def test_identity_precedes_per_query_context():
     await collect(Router(llm, FakeStore(rows=[])), "chat", {"message": "what's due today?"})
     sys = llm.messages[0]["content"]
     assert sys.index("Lumen") < sys.index("Today is")   # identity first, context stacks under it
+
+
+async def test_new_chat_creates_conversation_and_persists_turns(tmp_path):
+    llm = FakeLLM(chunks=("hi ", "there"))
+    conv = conv_store(tmp_path)
+    out = await collect(Router(llm, FakeStore(), conversations=conv),
+                        "chat", {"message": "hello"})
+    cid = out[0]["conversation_id"]     # emitted first so the UI can track the thread
+    assert isinstance(cid, int)
+    roles = [(m["role"], m["content"]) for m in conv.get(cid)["messages"]]
+    assert roles == [("user", "hello"), ("assistant", "hi there")]  # write-through both turns
+
+
+async def test_followup_threads_prior_turns_into_prompt(tmp_path):
+    conv = conv_store(tmp_path)
+    cid = conv.create("first q")
+    conv.add_message(cid, "user", "first q")
+    conv.add_message(cid, "assistant", "first a")
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore(), conversations=conv),
+                  "chat", {"message": "follow up", "conversation_id": cid})
+    contents = [m["content"] for m in llm.messages]
+    assert "first q" in contents and "first a" in contents   # history seen by the model
+    assert llm.messages[0]["role"] == "system"               # identity still leads
+    assert llm.messages[-1] == {"role": "user", "content": "follow up"}
+
+
+async def test_no_conversation_id_reemitted_for_existing_thread(tmp_path):
+    conv = conv_store(tmp_path)
+    cid = conv.create("q")
+    out = await collect(Router(FakeLLM(), FakeStore(), conversations=conv),
+                        "chat", {"message": "more", "conversation_id": cid})
+    assert not any("conversation_id" in o for o in out)   # only emitted when newly created
+
+
+async def test_history_capped_to_recent_turns(tmp_path, monkeypatch):
+    from lumen.daemon import router as rmod
+    monkeypatch.setattr(rmod, "HISTORY_TURNS", 2)
+    conv = conv_store(tmp_path)
+    cid = conv.create("q")
+    for i in range(5):
+        conv.add_message(cid, "user", f"old{i}")
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore(), conversations=conv),
+                  "chat", {"message": "newest", "conversation_id": cid})
+    non_system = [m for m in llm.messages if m["role"] != "system"]
+    assert len(non_system) == 2                       # fixed-size window, older turns fall off
+    assert non_system[-1]["content"] == "newest"
+
+
+async def test_tool_engaged_conversation_stays_tool_capable_on_bare_followup(tmp_path):
+    conv = conv_store(tmp_path)
+    cid = conv.create("find my files")
+    conv.mark_tool_engaged(cid)                        # a tool ran earlier in this thread
+    bridge = FakeBridge()
+    out = await collect(
+        Router(ToolLLM(), FakeStore(), bridge=bridge,
+               model_router=FakeModelRouter(), conversations=conv),
+        "chat", {"message": "and delete it", "conversation_id": cid})   # no tool keyword
+    assert bridge.calls                                # entered the tool loop anyway
+    assert any("tool_used" in o for o in out)
+
+
+async def test_non_tool_conversation_ignores_bare_followup(tmp_path):
+    conv = conv_store(tmp_path)
+    cid = conv.create("hello")                         # never used a tool
+    bridge = FakeBridge()
+    await collect(
+        Router(FakeLLM(), FakeStore(), bridge=bridge,
+               model_router=FakeModelRouter(), conversations=conv),
+        "chat", {"message": "tell me more", "conversation_id": cid})
+    assert not bridge.calls                            # bare follow-up → plain chat, not the loop
+
+
+async def test_tool_use_marks_conversation_engaged(tmp_path):
+    conv = conv_store(tmp_path)
+    out = await collect(
+        Router(ToolLLM(), FakeStore(), bridge=FakeBridge(),
+               model_router=FakeModelRouter(), conversations=conv),
+        "chat", {"message": "what files are in my notes"})
+    cid = out[0]["conversation_id"]
+    assert conv.is_tool_engaged(cid) is True
+    assert conv.get(cid)["messages"][-1]["tool_calls"] == ["list_directory"]
+
+
+async def test_conversations_list_and_get(tmp_path):
+    conv = conv_store(tmp_path)
+    cid = conv.create("a question")
+    conv.add_message(cid, "user", "a question")
+    router = Router(FakeLLM(), FakeStore(), conversations=conv)
+    listed = await collect(router, "conversations.list", {})
+    assert listed[0]["result"][0]["id"] == cid
+    got = await collect(router, "conversations.get", {"id": cid})
+    assert got[0]["result"]["conversation"]["id"] == cid
+
+
+async def test_conversations_get_missing_returns_error(tmp_path):
+    router = Router(FakeLLM(), FakeStore(), conversations=conv_store(tmp_path))
+    out = await collect(router, "conversations.get", {"id": 999})
+    assert "not found" in out[0]["error"]
+
+
+async def test_conversations_unavailable_without_store():
+    out = await collect(Router(FakeLLM(), FakeStore()), "conversations.list", {})
+    assert "unavailable" in out[0]["error"]
 
 
 async def test_unknown_type_errors():

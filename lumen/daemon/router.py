@@ -50,6 +50,11 @@ EVENT_HINT = re.compile(
 
 CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 
+# In-context conversation history is a fixed size, not unbounded: only the most
+# recent N turns ride in the prompt (older turns stay on disk). A turn count is
+# simpler than a token estimate and enough for the 4B fast model's thermal budget.
+HISTORY_TURNS = 8
+
 # Constant identity block prepended ahead of the keyword-gated context on every
 # chat path (plain + tool loop). Kept short — the 4B fast model has a real
 # context/thermal budget. Does NOT enumerate tools in prose: Ollama already
@@ -138,7 +143,7 @@ def todo_context(todos: list[dict], today: date) -> str:
 class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, bridge=None,
                  confirm=None, write_gate=None, model_router=None, tool_log=None,
-                 max_iterations=4):
+                 conversations=None, max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
@@ -148,6 +153,7 @@ class Router:
         self._write_gate = write_gate   # WriteGate — per-file grants for fs writes
         self._model_router = model_router
         self._tool_log = tool_log
+        self._conv = conversations  # ConversationStore — transcript log + multi-turn state
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -155,8 +161,10 @@ class Router:
         if self._confirm is not None:
             self._confirm.deny_all()
 
-    def _base_messages(self, message: str) -> list[dict]:
-        """Shared system-context + user message for every chat path."""
+    def _build_messages(self, message: str, history: list[dict]) -> list[dict]:
+        """A constant identity block + keyword-gated per-query context as the
+        system message, then the conversation history (which ends with the
+        current user turn). Context is keyed on the current message."""
         context = [IDENTITY]
         if TODO_HINT.search(message):
             context.append(todo_context(self._todos.open_todos(), date.today()))
@@ -171,40 +179,56 @@ class Router:
         if self._bridge is not None and (TOOL_HINT.search(message)
                                          or FS_WRITE_HINT.search(message)):
             context.append(fs_context(Path.home()))
-        messages = ([{"role": "system", "content": "\n\n".join(context)}]
-                    if context else [])
-        messages.append({"role": "user", "content": message})
-        return messages
+        return [{"role": "system", "content": "\n\n".join(context)}] + history
+
+    def _messages_for(self, message: str, conv_id: int | None) -> list[dict]:
+        """Prompt messages for a chat turn: the current user message is already
+        persisted, so the store's (capped) history ends with it. Without a store
+        this degrades to a single stateless user turn."""
+        if self._conv is not None and conv_id is not None:
+            history = self._conv.history(conv_id, limit=HISTORY_TURNS)
+        else:
+            history = [{"role": "user", "content": message}]
+        return self._build_messages(message, history)
+
+    def _tool_shaped(self, message: str, conv_id: int | None) -> bool:
+        """Enter the tool loop when the current message hints at a tool OR this
+        conversation has already used one — so a bare follow-up ('and delete it')
+        stays tool-capable. Gate on the flag, not a full tool loop every turn."""
+        if TOOL_HINT.search(message) or FS_WRITE_HINT.search(message):
+            return True
+        return (self._conv is not None and conv_id is not None
+                and self._conv.is_tool_engaged(conv_id))
 
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
             message = payload.get("message", "")
-            if (self._confirm is not None and self._bridge is not None
-                    and self._calendar is not None and EVENT_HINT.search(message)):
-                async for ev in self._create_event_chat(message):
+            conv_id = payload.get("conversation_id")
+            if self._conv is not None:
+                if conv_id is None:
+                    conv_id = self._conv.create(message)
+                    yield {"conversation_id": conv_id}   # emit first so the UI can track the thread
+                self._conv.add_message(conv_id, "user", message)   # write-through on arrival
+            # aclosing: closing this generator must synchronously close whatever
+            # sub-path it drives (the tool loop owns a pump task), not defer to GC.
+            async with aclosing(self._chat(message, conv_id)) as gen:
+                async for ev in gen:
                     yield ev
+        elif type_ == "conversations.list":
+            if self._conv is None:
+                yield {"error": "conversation history unavailable"}
+            else:
+                yield {"result": self._conv.list_recent(int(payload.get("limit", 50)))}
+        elif type_ == "conversations.get":
+            if self._conv is None:
+                yield {"error": "conversation history unavailable"}
                 return
-            if (self._books is not None and self._bridge is not None
-                    and REC_HINT.search(message)):
-                async for ev in self._recommend_chat(message):
-                    yield ev
-                return
-            if self._bridge is not None and (TOOL_HINT.search(message)
-                                             or FS_WRITE_HINT.search(message)):
-                # aclosing: closing this generator must synchronously close the
-                # tool loop too (it owns a pump task), not defer to GC.
-                async with aclosing(self._chat_with_tools(message)) as gen:
-                    async for ev in gen:
-                        yield ev
-                return
-            messages = self._base_messages(message)
             try:
-                async for chunk in self._llm.chat(messages):
-                    yield {"chunk": chunk}
-            except LLMUnavailable as e:
-                yield {"error": str(e)}
+                got = self._conv.get(int(payload["id"]))
+            except (KeyError, TypeError, ValueError):
+                yield {"error": "conversations.get needs {id}"}
                 return
-            yield {"done": True}
+            yield {"error": "conversation not found"} if got is None else {"result": got}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
@@ -298,6 +322,43 @@ class Router:
         else:
             yield {"error": f"unknown request type: {type_}"}
 
+    async def _chat(self, message: str, conv_id: int | None):
+        """Pick the chat sub-path, stream it through, and write-through the
+        assistant turn (with any tool names) once it completes."""
+        if (self._confirm is not None and self._bridge is not None
+                and self._calendar is not None and EVENT_HINT.search(message)):
+            sub = self._create_event_chat(message)
+        elif (self._books is not None and self._bridge is not None
+              and REC_HINT.search(message)):
+            sub = self._recommend_chat(message)
+        elif self._bridge is not None and self._tool_shaped(message, conv_id):
+            sub = self._chat_with_tools(message, conv_id)
+        else:
+            sub = self._plain_chat(message, conv_id)
+
+        acc, tools = [], []
+        async with aclosing(sub) as gen:
+            async for ev in gen:
+                if "chunk" in ev:
+                    acc.append(ev["chunk"])
+                elif "tool_used" in ev:
+                    tools.append(ev["tool_used"])
+                yield ev
+        if self._conv is not None and conv_id is not None and (acc or tools):
+            self._conv.add_message(conv_id, "assistant", "".join(acc), tools or None)
+            if tools:                         # this thread is now tool-shaped for its follow-ups
+                self._conv.mark_tool_engaged(conv_id)
+
+    async def _plain_chat(self, message: str, conv_id: int | None):
+        messages = self._messages_for(message, conv_id)
+        try:
+            async for chunk in self._llm.chat(messages):
+                yield {"chunk": chunk}
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        yield {"done": True}
+
     def _pick_model(self, message: str):
         return (self._model_router.pick_model(message, needs_tools=True)
                 if self._model_router else None)
@@ -386,7 +447,7 @@ class Router:
                 log.exception("post-create sync failed")
         yield {"_outcome": (ok, text)}
 
-    async def _chat_with_tools(self, message: str):
+    async def _chat_with_tools(self, message: str, conv_id: int | None = None):
         try:
             await self._bridge.ensure_started()
             tools = [t for t in self._bridge.ollama_tools()
@@ -396,7 +457,7 @@ class Router:
             log.exception("MCP bridge unavailable — answering without tools")
             tools = []
         if not tools:                      # no servers came up → fall back to plain chat
-            messages = self._base_messages(message)
+            messages = self._messages_for(message, conv_id)
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
@@ -442,7 +503,7 @@ class Router:
                                      int((time.monotonic() - start) * 1000))
             return text
 
-        messages = self._base_messages(message)
+        messages = self._messages_for(message, conv_id)
         model = self._pick_model(message)
 
         async def pump():
