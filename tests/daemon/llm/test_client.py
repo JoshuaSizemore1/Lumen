@@ -137,6 +137,30 @@ async def test_chat_with_tools_executes_then_answers():
     await client.aclose()
 
 
+async def test_chat_requests_carry_num_ctx():
+    # Ollama's default context is 4096 tokens — tool schemas + grounding +
+    # history + a tool result overflowed it live (400 exceed_context_size_error,
+    # 2026-07-12). Every chat path requests the same num_ctx: a per-path value
+    # would make Ollama reload the model on each switch.
+    from lumen.daemon.llm.client import NUM_CTX
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if body.get("stream"):
+            return httpx.Response(200, content=ndjson({"message": {"content": "hi"}, "done": True}))
+        return httpx.Response(200, json={"message": {"content": "hi"}, "done": True})
+
+    client = make_client(handler)
+    [c async for c in client.chat([{"role": "user", "content": "hi"}])]
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "hi"}], tools=[], executor=None)]
+    assert events == [{"content": "hi"}]
+    assert all(b["options"] == {"num_ctx": NUM_CTX} for b in seen)
+    await client.aclose()
+
+
 async def test_chat_with_tools_direct_answer_no_tool():
     def handler(request):
         return httpx.Response(200, json={"message": {"content": "42"}, "done": True})

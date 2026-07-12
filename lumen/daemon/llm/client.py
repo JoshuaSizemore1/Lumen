@@ -11,6 +11,15 @@ class LLMUnavailable(Exception):
     """Ollama is not reachable — the service is probably stopped."""
 
 
+# Ollama's default context is 4096 tokens; the tool loop (13 tool schemas +
+# identity/grounding + history + tool results) overflowed it live
+# (exceed_context_size_error, 2026-07-12). One constant for every chat path:
+# Ollama reloads the model whenever num_ctx changes between requests, so a
+# smaller plain-chat value would thrash the load. KV-cache RAM at 8192 is a
+# few hundred MB for the 4B model — acceptable; idle-unload still governs.
+NUM_CTX = 8192
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -38,6 +47,7 @@ class OllamaClient:
             "stream": True,
             "keep_alive": self.keep_alive,
             "think": self.think,
+            "options": {"num_ctx": NUM_CTX},
         }
         try:
             async with self._http.stream("POST", "/api/chat", json=body) as resp:
@@ -69,6 +79,7 @@ class OllamaClient:
             "stream": False,
             "keep_alive": self.keep_alive,
             "think": self.think,
+            "options": {"num_ctx": NUM_CTX},
         }
         try:
             resp = await self._http.post("/api/chat", json=body)
@@ -123,9 +134,12 @@ class OllamaClient:
         request skips the cold load. Fire-and-forget: if Ollama is down or busy,
         the real request will surface the error."""
         try:
+            # Same num_ctx as real requests — a mismatch would make Ollama
+            # reload the model on the first real chat, undoing the preload.
             await self._http.post(
                 "/api/chat",
-                json={"model": self.model, "messages": [], "keep_alive": self.keep_alive},
+                json={"model": self.model, "messages": [], "keep_alive": self.keep_alive,
+                      "options": {"num_ctx": NUM_CTX}},
             )
         except httpx.HTTPError:
             pass

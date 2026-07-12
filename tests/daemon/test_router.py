@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 from lumen.daemon import db
 from lumen.daemon.connectors.conversations import ConversationStore
@@ -334,6 +335,50 @@ def test_tool_hint_matches_lookup_phrases():
     assert TOOL_HINT.search("who wrote Dune")
     assert TOOL_HINT.search("look up the isbn")
     assert not TOOL_HINT.search("how are you today")
+
+
+def test_tool_hint_matches_natural_file_phrasings():
+    # Regression for the 2026-07-11 launcher bug: "what projects do I have
+    # currently" missed every hint, got no tools, and the model answered
+    # "I don't have access to your personal projects or files."
+    from lumen.daemon.router import TOOL_HINT
+    assert TOOL_HINT.search("what projects do I have currently")
+    assert TOOL_HINT.search("what's in my Downloads")
+    assert TOOL_HINT.search("show me whats on my desktop")
+    assert TOOL_HINT.search("can you open my resume")
+    assert TOOL_HINT.search("what documents do I have")
+    assert TOOL_HINT.search("whats saved on my computer")
+    assert TOOL_HINT.search("read me the shopping list")
+    assert TOOL_HINT.search("do I have any screenshots from yesterday")
+    # pure chit-chat must still take the plain path (thermal budget)
+    assert not TOOL_HINT.search("what's the capital of France?")
+    assert not TOOL_HINT.search("tell me a joke")
+    assert not TOOL_HINT.search("hello!")
+    assert not TOOL_HINT.search("thanks, that was helpful")
+
+
+async def test_tool_results_are_capped_before_returning_to_model():
+    # directory_tree on a real folder returned megabytes; splicing that back
+    # into the conversation blew Ollama's context window (400
+    # exceed_context_size_error, live 2026-07-12). The executor must cap what
+    # the model gets back, with a nudge to make a narrower call.
+    from lumen.daemon.router import TOOL_RESULT_MAX_CHARS
+    bridge = FakeBridge(result="x" * (TOOL_RESULT_MAX_CHARS * 3))
+    router = Router(ToolLLM(), FakeStore(), bridge=bridge,
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "list the files in my notes"})
+    answer = "".join(ev["chunk"] for ev in out if "chunk" in ev)
+    assert len(answer) <= TOOL_RESULT_MAX_CHARS + 500   # marker allowance
+    assert "truncated" in answer
+
+
+def test_fs_context_steers_away_from_directory_tree():
+    # The 4B model reached for directory_tree on ~/Projects (recursive, huge);
+    # the grounding must point it at list_directory instead.
+    from lumen.daemon.router import fs_context
+    text = fs_context(Path("/home/u"))
+    assert "list_directory" in text
+    assert "avoid directory_tree" in text.lower()
 
 
 class CaptureMessagesLLM:
@@ -889,10 +934,27 @@ ALLDAY_ROW = dict(CAL_ROW, id="a1", title="PTO", start_at="2026-07-11",
                   end_at="2026-07-12", all_day=True, attendees=[], location=None)
 
 
+def test_identity_forbids_fabricated_checks():
+    # Live bug 2026-07-12: on the plain path (no tools bound) the model printed
+    # "[Checking calendar...]" and invented events. The identity must forbid
+    # pretending to look things up — it's the honest-failure backstop for any
+    # phrasing that slips past every keyword gate.
+    assert "never pretend" in IDENTITY.lower()
+
+
 def test_cal_hint_vocabulary():
     for msg in ("what's on my calendar", "when is my next meeting",
                 "am I free at 3pm thursday", "what's my schedule this week",
-                "any appointments tomorrow", "how busy is friday"):
+                "any appointments tomorrow", "how busy is friday",
+                # Live bug 2026-07-12: the misspelling below matched no gate, so
+                # the plain path fabricated events. Misspellings and bare
+                # time-of-week phrasings must reach calendar context.
+                "Do I have anything on my calender this coming week",
+                "anything on my calander?",
+                "anything happening this weekend",
+                "what am I doing tomorrow",
+                "do I have plans next week",
+                "anything upcoming today?"):
         assert CAL_HINT.search(msg), msg
     assert not CAL_HINT.search("what should I read next?")
     assert not CAL_HINT.search("list the files in my notes folder")

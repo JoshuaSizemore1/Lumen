@@ -23,9 +23,17 @@ log = logging.getLogger(__name__)
 
 TODO_HINT = re.compile(r"\b(?:todos?|tasks?|due|overdue)\b", re.IGNORECASE)
 
+# Deliberately wide net: a false positive just rides the tool schemas along on
+# one request; a miss answers "I can't access your files" (live bug 2026-07-11,
+# "what projects do I have currently"). Pure chit-chat still stays plain.
 TOOL_HINT = re.compile(
-    r"\b(look ?up|search|find|who wrote|author of|isbn|published|"
-    r"books?|novels?|files?|folder|directory|notes)\b",
+    r"\b(look ?up|search|find|locate|browse|open|read|show|list|inside|"
+    r"who wrote|author of|isbn|published|books?|novels?|"
+    r"files?|folders?|director(?:y|ies)|dirs?|paths?|notes?|"
+    r"projects?|downloads?|desktop|documents?|docs?|pictures?|photos?|"
+    r"screenshots?|videos?|music|drives?|disks?|"
+    r"laptop|computer|machine|pc|system|"
+    r"what(?:'?s| is| are) (?:in|on|inside))\b",
     re.IGNORECASE,
 )
 
@@ -37,8 +45,14 @@ REC_HINT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Same widen-the-net rationale as TOOL_HINT: a false positive costs a few
+# injected context lines; a miss leaves the plain path free to fabricate a
+# calendar check (live bug 2026-07-12, "anything on my calender this coming
+# week" — misspelling matched nothing). cal[ae]nd\w* covers the common
+# calendar misspellings; bare time-of-week words are schedule-shaped enough.
 CAL_HINT = re.compile(
-    r"\b(calendar|meetings?|events?|schedule|agenda|appointments?|free|busy)\b",
+    r"\b(cal[ae]nd\w*|meetings?|events?|schedule|agenda|appointments?|free|busy|"
+    r"weeks?|weekends?|today|tomorrow|tonight|upcoming|plans?)\b",
     re.IGNORECASE,
 )
 
@@ -64,7 +78,9 @@ IDENTITY = (
     "laptop. You help with their todos, calendar, books, and files (email "
     "support is coming soon). You have tools available — use them to look "
     "things up instead of guessing or apologizing, and never tell the user you "
-    "can't access something you have a tool for. Prefer specific, concise answers."
+    "can't access something you have a tool for. Never pretend to check or look "
+    "something up: if this conversation gives you no tool or data for it, say so "
+    "plainly instead of inventing a result. Prefer specific, concise answers."
 )
 
 # Write-capable tools stay callable by the daemon (after a confirm) but are
@@ -78,6 +94,16 @@ WRITE_TOOLS = frozenset({"create_event"})
 # stops the model reaching for such calls; this is the defensive backstop.
 TOOL_TIMEOUT_S = 30.0
 
+# No single tool result may exceed this when fed back to the model — a
+# directory_tree of a real folder returned megabytes and blew the context
+# window (Ollama 400 exceed_context_size_error, live 2026-07-12). ~4k chars is
+# roughly 1k tokens: two capped results still fit num_ctx=8192 alongside the
+# tool schemas, grounding, and history. Full results still reach the tool log.
+TOOL_RESULT_MAX_CHARS = 4000
+TRUNCATION_NOTE = ("\n…[truncated: result too large — answer from what is "
+                   "shown, or make a narrower call, e.g. list_directory on "
+                   "one specific folder]")
+
 
 def fs_context(home: Path) -> str:
     """System-message grounding for filesystem tools: where the user's files
@@ -87,11 +113,12 @@ def fs_context(home: Path) -> str:
         f"The user's home directory is {home}. Their personal files, code, and "
         f"projects live under it — for example {home}/Projects, {home}/Documents, "
         f"and {home}/Downloads. When the user asks about their own files or "
-        f"folders, call list_directory (or directory_tree) on a specific path "
-        f"under the home directory. Do NOT list or search from '/', the "
-        f"whole-machine root — it is huge and slow. If you don't know an exact "
-        f"folder name, list its parent directory and read the names rather than "
-        f"using search_files."
+        f"folders, call list_directory on a specific path under the home "
+        f"directory. Do NOT list or search from '/', the whole-machine root — "
+        f"it is huge and slow. Avoid directory_tree: it recurses the entire "
+        f"subtree and its output is enormous; list_directory answers these "
+        f"questions. If you don't know an exact folder name, list its parent "
+        f"directory and read the names rather than using search_files."
     )
 
 
@@ -506,6 +533,8 @@ class Router:
             if self._tool_log is not None:
                 self._tool_log.write(name, args, ok, text,
                                      int((time.monotonic() - start) * 1000))
+            if len(text) > TOOL_RESULT_MAX_CHARS:
+                text = text[:TOOL_RESULT_MAX_CHARS] + TRUNCATION_NOTE
             return text
 
         messages = self._messages_for(message, conv_id, tool_loop=True)
