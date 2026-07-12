@@ -2,8 +2,12 @@
 GmailSync (bounded bulk pull + History-API deltas via the API client — never
 the LLM/MCP loop). See email-menu.md for the two-path strategy."""
 
+import base64
 import json
+import re as _re
 import sqlite3
+from datetime import datetime, timezone
+from html import unescape
 
 HISTORY_KEY = "gmail_history_id"
 CURSOR_KEY = "gmail_bulk_cursor"
@@ -13,6 +17,54 @@ RUN_KEY = "gmail_rebaseline_run"
 
 _COLS = ("id", "thread_id", "sender", "recipients", "subject", "body", "snippet",
          "labels", "received_at", "is_read", "attachments", "last_seen")
+
+
+def _decode(data: str) -> str:
+    pad = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + pad).decode("utf-8", errors="replace")
+
+
+def _strip_html(html: str) -> str:
+    text = _re.sub(r"<(script|style)\b.*?</\1>", " ", html, flags=_re.S | _re.I)
+    text = _re.sub(r"<[^>]+>", " ", text)
+    return _re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def _walk_body(payload: dict) -> tuple[str, list[str]]:
+    """Depth-first: collect attachment filenames; body is the first text/plain
+    part, else the first text/html part stripped."""
+    plain, html, attachments = [], [], []
+
+    def walk(part: dict) -> None:
+        if part.get("filename"):
+            attachments.append(part["filename"])
+        data = part.get("body", {}).get("data")
+        mime = part.get("mimeType", "")
+        if data and mime.startswith("text/plain") and not part.get("filename"):
+            plain.append(_decode(data))
+        elif data and mime.startswith("text/html") and not part.get("filename"):
+            html.append(_decode(data))
+        for child in part.get("parts", []):
+            walk(child)
+
+    walk(payload)
+    body = "\n".join(plain) if plain else _strip_html("\n".join(html))
+    return body, attachments
+
+
+def normalize_message(raw: dict) -> dict:
+    headers = {h["name"].lower(): h["value"]
+               for h in raw.get("payload", {}).get("headers", [])}
+    body, attachments = _walk_body(raw.get("payload", {}))
+    labels = list(raw.get("labelIds", []))
+    received = datetime.fromtimestamp(
+        int(raw.get("internalDate", 0)) / 1000, tz=timezone.utc)
+    return {"id": raw["id"], "thread_id": raw.get("threadId"),
+            "sender": headers.get("from", ""), "recipients": headers.get("to", ""),
+            "subject": headers.get("subject", ""), "body": body,
+            "snippet": raw.get("snippet", ""), "labels": labels,
+            "received_at": received.isoformat(timespec="seconds"),
+            "is_read": "UNREAD" not in labels, "attachments": attachments}
 
 
 class EmailStore:

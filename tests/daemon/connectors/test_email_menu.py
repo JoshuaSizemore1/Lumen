@@ -1,6 +1,8 @@
 """EmailStore: mirror reads/writes over the Task-1 schema."""
+import base64
+
 from lumen.daemon import db
-from lumen.daemon.connectors.email_menu import EmailStore
+from lumen.daemon.connectors.email_menu import EmailStore, normalize_message
 
 
 def make_store(tmp_path):
@@ -78,3 +80,55 @@ def test_sync_state_kv(tmp_path):
     assert store.get_state("gmail_history_id") == "1234"
     store.set_state("gmail_history_id", None)
     assert store.get_state("gmail_history_id") is None
+
+
+def b64(s: str) -> str:
+    return base64.urlsafe_b64encode(s.encode()).decode()
+
+
+def raw_msg(parts=None, body_data=None, mime="text/plain", labels=("INBOX", "UNREAD")):
+    payload = {"mimeType": mime, "headers": [
+        {"name": "From", "value": "Ada <ada@x.com>"},
+        {"name": "To", "value": "me@x.com"},
+        {"name": "Subject", "value": "Engines"}]}
+    if parts is not None:
+        payload["mimeType"] = "multipart/mixed"
+        payload["parts"] = parts
+    elif body_data is not None:
+        payload["body"] = {"data": b64(body_data)}
+    return {"id": "m9", "threadId": "t9", "labelIds": list(labels),
+            "snippet": "snip", "internalDate": "1783881600000", "payload": payload}
+
+
+def test_normalize_plain_text():
+    m = normalize_message(raw_msg(body_data="hello world"))
+    assert m["id"] == "m9" and m["sender"] == "Ada <ada@x.com>"
+    assert m["subject"] == "Engines" and m["body"] == "hello world"
+    assert m["is_read"] is False and "UNREAD" in m["labels"]
+    assert m["received_at"].startswith("2026-07-12T")   # 1783881600000 ms UTC
+
+
+def test_normalize_multipart_prefers_plain_and_lists_attachments():
+    parts = [
+        {"mimeType": "text/html", "filename": "",
+         "body": {"data": b64("<p>rich <b>text</b></p>")}},
+        {"mimeType": "text/plain", "filename": "",
+         "body": {"data": b64("plain wins")}},
+        {"mimeType": "application/pdf", "filename": "report.pdf", "body": {}},
+    ]
+    m = normalize_message(raw_msg(parts=parts))
+    assert m["body"] == "plain wins" and m["attachments"] == ["report.pdf"]
+
+
+def test_normalize_html_only_strips_tags():
+    parts = [{"mimeType": "text/html", "filename": "",
+              "body": {"data": b64("<div>Hello&nbsp;<b>there</b></div>")}}]
+    m = normalize_message(raw_msg(parts=parts))
+    assert "Hello" in m["body"] and "there" in m["body"] and "<" not in m["body"]
+
+
+def test_normalize_nested_parts_and_read_state():
+    inner = {"mimeType": "multipart/alternative", "filename": "", "parts": [
+        {"mimeType": "text/plain", "filename": "", "body": {"data": b64("deep")}}]}
+    m = normalize_message(raw_msg(parts=[inner], labels=("INBOX",)))
+    assert m["body"] == "deep" and m["is_read"] is True
