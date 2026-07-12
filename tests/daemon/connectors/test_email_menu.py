@@ -132,3 +132,114 @@ def test_normalize_nested_parts_and_read_state():
         {"mimeType": "text/plain", "filename": "", "body": {"data": b64("deep")}}]}
     m = normalize_message(raw_msg(parts=[inner], labels=("INBOX",)))
     assert m["body"] == "deep" and m["is_read"] is True
+
+
+# GmailSync tests (Task 5)
+
+from lumen.daemon.config import GoogleConfig, SyncConfig
+from lumen.daemon.connectors.email_menu import (
+    CURSOR_KEY, HISTORY_KEY, LAST_SYNC_KEY, RUN_KEY, GmailSync)
+
+
+class FakeExec:
+    def __init__(self, result):
+        self._r = result
+
+    def execute(self):
+        if isinstance(self._r, Exception):
+            raise self._r
+        return self._r
+
+
+class FakeMessages:
+    def __init__(self, pages, full):
+        self._pages, self._full = pages, full   # pages: token -> response
+        self.list_calls = []
+
+    def list(self, userId, q=None, maxResults=None, pageToken=None,
+             includeSpamTrash=False):
+        self.list_calls.append(pageToken)
+        return FakeExec(self._pages[pageToken])
+
+    def get(self, userId, id, format):
+        return FakeExec(self._full[id])
+
+
+class FakeService:
+    def __init__(self, pages, full, profile_history="h100", history_pages=None):
+        self._messages = FakeMessages(pages, full)
+        self._profile = {"historyId": profile_history}
+        self._history_pages = history_pages or {}
+        self.history_calls = []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self._messages
+
+    def getProfile(self, userId):
+        return FakeExec(self._profile)
+
+    def history(self):
+        return self
+
+    def list(self, userId, startHistoryId=None, pageToken=None, historyTypes=None):
+        self.history_calls.append(startHistoryId)
+        return FakeExec(self._history_pages[pageToken])
+
+
+def full_for(*ids):
+    return {i: raw_msg() | {"id": i, "threadId": f"t-{i}"} for i in ids}
+
+
+def make_sync(tmp_path, service):
+    store = make_store(tmp_path)
+    sync = GmailSync(store, GoogleConfig(), SyncConfig(),
+                     service_factory=lambda: service)
+    return store, sync
+
+
+async def test_bulk_pull_pages_and_stores_history_id(tmp_path):
+    pages = {None: {"messages": [{"id": "a"}, {"id": "b"}], "nextPageToken": "p2"},
+             "p2": {"messages": [{"id": "c"}]}}
+    store, sync = make_sync(tmp_path, FakeService(pages, full_for("a", "b", "c")))
+    assert await sync.sync_once() is True
+    assert store.counts()["total"] == 3
+    assert store.get_state(HISTORY_KEY) == "h100"     # captured at bulk START
+    assert store.get_state(CURSOR_KEY) is None        # cleared on completion
+    assert store.get_state(LAST_SYNC_KEY) is not None
+
+
+async def test_bulk_resumes_from_persisted_cursor(tmp_path):
+    boom = RuntimeError("network died")
+
+    class DyingMessages(FakeMessages):
+        def get(self, userId, id, format):
+            if id == "c":
+                return FakeExec(boom)
+            return super().get(userId, id, format)
+
+    pages = {None: {"messages": [{"id": "a"}], "nextPageToken": "p2"},
+             "p2": {"messages": [{"id": "c"}]}}
+    svc = FakeService(pages, full_for("a", "c"))
+    svc._messages = DyingMessages(pages, full_for("a", "c"))
+    store, sync = make_sync(tmp_path, svc)
+    assert await sync.sync_once() is False            # page 2 died
+    assert store.get_state(CURSOR_KEY) == "p2"        # page 1 persisted
+    assert store.counts()["total"] == 1
+
+    svc2 = FakeService(pages, full_for("a", "c"))     # healthy service, same store
+    sync2 = GmailSync(store, GoogleConfig(), SyncConfig(),
+                      service_factory=lambda: svc2)
+    assert await sync2.sync_once() is True
+    assert svc2._messages.list_calls == ["p2"]        # resumed, not restarted
+    assert store.counts()["total"] == 2
+
+
+async def test_not_connected_is_normal(tmp_path):
+    store = make_store(tmp_path)
+    sync = GmailSync(store, GoogleConfig(), SyncConfig(),
+                     service_factory=lambda: None)
+    assert await sync.sync_once() is False
+    assert store.get_state(HISTORY_KEY) is None

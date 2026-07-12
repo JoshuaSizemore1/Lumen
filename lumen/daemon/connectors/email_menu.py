@@ -2,12 +2,19 @@
 GmailSync (bounded bulk pull + History-API deltas via the API client — never
 the LLM/MCP loop). See email-menu.md for the two-path strategy."""
 
+import asyncio
 import base64
 import json
+import logging
 import re as _re
 import sqlite3
-from datetime import datetime, timezone
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from html import unescape
+
+from lumen.daemon.connectors import google_auth
+
+log = logging.getLogger(__name__)
 
 HISTORY_KEY = "gmail_history_id"
 CURSOR_KEY = "gmail_bulk_cursor"
@@ -164,3 +171,111 @@ class EmailStore:
         d["attachments"] = json.loads(d["attachments"] or "[]")
         d["is_read"] = bool(d["is_read"])
         return d
+
+
+class GmailSync:
+    """Bounded bulk pull then History-API deltas, via the API client on a
+    timer — the poller must never wake the LLM (email-menu.md NOT #1)."""
+
+    PAGE_SIZE = 100
+
+    def __init__(self, store: EmailStore, google_cfg, sync_cfg, *, service_factory=None):
+        self._store = store
+        self._google = google_cfg
+        self._sync = sync_cfg
+        self._service_factory = service_factory or self._build_service
+
+    @property
+    def connected(self) -> bool:
+        return google_auth.connected(self._google, google_auth.GMAIL_READ_SCOPES)
+
+    @property
+    def syncing(self) -> bool:
+        return self._store.get_state(CURSOR_KEY) is not None
+
+    def last_sync(self) -> str | None:
+        return self._store.get_state(LAST_SYNC_KEY)
+
+    def _build_service(self):
+        creds = google_auth.load_credentials(self._google, google_auth.GMAIL_READ_SCOPES)
+        if creds is None:
+            return None
+        from googleapiclient.discovery import build
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+    def _window_start(self) -> date:
+        return date.today() - timedelta(days=self._sync.gmail_window_months * 30)
+
+    async def sync_once(self) -> bool:
+        try:
+            service = self._service_factory()
+        except Exception:
+            log.exception("could not build gmail service")
+            return False
+        if service is None:
+            return False   # not connected yet — a normal state
+        if self._store.get_state(HISTORY_KEY) is None or self.syncing:
+            return await self._bulk(service)
+        return await self._incremental(service)
+
+    async def _bulk(self, service) -> bool:
+        run_id = self._store.get_state(RUN_KEY)
+        cursor = self._store.get_state(CURSOR_KEY)
+        if self._store.get_state(HISTORY_KEY) is None:
+            # Capture the position BEFORE listing: anything that changes during
+            # the pull is then covered by the first incremental sync.
+            try:
+                profile = await asyncio.to_thread(
+                    lambda: service.users().getProfile(userId="me").execute())
+            except Exception:
+                log.exception("gmail getProfile failed")
+                return False
+            self._store.set_state(HISTORY_KEY, str(profile["historyId"]))
+        after = self._window_start().strftime("%Y/%m/%d")
+        while True:
+            try:
+                msgs, next_cursor = await asyncio.to_thread(
+                    self._bulk_page_blocking, service, after, cursor)
+            except Exception:
+                log.exception("gmail bulk page failed — cursor kept for resume")
+                return False
+            if run_id:
+                for m in msgs:
+                    m["last_seen"] = run_id
+            self._store.upsert(msgs)                       # loop thread — single writer
+            self._store.set_state(CURSOR_KEY, next_cursor)  # resumable after EVERY page
+            cursor = next_cursor
+            if cursor is None:
+                break
+        if run_id:
+            pruned = self._store.prune_not_seen(
+                run_id, self._window_start().isoformat() + "T00:00:00+00:00")
+            log.info("gmail re-baseline pruned %d rows", pruned)
+            self._store.set_state(RUN_KEY, None)
+        self._store.set_state(LAST_SYNC_KEY,
+                              datetime.now().isoformat(timespec="seconds"))
+        return True
+
+    def _bulk_page_blocking(self, service, after: str, cursor: str | None):
+        resp = service.users().messages().list(
+            userId="me", q=f"after:{after}", maxResults=self.PAGE_SIZE,
+            pageToken=cursor, includeSpamTrash=False).execute()
+        msgs = [normalize_message(
+                    service.users().messages().get(userId="me", id=ref["id"],
+                                                   format="full").execute())
+                for ref in resp.get("messages", [])]
+        return msgs, resp.get("nextPageToken")
+
+    async def _incremental(self, service) -> bool:
+        # Task 6
+        return True
+
+    async def poll_forever(self) -> None:
+        """Daemon background task; cancellation is the shutdown path."""
+        interval = self._sync.gmail_poll_minutes * 60
+        while True:
+            try:
+                await self.sync_once()
+            except Exception:
+                log.exception("gmail poll iteration failed")
+            await asyncio.sleep(interval)
