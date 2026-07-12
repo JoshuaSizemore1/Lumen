@@ -63,3 +63,29 @@ def test_events_and_sync_state_tables(tmp_path):
         conn.execute(
             "INSERT INTO events (id, calendar_id, title, start_at) "
             "VALUES ('e1', 'primary', 'dupe', '2026-07-10T09:30:00+02:00')")
+
+
+def test_emails_schema_and_fts_triggers(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    conn.execute(
+        "INSERT INTO emails (id, thread_id, sender, recipients, subject, body,"
+        " snippet, labels, received_at, is_read) VALUES"
+        " ('m1', 't1', 'Ada <ada@x.com>', 'me@x.com', 'Lovelace engine',"
+        "  'the analytical engine weaves patterns', 'the analytical…',"
+        "  'INBOX,UNREAD', '2026-07-01T10:00:00+00:00', 0)")
+    conn.commit()
+    hit = conn.execute(
+        "SELECT e.id FROM emails_fts f JOIN emails e ON e.rowid = f.rowid "
+        "WHERE emails_fts MATCH 'analytical'").fetchall()
+    assert [r["id"] for r in hit] == ["m1"]
+
+    # UPDATE keeps FTS in step (upsert path relies on this)
+    conn.execute("UPDATE emails SET subject = 'Difference engine' WHERE id = 'm1'")
+    conn.commit()
+    assert not conn.execute("SELECT rowid FROM emails_fts WHERE emails_fts MATCH 'Lovelace'").fetchall()
+    assert conn.execute("SELECT rowid FROM emails_fts WHERE emails_fts MATCH 'Difference'").fetchall()
+
+    # DELETE removes the FTS entry
+    conn.execute("DELETE FROM emails WHERE id = 'm1'")
+    conn.commit()
+    assert not conn.execute("SELECT rowid FROM emails_fts WHERE emails_fts MATCH 'engine'").fetchall()

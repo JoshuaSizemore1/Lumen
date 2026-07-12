@@ -66,6 +66,37 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls TEXT,                       -- JSON array of tool names, nullable
     created_at TEXT NOT NULL               -- ISO timestamp
 );
+CREATE TABLE IF NOT EXISTS emails (
+    id TEXT PRIMARY KEY,                    -- Gmail message id
+    thread_id TEXT,
+    sender TEXT,                            -- display form: Name <addr>
+    recipients TEXT,
+    subject TEXT,
+    body TEXT,                              -- plain text (text/plain part, else stripped HTML)
+    snippet TEXT,
+    labels TEXT,                            -- comma-separated Gmail label ids
+    received_at TEXT,                       -- RFC3339 UTC from internalDate
+    is_read INTEGER,
+    attachments TEXT NOT NULL DEFAULT '[]', -- JSON [filename, …]; names only
+    last_seen TEXT                          -- re-baseline run id; prunes gap-deleted rows
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS emails_fts USING fts5(
+    subject, body, snippet, sender, content='emails', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS emails_ai AFTER INSERT ON emails BEGIN
+    INSERT INTO emails_fts(rowid, subject, body, snippet, sender)
+    VALUES (new.rowid, new.subject, new.body, new.snippet, new.sender);
+END;
+CREATE TRIGGER IF NOT EXISTS emails_ad AFTER DELETE ON emails BEGIN
+    INSERT INTO emails_fts(emails_fts, rowid, subject, body, snippet, sender)
+    VALUES ('delete', old.rowid, old.subject, old.body, old.snippet, old.sender);
+END;
+CREATE TRIGGER IF NOT EXISTS emails_au AFTER UPDATE ON emails BEGIN
+    INSERT INTO emails_fts(emails_fts, rowid, subject, body, snippet, sender)
+    VALUES ('delete', old.rowid, old.subject, old.body, old.snippet, old.sender);
+    INSERT INTO emails_fts(rowid, subject, body, snippet, sender)
+    VALUES (new.rowid, new.subject, new.body, new.snippet, new.sender);
+END;
 """
 
 
