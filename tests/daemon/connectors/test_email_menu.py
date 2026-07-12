@@ -237,6 +237,25 @@ async def test_bulk_resumes_from_persisted_cursor(tmp_path):
     assert store.counts()["total"] == 2
 
 
+async def test_bulk_page_one_failure_still_resumes_as_bulk(tmp_path):
+    boom = RuntimeError("network died")
+    pages = {None: boom}
+    svc = FakeService(pages, {})
+    store, sync = make_sync(tmp_path, svc)
+    assert await sync.sync_once() is False             # page 1 died
+    assert store.get_state(CURSOR_KEY) == ""            # pending sentinel, not None
+    assert store.get_state(HISTORY_KEY) is not None
+
+    svc2 = FakeService({None: {"messages": [{"id": "a"}]}}, full_for("a"))
+    sync2 = GmailSync(store, GoogleConfig(), SyncConfig(),
+                      service_factory=lambda: svc2)
+    assert await sync2.sync_once() is True
+    assert store.counts()["total"] == 1
+    assert store.get_state(CURSOR_KEY) is None
+    assert svc2._messages.list_calls == [None]          # re-entered BULK at page 1
+    assert svc2.history_calls == []                     # not the _incremental stub
+
+
 async def test_not_connected_is_normal(tmp_path):
     store = make_store(tmp_path)
     sync = GmailSync(store, GoogleConfig(), SyncConfig(),

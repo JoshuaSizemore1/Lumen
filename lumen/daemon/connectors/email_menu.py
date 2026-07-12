@@ -220,7 +220,13 @@ class GmailSync:
 
     async def _bulk(self, service) -> bool:
         run_id = self._store.get_state(RUN_KEY)
-        cursor = self._store.get_state(CURSOR_KEY)
+        if self._store.get_state(CURSOR_KEY) is None:
+            # Pending sentinel: marks bulk-in-progress from entry, before the
+            # first page even attempts, so a page-1 failure still resumes as
+            # BULK on the next sync_once instead of falling through to
+            # _incremental with no cursor and no fetched backlog.
+            self._store.set_state(CURSOR_KEY, "")
+        cursor = self._store.get_state(CURSOR_KEY) or None
         if self._store.get_state(HISTORY_KEY) is None:
             # Capture the position BEFORE listing: anything that changes during
             # the pull is then covered by the first incremental sync.
