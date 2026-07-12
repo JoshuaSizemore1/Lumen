@@ -1,6 +1,7 @@
 """SQLite bootstrap: connection setup + hand-written schema (no migration
 framework). Called once at daemon startup; the daemon is the only writer."""
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -50,12 +51,33 @@ CREATE TABLE IF NOT EXISTS sync_state (     -- KV; email sync shares it in Phase
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS conversations (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,                    -- derived from first user message, truncated
+    created_at TEXT NOT NULL,              -- ISO timestamp
+    updated_at TEXT NOT NULL,              -- ISO timestamp, bumped on every new turn
+    tool_engaged INTEGER NOT NULL DEFAULT 0 -- 1 once any tool has run in this thread
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,                    -- 'user' | 'assistant'
+    content TEXT NOT NULL,
+    tool_calls TEXT,                       -- JSON array of tool names, nullable
+    created_at TEXT NOT NULL               -- ISO timestamp
+);
 """
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # The DB now mirrors verbatim chat transcripts — tighten it to owner-only,
+    # same treatment the email mirror gets in Phase 6.
+    try:
+        os.chmod(db_path, 0o600)
+    except OSError:
+        pass
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
