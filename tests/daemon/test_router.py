@@ -2,7 +2,7 @@ import re
 
 from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.mcp_bridge import ToolCallError
-from lumen.daemon.router import Router
+from lumen.daemon.router import IDENTITY, Router
 
 
 class FakeLLM:
@@ -79,6 +79,21 @@ async def test_warm_preloads_and_is_silent():
     assert llm.warmed is True and out == []   # fire-and-forget: no response
 
 
+async def test_identity_prompt_prepended_on_plain_chat():
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "chat", {"message": "hi"})
+    assert llm.messages[0]["role"] == "system"
+    assert "Lumen" in llm.messages[0]["content"]
+    assert llm.messages[-1] == {"role": "user", "content": "hi"}
+
+
+async def test_identity_precedes_per_query_context():
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore(rows=[])), "chat", {"message": "what's due today?"})
+    sys = llm.messages[0]["content"]
+    assert sys.index("Lumen") < sys.index("Today is")   # identity first, context stacks under it
+
+
 async def test_unknown_type_errors():
     out = await collect(Router(FakeLLM(), FakeStore()), "frobnicate", {})
     assert "unknown" in out[0]["error"]
@@ -129,7 +144,9 @@ async def test_chat_todo_question_injects_context():
 async def test_chat_non_todo_question_stays_uninjected():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "capital of France?"})
-    assert llm.messages == [{"role": "user", "content": "capital of France?"}]
+    # identity is always present; no per-query todo context stacks under it
+    assert "Today is" not in llm.messages[0]["content"]
+    assert llm.messages[-1] == {"role": "user", "content": "capital of France?"}
 
 
 async def test_chat_empty_todo_list_injects_no_open_todos():
@@ -219,7 +236,7 @@ async def test_home_grounding_needs_a_bridge_and_a_fs_hint():
     # no bridge → no tool loop → no fs grounding
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "list my files"})
-    assert all(m["role"] != "system" for m in llm.messages)
+    assert "home directory" not in llm.messages[0]["content"]   # identity only, no fs grounding
 
 
 async def test_slow_tool_call_times_out_with_recoverable_message(monkeypatch):
@@ -553,7 +570,9 @@ async def test_chat_todo_and_book_hints_share_one_system_message():
 async def test_chat_without_books_store_never_injects():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "have I read Dune"})
-    assert llm.messages == [{"role": "user", "content": "have I read Dune"}]
+    # identity only — no book catalog stacked under it (no books store)
+    assert llm.messages == [{"role": "system", "content": IDENTITY},
+                            {"role": "user", "content": "have I read Dune"}]
 
 
 class FullFakeBookStore(FakeBookStore):
@@ -782,7 +801,9 @@ async def test_chat_calendar_question_injects_context():
 async def test_chat_without_calendar_never_injects():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "am I free at 3pm?"})
-    assert llm.messages == [{"role": "user", "content": "am I free at 3pm?"}]
+    # identity only — no calendar context (no calendar facade)
+    assert llm.messages == [{"role": "system", "content": IDENTITY},
+                            {"role": "user", "content": "am I free at 3pm?"}]
 
 
 async def test_calendar_list_one_shot():

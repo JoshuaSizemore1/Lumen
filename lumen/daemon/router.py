@@ -50,6 +50,18 @@ EVENT_HINT = re.compile(
 
 CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 
+# Constant identity block prepended ahead of the keyword-gated context on every
+# chat path (plain + tool loop). Kept short — the 4B fast model has a real
+# context/thermal budget. Does NOT enumerate tools in prose: Ollama already
+# passes the tool schemas, so a hand-written catalog would only drift out of sync.
+IDENTITY = (
+    "You are Lumen, a private assistant running entirely on the user's own "
+    "laptop. You help with their todos, calendar, books, and files (email "
+    "support is coming soon). You have tools available — use them to look "
+    "things up instead of guessing or apologizing, and never tell the user you "
+    "can't access something you have a tool for. Prefer specific, concise answers."
+)
+
 # Write-capable tools stay callable by the daemon (after a confirm) but are
 # never offered to the model in the generic tool loop — the confirm gate is
 # mechanical, not prompt-enforced.
@@ -145,7 +157,7 @@ class Router:
 
     def _base_messages(self, message: str) -> list[dict]:
         """Shared system-context + user message for every chat path."""
-        context = []
+        context = [IDENTITY]
         if TODO_HINT.search(message):
             context.append(todo_context(self._todos.open_todos(), date.today()))
         if self._books is not None and BOOK_HINT.search(message):
