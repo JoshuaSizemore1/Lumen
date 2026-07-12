@@ -118,6 +118,18 @@ class OllamaClient:
                 convo.append({"role": "tool", "content": result_text, "tool_name": name})
         yield {"content": "", "capped": True}
 
+    async def warm(self) -> None:
+        """Preload the model into RAM (the inverse of unload) so the next real
+        request skips the cold load. Fire-and-forget: if Ollama is down or busy,
+        the real request will surface the error."""
+        try:
+            await self._http.post(
+                "/api/chat",
+                json={"model": self.model, "messages": [], "keep_alive": self.keep_alive},
+            )
+        except httpx.HTTPError:
+            pass
+
     async def unload(self) -> None:
         """Evict the model from RAM now (the 'sleep' command)."""
         try:

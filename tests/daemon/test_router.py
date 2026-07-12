@@ -10,6 +10,7 @@ class FakeLLM:
         self._chunks = chunks
         self._fail = fail
         self.unloaded = False
+        self.warmed = False
         self.messages = None
 
     async def chat(self, messages):
@@ -21,6 +22,9 @@ class FakeLLM:
 
     async def unload(self):
         self.unloaded = True
+
+    async def warm(self):
+        self.warmed = True
 
 
 class FakeStore:
@@ -67,6 +71,12 @@ async def test_sleep_unloads():
     llm = FakeLLM()
     out = await collect(Router(llm, FakeStore()), "sleep", {})
     assert llm.unloaded and out == [{"done": True}]
+
+
+async def test_warm_preloads_and_is_silent():
+    llm = FakeLLM()
+    out = await collect(Router(llm, FakeStore()), "warm", {})
+    assert llm.warmed is True and out == []   # fire-and-forget: no response
 
 
 async def test_unknown_type_errors():
@@ -179,6 +189,65 @@ def test_tool_hint_matches_lookup_phrases():
     assert TOOL_HINT.search("who wrote Dune")
     assert TOOL_HINT.search("look up the isbn")
     assert not TOOL_HINT.search("how are you today")
+
+
+class CaptureMessagesLLM:
+    """Fake tool LLM that records the messages it was handed, then answers."""
+    model = None
+
+    def __init__(self):
+        self.messages = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+        self.messages = messages
+        yield {"content": "ok"}
+
+
+async def test_filesystem_question_injects_home_grounding():
+    from pathlib import Path
+    llm = CaptureMessagesLLM()
+    router = Router(llm, FakeStore(), bridge=FakeBridge(), model_router=FakeModelRouter())
+    await collect(router, "chat", {"message": "what projects are in my projects folder"})
+    system = llm.messages[0]
+    assert system["role"] == "system"
+    assert str(Path.home()) in system["content"]           # tells the model where to look
+    assert f"{Path.home()}/Projects" in system["content"]  # concrete starting point
+    assert "search from '/'" in system["content"]          # steers off the whole-disk scan
+
+
+async def test_home_grounding_needs_a_bridge_and_a_fs_hint():
+    # no bridge → no tool loop → no fs grounding
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "chat", {"message": "list my files"})
+    assert all(m["role"] != "system" for m in llm.messages)
+
+
+async def test_slow_tool_call_times_out_with_recoverable_message(monkeypatch):
+    import asyncio
+    from lumen.daemon import router as router_mod
+    monkeypatch.setattr(router_mod, "TOOL_TIMEOUT_S", 0.05)
+
+    class HangBridge(FakeBridge):
+        async def call(self, name, args):
+            await asyncio.sleep(5)   # far longer than the (patched) timeout
+            return "never returned"
+
+    captured = {}
+
+    class ErrLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            yield {"tool_call": {"name": "search_files", "arguments": {"path": "/"}}}
+            captured["text"] = await executor("search_files", {"path": "/"})
+            yield {"content": f"done: {captured['text']}"}
+
+    out = await collect(
+        Router(ErrLLM(), FakeStore(), bridge=HangBridge(), model_router=FakeModelRouter()),
+        "chat", {"message": "search my files"})
+    assert "timed out" in captured["text"]                 # fed back so the model can recover
+    assert any("timed out" in o.get("chunk", "") for o in out)
+    assert out[-1] == {"done": True}
 
 
 async def test_chat_runs_tool_loop_and_emits_tool_used():
@@ -811,8 +880,12 @@ class FakeToolLog:
         self.entries.append((tool, ok))
 
 
-VALID_JSON = ('{"title": "Call with Sam", "start": "2026-07-11T14:00", '
-              '"end": "2026-07-11T14:30"}')
+# Computed a couple of days out so the proposal is always in the future —
+# a hardcoded date here becomes "the past" once the clock rolls past it and
+# validate_proposal (correctly) rejects it.
+_EV_START = (datetime.now() + _td(days=2)).replace(hour=14, minute=0, second=0, microsecond=0)
+VALID_JSON = (f'{{"title": "Call with Sam", "start": "{_EV_START.strftime("%Y-%m-%dT%H:%M")}", '
+              f'"end": "{(_EV_START + _td(minutes=30)).strftime("%Y-%m-%dT%H:%M")}"}}')
 
 
 def create_router(llm=None, bridge=None, cal=None, broker=None, tool_log=None):

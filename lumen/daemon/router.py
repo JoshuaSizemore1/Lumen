@@ -10,6 +10,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.client import LLMUnavailable
@@ -53,6 +54,28 @@ CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 # never offered to the model in the generic tool loop — the confirm gate is
 # mechanical, not prompt-enforced.
 WRITE_TOOLS = frozenset({"create_event"})
+
+# No single tool call may run longer than this. The filesystem server processes
+# requests sequentially over stdio, so a `search_files` from '/' can block for
+# minutes (observed 6.5 min) and hang the whole chat. Grounding (fs_context)
+# stops the model reaching for such calls; this is the defensive backstop.
+TOOL_TIMEOUT_S = 30.0
+
+
+def fs_context(home: Path) -> str:
+    """System-message grounding for filesystem tools: where the user's files
+    actually live, so the model reads a specific directory instead of guessing
+    paths or scanning the whole machine from '/'."""
+    return (
+        f"The user's home directory is {home}. Their personal files, code, and "
+        f"projects live under it — for example {home}/Projects, {home}/Documents, "
+        f"and {home}/Downloads. When the user asks about their own files or "
+        f"folders, call list_directory (or directory_tree) on a specific path "
+        f"under the home directory. Do NOT list or search from '/', the "
+        f"whole-machine root — it is huge and slow. If you don't know an exact "
+        f"folder name, list its parent directory and read the names rather than "
+        f"using search_files."
+    )
 
 
 def calendar_context(events: list[dict], now: datetime, window_end: date) -> str:
@@ -133,6 +156,9 @@ class Router:
             context.append(calendar_context(
                 self._calendar.list_range(now.date().isoformat(), end.isoformat()),
                 now, end))
+        if self._bridge is not None and (TOOL_HINT.search(message)
+                                         or FS_WRITE_HINT.search(message)):
+            context.append(fs_context(Path.home()))
         messages = ([{"role": "system", "content": "\n\n".join(context)}]
                     if context else [])
         messages.append({"role": "user", "content": message})
@@ -170,6 +196,10 @@ class Router:
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
+        elif type_ == "warm":
+            # Fire-and-forget preload (launcher summon) so the next query isn't
+            # a cold start. No response — the UI doesn't wait on it.
+            await self._llm.warm()
         elif type_ == "confirm.response":
             # Silent ack: the answer unblocks whichever handler is awaiting it.
             if self._confirm is not None:
@@ -383,8 +413,14 @@ class Router:
                                              int((time.monotonic() - start) * 1000))
                     return denial
             try:
-                text = await self._bridge.call(name, args)
+                text = await asyncio.wait_for(self._bridge.call(name, args),
+                                              TOOL_TIMEOUT_S)
                 ok = True
+            except asyncio.TimeoutError:
+                text, ok = (
+                    f"tool error: {name} timed out after {int(TOOL_TIMEOUT_S)}s — "
+                    "use a specific directory under the home folder instead of a "
+                    "broad path, and never search_files from '/'", False)
             except Exception as e:
                 text, ok = f"tool error: {e}", False
                 if not isinstance(e, ToolCallError):
