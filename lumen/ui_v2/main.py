@@ -18,9 +18,10 @@ from .screens.calendar import CalendarScreen
 from .screens.mail import MailScreen
 from .screens.todos import TodosScreen
 from .screens.books import BooksScreen
+from .screens.chat import ChatScreen
 from .screens.settings import SettingsScreen
 
-TABS = ("launcher", "dashboard", "calendar", "mail", "todos", "books", "settings")
+TABS = ("launcher", "dashboard", "calendar", "mail", "todos", "books", "chat", "settings")
 
 _active_window = None  # keeps the rebuilt window alive after an accent switch
 
@@ -84,6 +85,7 @@ class LumenWindow(QWidget):
             "mail": MailScreen(self.state),
             "todos": TodosScreen(self.state),
             "books": BooksScreen(self.state),
+            "chat": ChatScreen(self.state),
             "settings": SettingsScreen(self.state),
         }
         for key in TABS:
@@ -95,13 +97,14 @@ class LumenWindow(QWidget):
         self.toast = Toast(self)
 
         self.state.view_requested.connect(self.switch_to)
+        self.state.open_chat_requested.connect(self._open_chat)
         self.state.confirm_requested.connect(self._open_confirm)
         self.state.toast_requested.connect(self.toast.pop)
         self.state.status_requested.connect(self.toast.pop)
         self.state.mails_changed.connect(self._update_mail_badge)
         self.state.accent_requested.connect(self._change_accent)
 
-        for i, key in enumerate(("launcher", "dashboard", "calendar", "todos", "books")):
+        for i, key in enumerate(("launcher", "dashboard", "calendar", "todos", "books", "chat")):
             sc = QShortcut(QKeySequence(str(i + 1)), self)
             sc.activated.connect(lambda k=key: self.switch_to(k))
 
@@ -140,8 +143,9 @@ class LumenWindow(QWidget):
         self.mail_badge = Chip("4", T.ACCENT_ON, T.ACCENT, bg=T.ACCENT,
                                px=10, radius=8, hpad=5, vpad=1, weight=600)
         names = {"launcher": "Launcher", "dashboard": "Dashboard", "calendar": "Calendar",
-                 "mail": "Mail", "todos": "Todos", "books": "Books"}
-        kbd = {"launcher": "1", "dashboard": "2", "calendar": "3", "todos": "4", "books": "5"}
+                 "mail": "Mail", "todos": "Todos", "books": "Books", "chat": "Chat"}
+        kbd = {"launcher": "1", "dashboard": "2", "calendar": "3", "todos": "4",
+               "books": "5", "chat": "6"}
         self.tab_buttons: dict[str, QPushButton] = {}
         for i, key in enumerate(TABS[:-1]):
             badge = self.mail_badge if key == "mail" else Chip(
@@ -171,8 +175,17 @@ class LumenWindow(QWidget):
         idx = TABS.index(key)
         self.tab_buttons[key].setChecked(True)
         self.stack.setCurrentIndex(idx)
-        if key == "launcher":
-            self.state.warm_model()   # user headed to the launcher → preload
+        if key in ("launcher", "chat"):
+            self.state.warm_model()   # user headed somewhere they'll chat → preload
+
+    def _open_chat(self, conv_id: int):
+        """Overlay/launcher handoff: surface the window, open the Chat tab, and
+        load the same conversation the user was just in."""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.switch_to("chat")
+        self.screens["chat"].load_conversation(conv_id)
 
     def _open_confirm(self, payload: dict):
         # A write confirmation can arrive while only the hotkey overlay is up

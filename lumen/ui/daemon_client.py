@@ -16,6 +16,7 @@ class DaemonClient(QObject):
     done = pyqtSignal()
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
+    conversation = pyqtSignal(int)        # daemon assigned this chat a conversation id
     confirm_requested = pyqtSignal(dict)  # payload rows + confirm_id
 
     def __init__(self, socket_path: str, parent=None):
@@ -93,5 +94,7 @@ class DaemonClient(QObject):
                     {"confirm_id": msg.get("confirm_id"), **msg["confirm_request"]})
             elif "tool_used" in msg:
                 self.tool_used.emit(msg["tool_used"])
+            elif "conversation_id" in msg:
+                self.conversation.emit(msg["conversation_id"])
             elif "chunk" in msg:
                 self.chunk.emit(msg["chunk"])

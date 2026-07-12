@@ -13,6 +13,7 @@ class FakeClient(QObject):
     done = pyqtSignal()
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
+    conversation = pyqtSignal(int)
     confirm_requested = pyqtSignal(dict)
 
     def __init__(self):
@@ -237,6 +238,122 @@ def test_ui_model_label_matches_daemon_default():
     from lumen.daemon.config import Config
     from lumen.ui_v2 import theme as T
     assert T.MODEL_NAME == Config().model
+
+
+def _label_texts(widget) -> str:
+    from PyQt6.QtWidgets import QLabel
+    return " ".join(lb.text() for lb in widget.findChildren(QLabel))
+
+
+# ---- conversation state helpers ------------------------------------------
+
+def test_list_conversations_routes_and_sample_is_empty(qtbot):
+    data = FakeClient()
+    AppState(data=data).list_conversations(lambda r: None)
+    assert data.requests[-1][0] == "conversations.list"
+    sample = []
+    AppState().list_conversations(sample.append)   # sample mode: synchronous []
+    assert sample == [[]]
+
+
+def test_get_conversation_routes(qtbot):
+    data = FakeClient()
+    AppState(data=data).get_conversation(4, lambda r: None)
+    assert data.requests[-1][:2] == ("conversations.get", {"id": 4})
+
+
+# ---- launcher multi-turn + handoff ---------------------------------------
+
+def test_launcher_followup_reuses_conversation_id(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    chat = FakeClient()
+    pal = LauncherPalette(AppState(), chat)
+    qtbot.addWidget(pal)
+    pal.input.setText("first")
+    pal._submit()
+    assert chat.sent[0] == ("chat", {"message": "first"})   # first turn: no id yet
+    chat.conversation.emit(2)
+    chat.chunk.emit("a")
+    chat.done.emit()
+    pal.input.setText("second")
+    pal._submit()
+    assert chat.sent[1] == ("chat", {"message": "second", "conversation_id": 2})
+
+
+def test_launcher_handoff_emits_open_chat(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    chat = FakeClient()
+    st = AppState()
+    pal = LauncherPalette(st, chat)
+    qtbot.addWidget(pal)
+    seen = []
+    st.open_chat_requested.connect(seen.append)
+    pal.input.setText("q")
+    pal._submit()
+    chat.conversation.emit(5)
+    chat.chunk.emit("answer")
+    chat.done.emit()
+    pal._open_in_chat()
+    assert seen == [5]
+
+
+# ---- full Chat screen ----------------------------------------------------
+
+def test_chat_screen_submits_streams_and_threads_followup(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    data, chat = FakeClient(), FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=chat)
+    qtbot.addWidget(sc)
+    assert any(t == "conversations.list" for t, _p, _cb in data.requests)  # sidebar loads
+    sc.input.setText("find my resume")
+    sc._submit()
+    assert chat.sent[0] == ("chat", {"message": "find my resume"})
+    chat.conversation.emit(7)
+    chat.chunk.emit("Found ")
+    chat.chunk.emit("it.")
+    assert sc.resp_text.text() == "Found it."
+    chat.done.emit()
+    sc.input.setText("delete it")
+    sc._submit()
+    assert chat.sent[1] == ("chat", {"message": "delete it", "conversation_id": 7})
+
+
+def test_chat_screen_loads_past_conversation(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    data, chat = FakeClient(), FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=chat)
+    qtbot.addWidget(sc)
+    data.cb_for("conversations.list")([{"id": 3, "title": "calendar q", "updated_at": "x"}])
+    sc.load_conversation(3)
+    getcb = next(cb for t, p, cb in data.requests if t == "conversations.get" and p == {"id": 3})
+    getcb({"conversation": {"id": 3}, "messages": [
+        {"role": "user", "content": "what's on tuesday"},
+        {"role": "assistant", "content": "two meetings"}]})
+    assert sc._conv_id == 3
+    texts = _label_texts(sc.thread)
+    assert "what's on tuesday" in texts and "two meetings" in texts
+
+
+def test_chat_screen_new_chat_resets(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    sc = ChatScreen(AppState(data=FakeClient()), chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    sc._conv_id = 9
+    sc.input.setText("hi")
+    sc._submit()
+    sc.new_chat()
+    assert sc._conv_id is None and sc.resp_text is None
+
+
+def test_window_registers_chat_and_open_chat_loads(qtbot):
+    from lumen.ui_v2.main import LumenWindow, TABS
+    data, chat = FakeClient(), FakeClient()
+    win = LumenWindow(AppState(data=data, chat=chat))
+    qtbot.addWidget(win)
+    assert "chat" in TABS and "chat" in win.screens
+    win._open_chat(11)
+    assert win.stack.currentWidget() is win.screens["chat"]
+    assert win.screens["chat"]._conv_id == 11
 
 
 def test_sample_window_builds_every_screen(qtbot):

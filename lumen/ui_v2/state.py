@@ -105,6 +105,7 @@ class AppState(QObject):
     books_changed = pyqtSignal()
     recs_changed = pyqtSignal()
     view_requested = pyqtSignal(str)      # tab key: launcher/dashboard/...
+    open_chat_requested = pyqtSignal(int)  # hand a conversation off to the full Chat screen
     confirm_requested = pyqtSignal(dict)  # confirm-dialog payload (may carry confirm_id)
     toast_requested = pyqtSignal(str)
     accent_requested = pyqtSignal(str)    # accent hex from the settings picker
@@ -153,6 +154,19 @@ class AppState(QObject):
         start happens behind their typing instead of after they hit enter."""
         if self._chat is not None:
             self._chat.send("warm", {})
+
+    # ---- conversations (chat history) ----
+    def list_conversations(self, cb) -> None:
+        """cb(rows) with sidebar-shaped [{id, title, updated_at}], newest first."""
+        if self._data is not None:
+            self._data.request("conversations.list", {}, cb)
+        else:
+            cb([])   # sample mode has no transcript store
+
+    def get_conversation(self, cid: int, cb) -> None:
+        """cb({conversation, messages}) for reopening a past thread."""
+        if self._data is not None:
+            self._data.request("conversations.get", {"id": cid}, cb)
 
     # ---- todos ----
     def open_count(self) -> int:
