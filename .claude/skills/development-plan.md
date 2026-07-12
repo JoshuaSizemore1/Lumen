@@ -86,6 +86,31 @@ Google OAuth + calendar MCP server. Read-only first: dashboard view, "what's on 
 
 **Success (read)**: dashboard accurately shows today's real events. **Success (write)**: proposing an event via chat shows a confirmation dialog with correct details, and nothing gets created without you explicitly confirming.
 
+## Phase 5.5 — Chat quality hardening (identity, conversation, grounding)
+Not a new subsystem — a hardening pass on the *existing* fast-model chat, driven by real dissatisfaction with output quality (see "Josh's personal notes" at the end of this file). Slot it before Phase 6: Phase 6 adds more tools the model needs to know it has, so fixing tool-awareness first pays off. Two items are genuinely open (identity prompt, conversation state); two are already largely landed in the working tree and only need finishing/verifying — don't re-scope them.
+
+**Scope boundary (be skeptical — these are NOT this phase):**
+- Verbatim conversation storage here is a transcript, *not* the Phase 9 memory system — no distillation, no capped blob, no correction-weighting. Store turns; don't summarize them.
+- Hard cold-start/thermal numbers stay in Phase 11. This phase only wires the warmup trigger; it does not measure.
+- No new tools or connectors. If the fix looks like "add a capability," it belongs in another phase.
+
+**Read first**: `architecture.md` (daemon/UI split — the chat screen holds no logic), `llm-serving.md` (idle-unload interaction with warmup; small-model context budget), `mcp-integration.md` (tool-loop entry).
+
+**Already landed in the working tree (finish + verify, don't rebuild):**
+- *Filesystem grounding (note 3)*: `router.fs_context()` tells the model where the user's files live and to read a specific dir instead of scanning `/`; a 30s `TOOL_TIMEOUT_S` backstops a broad `search_files`. Remaining: keep it, live-verify it survives the identity-prompt change, and reuse the same grounding pattern for calendar/email tool selection as those land.
+- *Cold-start warmup (note 4)*: `OllamaClient.warm()` + the router `warm` command exist. Remaining: fire `warm` when the launcher is *summoned* (hotkey opens the palette) so the model preloads while the user is still typing — not on daemon boot (that would defeat idle-unload). Real latency/thermal numbers are Phase 11's job, not this one.
+
+**Build order:**
+1. **Base identity + capability system prompt (notes 1 & 5)** — one short prompt prepended to *every* chat request: it is Lumen, a local, private daily assistant; the domains it helps with (todos, calendar, books, files today; email as Phase 6/7 land); and that it has tools it should actually call rather than guessing or apologizing. Prepend it in `_base_messages` (and the tool-loop path) ahead of the existing keyword-gated context, so per-query context (`todo_context`, `calendar_context`, `fs_context`) stacks on top of a constant identity. Keep it tight — the 4B fast model has a real context/thermal budget, and a wall of text degrades it. Do **not** hand-write the tool list in prose: Ollama already passes the tool schemas; the prompt only needs "you have tools; use them for X," not a duplicated catalog that drifts out of sync.
+2. **Make follow-ups tool-capable (the actual cause of note 1)** — today the tool-calling loop is entered only when a keyword hint matches the *current* message ([router.py:180](lumen/daemon/router.py#L180)), so a follow-up like "and delete it" never even reaches the tools. Once conversation state exists (step 3), keep a conversation that has entered the tool loop tool-capable for its subsequent turns instead of re-deciding per message from keywords alone. Skeptical guard: don't just run the full tool loop on *every* message unconditionally — that's slower and hits the thermal ceiling; gate on "this conversation is already tool-shaped," not on a bare keyword each turn.
+3. **Conversation state carried through the router** — the core gap: `_base_messages` builds a single stateless user turn, so nothing is multi-turn today. Carry prior turns (a conversation id + the running message list) into every chat path so the model sees history. This is what actually makes follow-ups work; the identity prompt alone won't. Cap in-context history by turn count/token budget (fixed-size, thermal discipline) — older turns fall off the prompt but stay in storage.
+4. **Conversation storage (SQLite)** — persist transcripts (`conversations` + `messages` tables: role, content, tool calls/results, timestamps) so history survives restarts. Chat history is already in the stated storage scope (CLAUDE.md). This mirror can contain anything the user typed — `chmod 600` the DB like the email mirror. Write-through as turns happen; this is a log, not a cache.
+5. **Chat screen in `ui_v2` (note 2)** — typing a question into the launcher opens a chat view (like Claude) showing the running conversation instead of a one-shot answer. New `ui_v2/screens/chat.py`; the launcher hands the first message off and transitions to it. Renders turns, streams the assistant reply, lets the user continue the thread; a way to start a new conversation and revisit past ones. UI holds no logic — it renders turns and sends messages; the daemon owns state, storage, and truncation.
+
+**Traps**: warmup on summon must still respect idle-unload — preloading on hotkey is fine; a background keep-warm loop is not (it violates the non-negotiable). Don't let the always-on identity prompt crowd out per-query context on the small model — measure that grounded answers (files/calendar/todos) still work after adding it. Conversation history in-context is fixed-size by budget, not unbounded — a long chat must not grow the prompt without bound. Keep storage dumb: this is not the memory system, and turning it into background summarization is Phase 9's job, not this phase's.
+
+**Success**: a multi-turn chat works — ask a question, then a pronoun-only follow-up ("delete that file", "what about tomorrow?") and the model both remembers context and still reaches for the right tool; the launcher opens a Claude-style chat window with visible history; closing and reopening the app shows past conversations; and the model, unprompted, identifies as Lumen and knows what it can do.
+
 ## Phase 6 — Email menu (heaviest phase, budget extra time)
 OAuth, the bulk-sync worker (bounded initial pull + resumable pagination), History-API-based incremental sync, local DB with full-text search, and the browse/search email menu UI — kept separate from the LLM/MCP tool-calling loop per `email-menu.md`.
 
@@ -183,3 +208,14 @@ Real benchmarking on the actual Zenbook Duo (Core Ultra 9 285H, 32GB shared, iGP
 - Sustained-use fan/thermal behavior across a realistic mixed session (briefing, a few chats, a rec, an email search).
 
 **Success**: you can state a concrete number for cold-start time and confirm the fan/thermal behavior at idle is acceptable — not just "it feels fine."
+
+
+## Josh's personal notes (source for Phase 5.5 — kept verbatim)
+These are the raw notes that Phase 5.5 above was distilled from. Notes 3 and 4 were already partly fixed in the working tree at the time these were written (`fs_context`/tool timeout, and `warm()`), which is why Phase 5.5 finishes rather than rebuilds them.
+
+I am currently not happy with the current output of the local AI LLM (a bit happier after some changes we just did)
+1. when asking it follow up messages it does not reaalize it can use the MCP tools; there should be some sort of system prompt given to it everysingle message so it knows who it is and what it can do
+2. When I type a question into the quick launcher in the first screen of the application, I want it to start a chat window like claude does so I can see the conversation history, also add conversation storage
+3. It does not know how to properly look through my system files, it needs to have an improved prompt on how to do that, with easy guided steps to get general good output (we fixed this a bit already it seems to work well I tested it with finding my projects folder)
+4. It takes a long time to load up the local llm on first start (we fixed this a bit already)
+5. Like I said earlier it needs a system prompt to give it an identity as lumen, a local llm AI that can do xyz (being its tools and MPC, and general experties for help)
