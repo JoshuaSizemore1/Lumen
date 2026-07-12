@@ -69,3 +69,11 @@ def test_consent_flow_without_client_secret_exits_with_pointer(tmp_path):
     import pytest
     with pytest.raises(SystemExit, match="google-oauth-setup"):
         google_auth.run_consent_flow(cfg(tmp_path), READ_SCOPES)
+
+
+def test_gmail_scopes_staged_into_consent():
+    assert "https://www.googleapis.com/auth/gmail.readonly" in google_auth.GMAIL_READ_SCOPES
+    assert "https://www.googleapis.com/auth/gmail.modify" in google_auth.GMAIL_WRITE_SCOPES
+    # the one-time consent run now covers calendar + gmail together
+    assert set(google_auth.WRITE_SCOPES) <= set(google_auth.SCOPES)
+    assert set(google_auth.GMAIL_WRITE_SCOPES) <= set(google_auth.SCOPES)

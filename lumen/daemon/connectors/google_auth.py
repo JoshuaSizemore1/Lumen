@@ -7,9 +7,11 @@ from pathlib import Path
 
 READ_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
 WRITE_SCOPES = READ_SCOPES + ("https://www.googleapis.com/auth/calendar.events",)
-# What lumen-google-auth requests today. Write scope joined when the Phase 5
-# write half shipped (staged scopes — never request ahead of the feature).
-SCOPES = WRITE_SCOPES
+GMAIL_READ_SCOPES = ("https://www.googleapis.com/auth/gmail.readonly",)
+GMAIL_WRITE_SCOPES = GMAIL_READ_SCOPES + ("https://www.googleapis.com/auth/gmail.modify",)
+# What lumen-google-auth requests today: calendar (Phase 5) + gmail read/modify
+# (Phase 6 browse + archive/mark-read). gmail.send waits for Phase 7.
+SCOPES = WRITE_SCOPES + GMAIL_WRITE_SCOPES
 
 
 def load_credentials(google_cfg, scopes=READ_SCOPES):

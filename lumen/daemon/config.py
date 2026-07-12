@@ -50,6 +50,8 @@ class SyncConfig:
     calendar_poll_minutes: int = 5
     calendar_window_past_days: int = 30
     calendar_window_future_days: int = 60
+    gmail_poll_minutes: int = 5
+    gmail_window_months: int = 6
 
 
 @dataclass(frozen=True)
@@ -161,15 +163,17 @@ def load_config(path: Path | None = None) -> Config:
     if sync_raw is not None:
         s_kwargs = {k: int(sync_raw[k]) for k in
                     ("calendar_poll_minutes", "calendar_window_past_days",
-                     "calendar_window_future_days") if k in sync_raw}
+                     "calendar_window_future_days", "gmail_poll_minutes",
+                     "gmail_window_months") if k in sync_raw}
         sync_cfg = SyncConfig(**s_kwargs)
-        if sync_cfg.calendar_poll_minutes < 5:
+        if sync_cfg.calendar_poll_minutes < 5 or sync_cfg.gmail_poll_minutes < 5:
             raise SystemExit(
-                f"lumen: calendar_poll_minutes must be at least 5 "
-                f"(got {sync_cfg.calendar_poll_minutes}) — no tight polling loops")
+                "lumen: poll minutes must be at least 5 — no tight polling loops")
         if (sync_cfg.calendar_window_past_days < 0
                 or sync_cfg.calendar_window_future_days < 0):
             raise SystemExit("lumen: calendar sync window days must be non-negative")
+        if sync_cfg.gmail_window_months < 1:
+            raise SystemExit("lumen: gmail_window_months must be at least 1")
         kwargs["sync"] = sync_cfg
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:

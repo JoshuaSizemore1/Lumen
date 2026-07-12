@@ -242,7 +242,7 @@ def test_sync_overrides_from_toml(tmp_path):
 def test_sync_poll_tighter_than_five_minutes_rejected(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text("[sync]\ncalendar_poll_minutes = 4\n")
-    with pytest.raises(SystemExit, match="calendar_poll_minutes"):
+    with pytest.raises(SystemExit, match="poll minutes must be at least 5"):
         load_config(p)
 
 
@@ -250,4 +250,25 @@ def test_sync_negative_window_rejected(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text("[sync]\ncalendar_window_past_days = -1\n")
     with pytest.raises(SystemExit, match="window"):
+        load_config(p)
+
+
+def test_sync_gmail_defaults_and_parse(tmp_path):
+    cfg = load_config(tmp_path / "missing.toml")
+    assert cfg.sync.gmail_poll_minutes == 5
+    assert cfg.sync.gmail_window_months == 6
+    p = tmp_path / "c.toml"
+    p.write_text("[sync]\ngmail_poll_minutes = 7\ngmail_window_months = 12\n")
+    cfg = load_config(p)
+    assert cfg.sync.gmail_poll_minutes == 7
+    assert cfg.sync.gmail_window_months == 12
+
+
+def test_sync_gmail_rejects_tight_poll_and_bad_window(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[sync]\ngmail_poll_minutes = 1\n")
+    with pytest.raises(SystemExit):
+        load_config(p)
+    p.write_text("[sync]\ngmail_window_months = 0\n")
+    with pytest.raises(SystemExit):
         load_config(p)
