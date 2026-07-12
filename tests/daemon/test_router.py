@@ -161,6 +161,23 @@ async def test_tool_engaged_conversation_stays_tool_capable_on_bare_followup(tmp
     assert any("tool_used" in o for o in out)
 
 
+async def test_tool_engaged_followup_still_gets_fs_grounding(tmp_path):
+    # Live-verification regression: a keyword-less follow-up in a tool-engaged
+    # thread entered the tool loop but scanned '/' because fs grounding was gated
+    # on the current message's keyword. It must ride along whenever the loop runs.
+    from pathlib import Path
+    conv = conv_store(tmp_path)
+    cid = conv.create("what files are in my projects folder")
+    conv.mark_tool_engaged(cid)
+    llm = CaptureMessagesLLM()
+    await collect(
+        Router(llm, FakeStore(), bridge=FakeBridge(),
+               model_router=FakeModelRouter(), conversations=conv),
+        "chat", {"message": "what's inside the Lumen one?", "conversation_id": cid})
+    system = llm.messages[0]["content"]
+    assert str(Path.home()) in system and "search from '/'" in system
+
+
 async def test_non_tool_conversation_ignores_bare_followup(tmp_path):
     conv = conv_store(tmp_path)
     cid = conv.create("hello")                         # never used a tool

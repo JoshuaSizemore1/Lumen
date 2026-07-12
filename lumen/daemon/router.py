@@ -161,10 +161,14 @@ class Router:
         if self._confirm is not None:
             self._confirm.deny_all()
 
-    def _build_messages(self, message: str, history: list[dict]) -> list[dict]:
+    def _build_messages(self, message: str, history: list[dict],
+                        tool_loop: bool = False) -> list[dict]:
         """A constant identity block + keyword-gated per-query context as the
         system message, then the conversation history (which ends with the
-        current user turn). Context is keyed on the current message."""
+        current user turn). Context is keyed on the current message; fs grounding
+        also rides along whenever the tool loop is active, so a keyword-less
+        follow-up in a tool-engaged thread still knows where the user's files
+        live instead of scanning '/' (found in live verification)."""
         context = [IDENTITY]
         if TODO_HINT.search(message):
             context.append(todo_context(self._todos.open_todos(), date.today()))
@@ -176,12 +180,13 @@ class Router:
             context.append(calendar_context(
                 self._calendar.list_range(now.date().isoformat(), end.isoformat()),
                 now, end))
-        if self._bridge is not None and (TOOL_HINT.search(message)
+        if self._bridge is not None and (tool_loop or TOOL_HINT.search(message)
                                          or FS_WRITE_HINT.search(message)):
             context.append(fs_context(Path.home()))
         return [{"role": "system", "content": "\n\n".join(context)}] + history
 
-    def _messages_for(self, message: str, conv_id: int | None) -> list[dict]:
+    def _messages_for(self, message: str, conv_id: int | None,
+                      tool_loop: bool = False) -> list[dict]:
         """Prompt messages for a chat turn: the current user message is already
         persisted, so the store's (capped) history ends with it. Without a store
         this degrades to a single stateless user turn."""
@@ -189,7 +194,7 @@ class Router:
             history = self._conv.history(conv_id, limit=HISTORY_TURNS)
         else:
             history = [{"role": "user", "content": message}]
-        return self._build_messages(message, history)
+        return self._build_messages(message, history, tool_loop)
 
     def _tool_shaped(self, message: str, conv_id: int | None) -> bool:
         """Enter the tool loop when the current message hints at a tool OR this
@@ -457,7 +462,7 @@ class Router:
             log.exception("MCP bridge unavailable — answering without tools")
             tools = []
         if not tools:                      # no servers came up → fall back to plain chat
-            messages = self._messages_for(message, conv_id)
+            messages = self._messages_for(message, conv_id, tool_loop=True)
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
@@ -503,7 +508,7 @@ class Router:
                                      int((time.monotonic() - start) * 1000))
             return text
 
-        messages = self._messages_for(message, conv_id)
+        messages = self._messages_for(message, conv_id, tool_loop=True)
         model = self._pick_model(message)
 
         async def pump():
