@@ -262,3 +262,40 @@ async def test_not_connected_is_normal(tmp_path):
                      service_factory=lambda: None)
     assert await sync.sync_once() is False
     assert store.get_state(HISTORY_KEY) is None
+
+
+# Task 6: Incremental sync
+async def test_incremental_applies_adds_deletes_and_label_flips(tmp_path):
+    history = {None: {"history": [
+        {"messagesAdded": [{"message": {"id": "new1"}}]},
+        {"messagesDeleted": [{"message": {"id": "old1"}}]},
+        {"labelsRemoved": [{"message": {"id": "keep1"}, "labelIds": ["UNREAD"]}]},
+    ], "historyId": "h200"}}
+    svc = FakeService({}, full_for("new1"), history_pages=history)
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1) | {"id": "old1"}, msg(2) | {"id": "keep1"}])
+    store.set_state(HISTORY_KEY, "h100")
+    assert await sync.sync_once() is True
+    assert svc.history_calls == ["h100"]
+    assert store.get("new1") is not None
+    assert store.get("old1") is None
+    assert store.get("keep1")["is_read"] is True
+    assert store.get_state(HISTORY_KEY) == "h200"
+
+
+async def test_expired_history_rebaselines_and_prunes(tmp_path):
+    class Expired(Exception):
+        status_code = 404
+
+    pages = {None: {"messages": [{"id": "fresh"}]}}
+    svc = FakeService(pages, full_for("fresh"),
+                      profile_history="h300",
+                      history_pages={None: Expired()})
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1) | {"id": "gap-deleted"}])    # in window, gone upstream
+    store.set_state(HISTORY_KEY, "h-expired")
+    assert await sync.sync_once() is True
+    assert store.get("fresh") is not None
+    assert store.get("gap-deleted") is None           # pruned by run-id pass
+    assert store.get_state(HISTORY_KEY) == "h300"
+    assert store.get_state(RUN_KEY) is None

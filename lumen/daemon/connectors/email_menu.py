@@ -272,8 +272,58 @@ class GmailSync:
                 for ref in resp.get("messages", [])]
         return msgs, resp.get("nextPageToken")
 
+    @staticmethod
+    def _is_404(exc: Exception) -> bool:
+        status = getattr(exc, "status_code", None) or getattr(
+            getattr(exc, "resp", None), "status", None)
+        return status in (404, "404")
+
     async def _incremental(self, service) -> bool:
-        # Task 6
+        start = self._store.get_state(HISTORY_KEY)
+        page_token, latest = None, None
+        while True:
+            try:
+                resp = await asyncio.to_thread(
+                    lambda: service.users().history().list(
+                        userId="me", startHistoryId=start,
+                        pageToken=page_token).execute())
+            except Exception as e:
+                if self._is_404(e):
+                    # Expired history position — re-baseline the bounded window
+                    # (a normal long-offline outcome, not an error).
+                    log.info("gmail historyId expired — re-baselining")
+                    self._store.set_state(RUN_KEY, str(uuid.uuid4()))
+                    self._store.set_state(HISTORY_KEY, None)
+                    self._store.set_state(CURSOR_KEY, None)
+                    return await self._bulk(service)
+                log.exception("gmail incremental sync failed")
+                return False
+            latest = resp.get("historyId", latest)
+            added_ids = []
+            for h in resp.get("history", []):
+                added_ids += [m["message"]["id"] for m in h.get("messagesAdded", [])]
+                self._store.delete([m["message"]["id"]
+                                    for m in h.get("messagesDeleted", [])])
+                for change in h.get("labelsAdded", []):
+                    self._store.update_labels(change["message"]["id"],
+                                              add=change.get("labelIds", []), remove=[])
+                for change in h.get("labelsRemoved", []):
+                    self._store.update_labels(change["message"]["id"], add=[],
+                                              remove=change.get("labelIds", []))
+            if added_ids:
+                msgs = await asyncio.to_thread(
+                    lambda ids=added_ids: [normalize_message(
+                        service.users().messages().get(
+                            userId="me", id=i, format="full").execute())
+                        for i in ids])
+                self._store.upsert(msgs)
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        if latest is not None:
+            self._store.set_state(HISTORY_KEY, str(latest))
+        self._store.set_state(LAST_SYNC_KEY,
+                              datetime.now().isoformat(timespec="seconds"))
         return True
 
     async def poll_forever(self) -> None:
