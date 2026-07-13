@@ -24,22 +24,26 @@ class ConfirmBroker:
         self._pending[confirm_id] = asyncio.get_event_loop().create_future()
         return confirm_id
 
-    async def wait(self, confirm_id: int) -> bool:
-        """The user's answer, or False on timeout / disconnect / cancellation."""
+    async def wait(self, confirm_id: int, timeout: float | None = None):
+        """The user's answer — False on timeout / disconnect / cancellation,
+        otherwise whatever resolve() carried (bool for confirms, the popup's
+        final fields for compose). Compose waits pass their own timeout: an
+        edit session outlives a confirm click."""
         fut = self._pending[confirm_id]
         try:
-            return await asyncio.wait_for(fut, self._timeout)
+            return await asyncio.wait_for(
+                fut, self._timeout if timeout is None else timeout)
         except asyncio.TimeoutError:
             return False
         finally:
             self._pending.pop(confirm_id, None)
 
-    def resolve(self, confirm_id: int, approved: bool) -> bool:
+    def resolve(self, confirm_id: int, result) -> bool:
         """UI answered. False if the id is unknown (already timed out/denied)."""
         fut = self._pending.get(confirm_id)
         if fut is None or fut.done():
             return False
-        fut.set_result(bool(approved))
+        fut.set_result(result)
         return True
 
     def deny_all(self) -> None:

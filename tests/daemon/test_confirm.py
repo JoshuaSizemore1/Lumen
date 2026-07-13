@@ -50,3 +50,20 @@ async def test_deny_all_flushes_every_pending_confirm():
 async def test_ids_are_unique():
     broker = ConfirmBroker()
     assert broker.begin() != broker.begin()
+
+
+async def test_resolve_passes_payload_through():
+    # Phase 7 compose: the popup's answer is fields, not a yes/no.
+    broker = ConfirmBroker()
+    cid = broker.begin()
+    task = asyncio.ensure_future(broker.wait(cid))
+    await asyncio.sleep(0)
+    assert broker.resolve(cid, {"subject": "s"}) is True
+    assert await task == {"subject": "s"}
+
+
+async def test_wait_per_call_timeout_overrides_default():
+    # Editing an email in the compose popup outlives a confirm-click timeout.
+    broker = ConfirmBroker(timeout=60)
+    cid = broker.begin()
+    assert await broker.wait(cid, timeout=0.01) is False
