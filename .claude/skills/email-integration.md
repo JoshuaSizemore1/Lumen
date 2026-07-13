@@ -12,7 +12,7 @@ Start minimal:
 - Poll on a timer (default 5 min, configurable in `config.toml`) rather than standing up Gmail push notifications (Pub/Sub) — polling is simpler for a single-user local app and the latency tradeoff doesn't matter here.
 - Cache message metadata (sender, subject, snippet, timestamp, label) in SQLite. Don't re-fetch full message bodies on every poll — only fetch body when the LLM/UI actually needs it for a specific message.
 
-**Deviation, as-built (Phase 6, 2026-07-12):** no separate lightweight metadata cache was built. The dashboard's unread panel queries the full email mirror from `email-menu.md` directly (the `emails.unread` router one-shot over `EmailStore.unread`). Why: a second cache means a second sync path to keep honest for no user-visible gain — the full mirror already has everything the metadata cache would have held, and Gmail's window is small enough (default 6 months) that querying it directly costs nothing worth optimizing away.
+**Deviation, as-built (Phase 6, 2026-07-12):** no separate lightweight metadata cache was built. The dashboard's unread panel renders `AppState.unread_mails()`, a client-side filter of the mail list already loaded by the `emails.list` one-shot (`EmailStore.list_page`); the separate `emails.unread` one-shot exists but currently only feeds chat context injection (`mail_context`). Why: a second cache means a second sync path to keep honest for no user-visible gain — the full mirror already has everything the metadata cache would have held, and Gmail's window is small enough (default 6 months) that querying it directly costs nothing worth optimizing away.
 
 ## Write actions
 Any send/archive/delete/mark-read action:
