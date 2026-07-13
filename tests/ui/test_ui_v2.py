@@ -570,12 +570,16 @@ def test_appstate_sample_mode_send_email_answers_ok():
 # ---- compose dialog --------------------------------------------------------
 
 def _compose_host(qtbot, data=None, confirm=None):
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QWidget
     from lumen.ui_v2.compose import ComposeDialog
     st = AppState(data=data or FakeClient(), confirm=confirm or FakeClient())
     host = QWidget()
     qtbot.addWidget(host)
-    host.show()              # a child's isVisible() is False under a hidden parent
+    # visible parent (a child's isVisible() is False under a hidden one), but
+    # never a real exposure — paint events for GC'd widgets segfault PyQt
+    host.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    host.show()
     dlg = ComposeDialog(host, st)
     dlg._test_host = host    # qtbot holds only a weakref; keep the parent alive
     return dlg, st
@@ -644,8 +648,11 @@ def test_window_opens_compose_on_state_signal(qtbot):
     st = AppState(data=FakeClient(), chat=FakeClient(), confirm=FakeClient())
     win = LumenWindow(st)
     qtbot.addWidget(win)
+    # _open_compose surfaces the window; never map it for real in tests —
+    # spinning the event loop delivers ghost paints to GC'd earlier widgets
+    win.show = lambda: None
     win.state.compose_requested.emit({"subject": "s"})
-    assert win.compose.isVisible() and win.compose.subject_edit.text() == "s"
+    assert not win.compose.isHidden() and win.compose.subject_edit.text() == "s"
 
 
 def test_mail_screen_compose_button_opens_empty_popup(qtbot):
