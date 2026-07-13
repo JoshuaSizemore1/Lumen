@@ -69,7 +69,13 @@ class ChatScreen(QWidget):
         v = vbox(main, (0, 0, 0, 0), 0)
         self.thread = QWidget()
         self.thread_lay = vbox(self.thread, (26, 22, 26, 18), 14)
-        v.addWidget(scroll(self.thread), 1)
+        # Trailing stretch absorbs leftover viewport height — without it the
+        # vbox spreads a short thread across the whole window.
+        self.thread_lay.addStretch(1)
+        sa = scroll(self.thread)
+        self._vsb = sa.verticalScrollBar()
+        self._vsb.rangeChanged.connect(self._pin_bottom)
+        v.addWidget(sa, 1)
         v.addWidget(hline(T.BORDER_SOFT))
         inrow = hbox(m=(20, 12, 20, 14), s=10)
         inrow.addWidget(label("❯", 16, T.ACCENT, 700))
@@ -84,13 +90,17 @@ class ChatScreen(QWidget):
         v.addLayout(inrow)
         return main
 
+    def _pin_bottom(self, _lo: int, hi: int):
+        if self._busy:      # follow the stream; leave a browsing user alone
+            self._vsb.setValue(hi)
+
     def _turn(self, who: str, who_color: str, text: str, text_color: str):
         w = QWidget()
         lay = vbox(w, (0, 0, 0, 0), 4)
         lay.addWidget(label(who, 10, who_color, ls=1))
         body = label(text, 14, text_color, sans=True, wrap=True)
         lay.addWidget(body)
-        self.thread_lay.addWidget(w)
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, w)
         return body
 
     def _add_user_turn(self, text: str):
@@ -100,7 +110,7 @@ class ChatScreen(QWidget):
         self._acc = ""
         self.tool_lab = label("", 10, T.TEXT_FAINT)
         self.tool_lab.hide()
-        self.thread_lay.addWidget(self.tool_lab)
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, self.tool_lab)
         self.resp_text = self._turn("LUMEN", T.ACCENT, "", T.TEXT_PRIMARY)
 
     # ---- conversation lifecycle -----------------------------------------
@@ -109,6 +119,7 @@ class ChatScreen(QWidget):
         self._busy = False
         self.resp_text = None
         clear_layout(self.thread_lay)
+        self.thread_lay.addStretch(1)   # clear_layout drops the stretch too
         self.input.setFocus()
 
     def load_conversation(self, cid: int):
@@ -118,6 +129,7 @@ class ChatScreen(QWidget):
 
     def _render_thread(self, got: dict):
         clear_layout(self.thread_lay)
+        self.thread_lay.addStretch(1)   # clear_layout drops the stretch too
         self.resp_text = None
         for m in got.get("messages", []):
             if m["role"] == "user":

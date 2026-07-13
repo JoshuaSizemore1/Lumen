@@ -136,8 +136,14 @@ class LauncherPalette(QFrame):
         self.body_lay.addWidget(hline(T.BORDER_SOFT))
         self.thread = QWidget()
         self.thread_lay = vbox(self.thread, (18, 14, 18, 10), 12)
+        # Trailing stretch keeps turns packed to the top instead of spread
+        # across the viewport; turns insert before it.
+        self.thread_lay.addStretch(1)
         self._thread_scroll = scroll(self.thread)
         self._thread_scroll.setMaximumHeight(380)
+        vsb = self._thread_scroll.verticalScrollBar()
+        vsb.rangeChanged.connect(
+            lambda _lo, hi: self._busy and vsb.setValue(hi))
         self.body_lay.addWidget(self._thread_scroll)
 
         foot = QWidget()
@@ -157,15 +163,15 @@ class LauncherPalette(QFrame):
         row = hbox(s=8)
         row.addWidget(label("you", 10, T.TEXT_FAINT))
         row.addWidget(label(text, 13, T.TEXT_SECONDARY, sans=True, wrap=True), 1)
-        self.thread_lay.addLayout(row)
+        self.thread_lay.insertLayout(self.thread_lay.count() - 1, row)
 
     def _begin_assistant_turn(self):
         self._acc = ""
         self.tool_lab = label("", 10, T.TEXT_FAINT)
         self.tool_lab.hide()
-        self.thread_lay.addWidget(self.tool_lab)
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, self.tool_lab)
         self.resp_text = label("", 14, T.TEXT_PRIMARY, sans=True, wrap=True)
-        self.thread_lay.addWidget(self.resp_text)
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, self.resp_text)
 
     def _eyebrow(self, text: str, color: str):
         if getattr(self, "resp_eyebrow", None) is not None:

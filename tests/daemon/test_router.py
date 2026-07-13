@@ -1408,6 +1408,32 @@ def test_mail_context_lines_and_markers():
     assert "not connected" in off.lower()
 
 
+def test_identity_owns_email():
+    # Phase 6 shipped the mail mirror — the model must not deny email support
+    # (live bug 2026-07-13: "I don't have access to your Gmail account").
+    from lumen.daemon.router import IDENTITY
+    assert "email" in IDENTITY.lower()
+    assert "coming soon" not in IDENTITY.lower()
+
+
+def test_mail_context_flags_incomplete_first_sync():
+    # Connected but the first bulk pull hasn't finished (or is blocked): an
+    # empty mirror must read as "sync incomplete", not "empty mailbox".
+    ctx = mail_context([], {"total": 0, "unread": 0}, True, syncing=True)
+    assert "sync" in ctx.lower() and "incomplete" in ctx.lower()
+    steady = mail_context([], {"total": 40, "unread": 0}, True, syncing=False)
+    assert "incomplete" not in steady.lower()
+
+
+async def test_chat_mail_context_carries_sync_state():
+    llm = FakeLLM()
+    store, sync = FakeMailStore(), FakeMailSync()
+    sync.syncing = True
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
+    await collect(router, "chat", {"message": "any new email?"})
+    assert "incomplete" in llm.messages[0]["content"].lower()
+
+
 async def test_chat_mail_question_injects_context():
     llm = FakeLLM()
     store, sync = FakeMailStore(), FakeMailSync()

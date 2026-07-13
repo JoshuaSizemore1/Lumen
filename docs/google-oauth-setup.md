@@ -1,13 +1,12 @@
-# Connecting Lumen to Google Calendar (one-time, ~10 minutes)
+# Connecting Lumen to Google Calendar & Gmail (one-time, ~10 minutes)
 
-Google requires every app that reads your calendar to have its own "OAuth client" —
-there is no shared key Lumen could ship. You create one under your own Google
-account, download a small file, and run one command. After that, Lumen stays
-connected on its own (and Phase 6's Gmail support will reuse this same setup —
-no second visit needed).
+Google requires every app that reads your calendar or mail to have its own
+"OAuth client" — there is no shared key Lumen could ship. You create one under
+your own Google account, download a small file, and run one command. After
+that, Lumen stays connected on its own.
 
 Nothing here costs money, and nothing leaves your machine except Lumen talking
-directly to Google's Calendar API.
+directly to Google's Calendar and Gmail APIs.
 
 ## Step 1 — Create a Google Cloud project
 
@@ -17,10 +16,16 @@ directly to Google's Calendar API.
 3. Name it `lumen` (anything works) → **Create**, then make sure it's selected
    in the picker.
 
-## Step 2 — Enable the Calendar API
+## Step 2 — Enable the Calendar and Gmail APIs
 
 1. In the top search bar, search **Google Calendar API** and open it.
 2. Click **Enable**.
+3. Do the same for the **Gmail API**: search it, open it, click **Enable**.
+
+> Enabling an API is separate from granting permissions on the consent screen.
+> If only Calendar is enabled, the Gmail consent still "succeeds" — but every
+> mail sync then fails with a 403 `accessNotConfigured` and the inbox stays
+> empty (this bit us on 2026-07-13).
 
 ## Step 3 — Set up the consent screen
 

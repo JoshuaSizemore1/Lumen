@@ -334,6 +334,45 @@ def test_chat_screen_loads_past_conversation(qtbot):
     assert "what's on tuesday" in texts and "two meetings" in texts
 
 
+def _last_is_stretch(lay) -> bool:
+    return lay.count() > 0 and lay.itemAt(lay.count() - 1).spacerItem() is not None
+
+
+def test_chat_thread_turns_pack_to_top(qtbot):
+    # Without a trailing stretch the vbox spreads two turns across the whole
+    # viewport (live bug 2026-07-13: giant gaps between messages).
+    from lumen.ui_v2.screens.chat import ChatScreen
+    sc = ChatScreen(AppState(data=FakeClient()), chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    assert _last_is_stretch(sc.thread_lay)
+    sc.input.setText("hi")
+    sc._submit()
+    assert _last_is_stretch(sc.thread_lay)      # turns insert before the stretch
+
+
+def test_chat_thread_stretch_survives_reset_and_reload(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    data = FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    sc.new_chat()
+    assert _last_is_stretch(sc.thread_lay)
+    sc.load_conversation(3)
+    getcb = next(cb for t, p, cb in data.requests if t == "conversations.get" and p == {"id": 3})
+    getcb({"conversation": {"id": 3}, "messages": [
+        {"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]})
+    assert _last_is_stretch(sc.thread_lay)
+
+
+def test_launcher_thread_turns_pack_to_top(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    pal = LauncherPalette(AppState(), FakeClient())
+    qtbot.addWidget(pal)
+    pal.input.setText("hi")
+    pal._submit()
+    assert _last_is_stretch(pal.thread_lay)
+
+
 def test_chat_screen_new_chat_resets(qtbot):
     from lumen.ui_v2.screens.chat import ChatScreen
     sc = ChatScreen(AppState(data=FakeClient()), chat_client=FakeClient())
