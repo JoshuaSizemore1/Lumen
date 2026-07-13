@@ -1,7 +1,8 @@
 """Dashboard: 290px todos | flexible day calendar | 320px unread mail.
 
-Todos + calendar are live from the daemon; mail stays sample-seeded until the
-Phase 6 backend exists (same as the old dashboard's placeholder column)."""
+Todos, calendar, and mail are all live from the daemon (mail via
+`state.unread_mails()` reading the email mirror); each falls back to sample
+data only in sample mode (no daemon attached, e.g. screenshots)."""
 from datetime import date, datetime
 
 from PyQt6.QtCore import Qt

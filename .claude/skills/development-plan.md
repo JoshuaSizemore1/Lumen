@@ -113,8 +113,11 @@ Not a new subsystem — a hardening pass on the *existing* fast-model chat, driv
 
 **Success**: a multi-turn chat works — ask a question, then a pronoun-only follow-up ("delete that file", "what about tomorrow?") and the model both remembers context and still reaches for the right tool; the launcher opens a Claude-style chat window with visible history; closing and reopening the app shows past conversations; and the model, unprompted, identifies as Lumen and knows what it can do.
 
-## Phase 6 — Email menu (heaviest phase, budget extra time)
+## Phase 6 — Email menu (heaviest phase, budget extra time) — BUILT 2026-07-12, awaiting live verification
 OAuth, the bulk-sync worker (bounded initial pull + resumable pagination), History-API-based incremental sync, local DB with full-text search, and the browse/search email menu UI — kept separate from the LLM/MCP tool-calling loop per `email-menu.md`.
+
+**Status (2026-07-12)**: all 14 implementation tasks done and committed, plus two review-driven fix rounds that hardened the sync ((a) an empty-string cursor sentinel marks a bulk run pending from entry so a page-1 failure still resumes as bulk; (b) incremental adds are filtered against the run's own deletions before fetch and fetched per-id, with 404s skipped and other errors leaving `historyId` unadvanced for retry). Suite ~451 green. Deviation from the plan below: no separate lightweight metadata cache (step 5) — the dashboard reads the full mirror directly (see `email-integration.md`). Durable gotchas and decided gates recorded in `email-menu.md`; the mail MCP server entry is in `mcp-integration.md`.
+**Remaining to close**: (1) user re-runs `uv run lumen-google-auth` to add the Gmail scopes to the existing consent, (2) restart the daemon, (3) run the live verification checklist in Task 14 Step 5 of `docs/superpowers/plans/2026-07-12-phase6-email-menu.md` (bounded pull resume, offline search, archive/mark-read against real Gmail, history-delta reopen, chat grounding + `search_email` tool call) — mark Phase 6 DONE here with a dated Verified note once it passes.
 
 **Read first**: `email-menu.md` (schema + the two-path sync strategy), `email-integration.md` (scopes, metadata cache).
 

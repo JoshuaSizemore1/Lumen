@@ -1,7 +1,7 @@
 # Skill: Email Menu (full inbox view/manage/send)
 
 ## Storage
-Local SQLite, separate from the lightweight metadata cache in `email-integration.md` — this is a fuller mirror since the menu needs to browse/search actual content.
+Local SQLite, a full mirror (subject/body/snippet/labels, not just metadata) since the menu needs to browse/search actual content. *As-built (2026-07-12): the separate lightweight metadata cache this section originally called for was never built — the dashboard reads this same mirror. See the deviation note in `email-integration.md`.*
 ```sql
 CREATE TABLE emails (
     id TEXT PRIMARY KEY,       -- Gmail message id
@@ -41,3 +41,17 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
 - Don't run the bulk historical sync through the MCP tool-calling loop — that's an LLM sitting in a pagination loop for no reason. Bulk sync is a plain background job; MCP is for the LLM's on-demand decisions.
 - Don't re-list and diff against the DB on every open — use the History API delta.
 - Don't pull unbounded history on first run without a resumable pagination state.
+
+## Durable gotchas (built 2026-07-12, Phase 6 — `daemon/connectors/email_menu.py`)
+- **UPSERT, never `INSERT OR REPLACE`, on `emails`.** `REPLACE` deletes-then-reinserts under the hood, which bypasses the delete trigger backing the external-content FTS5 index and silently corrupts search. Use `INSERT ... ON CONFLICT(id) DO UPDATE SET ...` instead — `EmailStore.upsert` is the reference.
+- **`historyId` is captured from `getProfile` BEFORE the bulk listing starts**, not after. Anything that changes mid-pull is then covered by the first incremental sync instead of falling into a gap.
+- **Bulk-pending sentinel**: the pagination cursor is set to an empty string the moment a bulk run starts (before page 1 is even attempted), not left unset. That way a page-1 failure still resumes as a bulk run on the next poll instead of falling through to `_incremental` with no cursor and no backlog.
+- **Re-baseline prunes under a run-id.** When the History API 404s (expired `historyId`, e.g. after a long time offline), the sync re-baselines with a fresh bulk pull tagged with a run id; rows in the bounded window not touched by that run get pruned (`prune_not_seen`) so mail that disappeared upstream during the gap doesn't linger as a zombie row.
+- **Incremental adds are fetched per-id**, not batched: a 404 on an individual id (message vanished upstream between the delta and the fetch) is skipped; any other fetch error leaves `historyId` unadvanced so the identical window retries on the next poll instead of silently losing messages.
+- **The dashboard reads the mirror directly** — no second lightweight metadata cache. See `email-integration.md` for the deviation and why.
+- **The mail MCP server (`lumen/mcp_servers/mail.py`) is read-only by design** — `search_email`/`get_email` only, over a read-only SQLite URI handle (`mode=ro`) on the mirror. Archive/mark-read are UI-confirmed one-shots through the router, never model-initiated tool calls.
+
+## Decided gates (2026-07-12)
+- Bulk sync window: 6 months, configurable via `config.toml`'s `gmail_window_months` (default 6).
+- Browsing the mail menu never changes read state — opening/viewing a message does not implicitly mark it read; only the explicit mark-read action does.
+- v1 manage actions are archive and mark read/unread only. Label management and delete are out of scope for this phase.
