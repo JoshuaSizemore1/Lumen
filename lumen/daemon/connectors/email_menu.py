@@ -278,9 +278,28 @@ class GmailSync:
             getattr(exc, "resp", None), "status", None)
         return status in (404, "404")
 
+    def _fetch_full_blocking(self, service, ids: list[str]) -> list[dict] | None:
+        """Blocking: fetch each id individually so one bad id can't sink the
+        page. A 404 means the message vanished upstream (already-gone add) —
+        skip it. Any other error aborts the whole fetch (None) so the caller
+        can retry the window on the next poll instead of losing the batch."""
+        msgs = []
+        for i in ids:
+            try:
+                raw = service.users().messages().get(
+                    userId="me", id=i, format="full").execute()
+            except Exception as e:
+                if self._is_404(e):
+                    continue
+                log.exception("gmail incremental fetch failed for id=%s", i)
+                return None
+            msgs.append(normalize_message(raw))
+        return msgs
+
     async def _incremental(self, service) -> bool:
         start = self._store.get_state(HISTORY_KEY)
         page_token, latest = None, None
+        deleted_ids: set[str] = set()   # run-wide: earlier/same-page deletes
         while True:
             try:
                 resp = await asyncio.to_thread(
@@ -300,22 +319,32 @@ class GmailSync:
                 return False
             latest = resp.get("historyId", latest)
             added_ids = []
+            seen_added = set()
             for h in resp.get("history", []):
-                added_ids += [m["message"]["id"] for m in h.get("messagesAdded", [])]
-                self._store.delete([m["message"]["id"]
-                                    for m in h.get("messagesDeleted", [])])
+                for m in h.get("messagesAdded", []):
+                    mid = m["message"]["id"]
+                    if mid not in seen_added:
+                        seen_added.add(mid)
+                        added_ids.append(mid)
+                del_ids = [m["message"]["id"] for m in h.get("messagesDeleted", [])]
+                deleted_ids.update(del_ids)
+                self._store.delete(del_ids)
                 for change in h.get("labelsAdded", []):
                     self._store.update_labels(change["message"]["id"],
                                               add=change.get("labelIds", []), remove=[])
                 for change in h.get("labelsRemoved", []):
                     self._store.update_labels(change["message"]["id"], add=[],
                                               remove=change.get("labelIds", []))
-            if added_ids:
-                msgs = await asyncio.to_thread(
-                    lambda ids=added_ids: [normalize_message(
-                        service.users().messages().get(
-                            userId="me", id=i, format="full").execute())
-                        for i in ids])
+            # Drop ids added-then-purged within this run (same page or an
+            # earlier one) before fetching — otherwise they resurrect as
+            # zombie rows.
+            ids = [i for i in added_ids if i not in deleted_ids]
+            if ids:
+                msgs = await asyncio.to_thread(self._fetch_full_blocking, service, ids)
+                if msgs is None:
+                    # Non-404 fetch failure: don't advance HISTORY_KEY, retry
+                    # this identical window on the next poll.
+                    return False
                 self._store.upsert(msgs)
             page_token = resp.get("nextPageToken")
             if not page_token:

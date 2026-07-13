@@ -299,3 +299,54 @@ async def test_expired_history_rebaselines_and_prunes(tmp_path):
     assert store.get("gap-deleted") is None           # pruned by run-id pass
     assert store.get_state(HISTORY_KEY) == "h300"
     assert store.get_state(RUN_KEY) is None
+
+
+class NotFoundError(Exception):
+    status_code = 404
+
+
+class Maybe404Messages(FakeMessages):
+    """get() raises a 404-shaped error for any id absent from `full` — mirrors
+    Gmail 404ing gets of purged messages."""
+    def get(self, userId, id, format):
+        if id not in self._full:
+            return FakeExec(NotFoundError(f"no such message: {id}"))
+        return super().get(userId, id, format)
+
+
+async def test_incremental_same_page_add_then_delete_no_zombie(tmp_path):
+    # "ghost" is added then permanently deleted within the same history page —
+    # the batch add-fetch must not resurrect it after the delete.
+    history = {None: {"history": [
+        {"messagesAdded": [{"message": {"id": "ghost"}}]},
+        {"messagesDeleted": [{"message": {"id": "ghost"}}]},
+    ], "historyId": "h200"}}
+    svc = FakeService({}, full_for(), history_pages=history)
+    svc._messages = Maybe404Messages({}, full_for())
+    store, sync = make_sync(tmp_path, svc)
+    store.set_state(HISTORY_KEY, "h100")
+    assert await sync.sync_once() is True
+    assert store.get("ghost") is None
+    assert store.get_state(HISTORY_KEY) == "h200"
+
+
+async def test_incremental_add_fetch_failure_retries_next_poll(tmp_path):
+    # A non-404 failure fetching an added id must not advance HISTORY_KEY —
+    # the next poll should retry the identical window.
+    boom = RuntimeError("network died")
+
+    class DyingGetMessages(FakeMessages):
+        def get(self, userId, id, format):
+            if id == "x":
+                return FakeExec(boom)
+            return super().get(userId, id, format)
+
+    history = {None: {"history": [
+        {"messagesAdded": [{"message": {"id": "x"}}]},
+    ], "historyId": "h200"}}
+    svc = FakeService({}, full_for(), history_pages=history)
+    svc._messages = DyingGetMessages({}, full_for())
+    store, sync = make_sync(tmp_path, svc)
+    store.set_state(HISTORY_KEY, "h100")
+    assert await sync.sync_once() is False
+    assert store.get_state(HISTORY_KEY) == "h100"
