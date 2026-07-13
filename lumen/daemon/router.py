@@ -111,7 +111,7 @@ IDENTITY = (
 # Write-capable tools stay callable by the daemon (after a confirm) but are
 # never offered to the model in the generic tool loop — the confirm gate is
 # mechanical, not prompt-enforced.
-WRITE_TOOLS = frozenset({"create_event"})
+WRITE_TOOLS = frozenset({"create_event", "delete_event"})
 
 # No single tool call may run longer than this. The filesystem server processes
 # requests sequentially over stdio, so a `search_files` from '/' can block for
@@ -145,6 +145,18 @@ def fs_context(home: Path) -> str:
         f"questions. If you don't know an exact folder name, list its parent "
         f"directory and read the names rather than using search_files."
     )
+
+
+def _event_when(e: dict) -> str:
+    """Cached event row -> the human 'When' line for a confirm dialog."""
+    if e.get("all_day"):
+        d = date.fromisoformat(e["start_at"][:10])
+        return f"{d.strftime('%a')} {d.isoformat()} (all day)"
+    s = datetime.fromisoformat(e["start_at"]).astimezone()
+    when = f"{s.strftime('%a')} {s.date().isoformat()} {s.strftime('%H:%M')}"
+    if e.get("end_at"):
+        when += f"–{datetime.fromisoformat(e['end_at']).astimezone().strftime('%H:%M')}"
+    return when
 
 
 def _sender_address(sender: str) -> str | None:
@@ -326,6 +338,16 @@ class Router:
                 yield {"error": "conversations.get needs {id}"}
                 return
             yield {"error": "conversation not found"} if got is None else {"result": got}
+        elif type_ == "conversations.delete":
+            if self._conv is None:
+                yield {"error": "conversation history unavailable"}
+                return
+            try:
+                self._conv.delete(int(payload["id"]))
+            except (KeyError, TypeError, ValueError):
+                yield {"error": "conversations.delete needs {id}"}
+                return
+            yield {"result": {"ok": True}}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
@@ -406,6 +428,22 @@ class Router:
                     yield {"result": {"created": created, "message": text}}
                 else:
                     yield ev
+        elif type_ == "calendar.delete":
+            if (self._calendar is None or self._bridge is None
+                    or self._confirm is None):
+                yield {"error": "calendar deletion unavailable"}
+                return
+            event_id = str(payload.get("id") or "")
+            calendar_id = str(payload.get("calendar_id") or "")
+            if not event_id or not calendar_id:
+                yield {"error": "calendar.delete needs {id, calendar_id}"}
+                return
+            event = self._calendar.get(calendar_id, event_id)
+            if event is None:
+                yield {"error": "event not found"}
+                return
+            async for ev in self._gated_delete(event):
+                yield ev
         elif type_ == "calendar.list":
             if self._calendar is None:
                 yield {"error": "calendar unavailable"}
@@ -615,6 +653,58 @@ class Router:
             except Exception:
                 log.exception("post-create sync failed")
         yield {"_outcome": (ok, text)}
+
+    async def _gated_delete(self, event: dict):
+        """Confirm-over-IPC then delete a cached event from Google Calendar.
+        UI one-shot only — the model is never offered delete_event."""
+        attendees = [a for a in event.get("attendees") or [] if not a.get("self")]
+        rows = [("Title", event.get("title") or "Untitled"),
+                ("When", _event_when(event)),
+                ("Calendar", event.get("calendar_name") or event["calendar_id"])]
+        if attendees:
+            names = ", ".join(a.get("name") or a.get("email") for a in attendees)
+            rows.append(("Attendees", f"{names} — they will be notified of the "
+                                      "cancellation"))
+        confirm_id = self._confirm.begin()
+        yield {"confirm_request": {
+                   "icon": "▲", "title": "Delete calendar event",
+                   "intro": "Lumen will permanently delete this event from "
+                            "your Google Calendar.",
+                   "rows": rows, "confirm_label": "Delete event"},
+               "confirm_id": confirm_id}
+        if not await self._confirm.wait(confirm_id):
+            yield {"result": {"deleted": False,
+                              "message": "Cancelled — nothing was deleted."}}
+            return
+        try:
+            await self._bridge.ensure_started()
+        except Exception:
+            log.exception("MCP bridge unavailable for event deletion")
+            yield {"result": {"deleted": False,
+                              "message": "calendar tools are unavailable right now"}}
+            return
+        args = {"event_id": event["id"], "calendar_id": event["calendar_id"],
+                "notify_attendees": bool(attendees)}
+        start_t = time.monotonic()
+        try:
+            text = await self._bridge.call("delete_event", args)
+            ok = True
+        except Exception as e:
+            text, ok = f"tool error: {e}", False
+            if not isinstance(e, ToolCallError):
+                log.exception("delete_event failed unexpectedly")
+        if self._tool_log is not None:
+            self._tool_log.write("delete_event", args, ok, text,
+                                 int((time.monotonic() - start_t) * 1000))
+        # same convention as create: only the server's explicit "Deleted:"
+        # reply counts — transport success alone doesn't
+        ok = ok and text.startswith("Deleted")
+        if ok and hasattr(self._calendar, "sync_once"):
+            try:
+                await self._calendar.sync_once()   # drop the event promptly
+            except Exception:
+                log.exception("post-delete sync failed")
+        yield {"result": {"deleted": ok, "message": text}}
 
     async def _compose_email_chat(self, message: str):
         """NL draft → editable compose popup → send/cancel. The popup is the

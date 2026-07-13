@@ -5,7 +5,7 @@
   the community `mcp-google-workspace`: the poller already uses the Google API
   client directly (bulk-sync constraint), so the custom server shares one OAuth
   stack via `daemon/connectors/google_auth.py` — one consent, one token file.
-  Tools: `list_events` (model-visible), `create_event` (daemon-gated; see below).
+  Tools: `list_events` (model-visible), `create_event`/`delete_event` (daemon-gated; see below).
 - **Auth**: installed-app flow via `uv run lumen-google-auth`
   (`docs/google-oauth-setup.md` is the user walkthrough). Token at
   `~/.local/share/lumen/google/token.json`, chmod 600. `google_auth.SCOPES`
@@ -25,6 +25,15 @@
   `create_event` itself; only `_gated_create` (post-confirm) can. `created` is
   reported true only when the server answered `Created:` — transport success
   alone doesn't count.
+- **Event deletion (added 2026-07-13, live-verified)**: `calendar.delete`
+  one-shot ({id, calendar_id}) — the daemon looks the event up in its cache,
+  shows the standard confirm dialog (title/when/calendar, plus "attendees will
+  be notified" when any non-self attendee exists → `sendUpdates=all`), and only
+  then calls the gated `delete_event` tool; only a `Deleted:` reply counts,
+  and success triggers an immediate re-sync so the cache drops the event. UI
+  affordance: ✕ on the day-view agenda rows (hidden in sample mode — sample
+  events carry no id). Chat/NL deletion deliberately not wired — deleting by
+  fuzzy description is riskier than a click; revisit only if asked.
 - **NL creation** (`daemon/llm/event_create.py`): fast-model JSON extraction +
   a validation gate (future times, ≤12h unless all-day, RRULE must parse and is
   shown verbatim in the dialog, attendees only when the literal email address

@@ -9,7 +9,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    ClickRow, button, clear_layout, hbox, hline, label, scroll, vbox, vline,
+    ClickLabel, ClickRow, ElideLabel, button, clear_layout, hbox, hline,
+    label, scroll, vbox, vline,
 )
 
 
@@ -58,10 +59,25 @@ class ChatScreen(QWidget):
         clear_layout(self.list_lay)
         for r in rows:
             row = ClickRow(lambda cid=r["id"]: self.load_conversation(cid))
-            rl = hbox(row, (8, 7, 8, 7), 0)
-            rl.addWidget(label(r.get("title") or "Untitled", 12, T.TEXT_SECONDARY), 1)
+            rl = hbox(row, (8, 7, 8, 7), 6)
+            # elide, don't overflow: a long title must not push ✕ off-sidebar
+            rl.addWidget(ElideLabel(r.get("title") or "Untitled", 12,
+                                    T.TEXT_SECONDARY), 1)
+            rl.addWidget(ClickLabel(
+                "✕", 12, T.TEXT_FAINT,
+                lambda cid=r["id"]: self.delete_conversation(cid),
+                "Delete chat"))
             self.list_lay.addWidget(row)
         self.list_lay.addStretch(1)
+
+    def delete_conversation(self, cid: int):
+        """Local-only delete (like a todo) — no confirm ritual. If the open
+        thread is the one deleted, the pane resets to a fresh chat."""
+        def done(_result: dict):
+            if self._conv_id == cid:
+                self.new_chat()
+            self.refresh_list()
+        self.state.delete_conversation(cid, done)
 
     # ---- main pane -------------------------------------------------------
     def _build_main(self) -> QWidget:

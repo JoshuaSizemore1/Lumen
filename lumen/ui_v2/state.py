@@ -96,8 +96,11 @@ def _norm_event(e: dict, tz) -> dict:
     mock's four categories), and `cal` (calendar name) is the day-view meta."""
     color = e.get("color") or T.TEXT_DIM
     cal = e.get("calendar_name") or ""
+    # id/calendar_id ride along for the delete affordance; sample events have
+    # neither, which is what hides delete in sample mode.
+    ident = {"id": e.get("id"), "calendar_id": e.get("calendar_id")}
     if e.get("all_day"):
-        return {"date": e["start_at"][:10], "start": "", "start_min": 0,
+        return {**ident, "date": e["start_at"][:10], "start": "", "start_min": 0,
                 "dur": 0, "title": e.get("title") or "Untitled", "cal": cal,
                 "color": color, "all_day": True}
     s = datetime.fromisoformat(e["start_at"]).astimezone(tz)
@@ -106,7 +109,7 @@ def _norm_event(e: dict, tz) -> dict:
                        - s).total_seconds() // 60), 15)
     else:
         dur = 30
-    return {"date": s.date().isoformat(), "start": s.strftime("%H:%M"),
+    return {**ident, "date": s.date().isoformat(), "start": s.strftime("%H:%M"),
             "start_min": s.hour * 60 + s.minute, "dur": dur,
             "title": e.get("title") or "Untitled", "cal": cal, "color": color,
             "all_day": False}
@@ -225,6 +228,13 @@ class AppState(QObject):
         """cb({conversation, messages}) for reopening a past thread."""
         if self._data is not None:
             self._data.request("conversations.get", {"id": cid}, cb)
+
+    def delete_conversation(self, cid: int, cb=None) -> None:
+        """Remove a thread (and its messages) from local storage. Local-only
+        data, so no confirm ritual — same treatment as deleting a todo."""
+        if self._data is not None:
+            self._data.request("conversations.delete", {"id": cid},
+                               cb or (lambda _r: None))
 
     # ---- todos ----
     def open_count(self) -> int:
@@ -403,3 +413,11 @@ class AppState(QObject):
                          ("When", f"{proposal.get('start', '')} – {proposal.get('end', '')}"),
                          ("Calendar", "Personal (primary)")],
                 "confirm_label": "Create event", "toast": "✓ Event added to calendar"})
+
+    def delete_event(self, event_id: str, calendar_id: str, cb=None) -> None:
+        """External write: the daemon looks the event up in its cache and gates
+        the delete behind the confirm overlay before touching Google Calendar."""
+        if self._data is not None:
+            self._data.request("calendar.delete",
+                               {"id": event_id, "calendar_id": calendar_id},
+                               cb or (lambda _r: None))

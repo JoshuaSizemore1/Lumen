@@ -14,8 +14,8 @@ from .. import theme as T
 from ..calendar_grids import MonthGrid, TimeGrid
 from ..state import AppState
 from ..widgets import (
-    ClickRow, Dot, button, clear_layout, hbox, label, scroll, seg_button, vbox,
-    vline,
+    ClickLabel, ClickRow, Dot, button, clear_layout, hbox, label, scroll,
+    seg_button, vbox, vline,
 )
 
 MON3 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -214,13 +214,18 @@ class CalendarScreen(QWidget):
     def _open_event_form(self):
         form = EventForm(self.sel, self)
         if form.exec() == QDialog.DialogCode.Accepted:
-            self.state.create_event(form.proposal(), self._on_created)
+            self.state.create_event(form.proposal(), self._on_written)
 
-    def _on_created(self, result: dict):
+    def _on_written(self, result: dict):
+        """Create and delete land the same way: toast the outcome, re-read."""
         msg = result.get("message", "")
         if msg:
             self.state.toast_requested.emit(msg)
-        self._refresh()   # show the new event without waiting for the poller
+        self._refresh()   # show the change without waiting for the poller
+
+    def _delete_event(self, e: dict):
+        """Daemon-gated: the confirm overlay opens before anything is deleted."""
+        self.state.delete_event(e["id"], e["calendar_id"], self._on_written)
 
     # ---- data -> views ------------------------------------------------------
     def _range(self) -> tuple[str, str]:
@@ -351,6 +356,11 @@ class CalendarScreen(QWidget):
             meta = f"{when} · {e['cal']}" if e["cal"] else when
             body.addWidget(label(meta, 10, T.TEXT_DIM))
             rl.addLayout(body, 1)
+            if e.get("id"):    # sample events carry no id -> no delete in sample mode
+                rl.addWidget(ClickLabel("✕", 12, T.TEXT_FAINT,
+                                        lambda ev=e: self._delete_event(ev),
+                                        "Delete event…"),
+                             0, Qt.AlignmentFlag.AlignTop)
             self.agenda_lay.addWidget(row)
             sep = QFrame()
             sep.setFixedHeight(1)

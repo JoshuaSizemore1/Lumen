@@ -55,6 +55,16 @@ def test_list_range_orders_all_day_first_within_a_day(tmp_path):
         "allday", "timed"]
 
 
+def test_get_by_calendar_and_id(tmp_path):
+    store = make_store(tmp_path)
+    store.replace_window([ev(id="e1"), ev(id="e1", calendar_id="work")],
+                         "2026-07-01", "2026-07-31")
+    row = store.get("work", "e1")
+    assert row["calendar_id"] == "work" and row["all_day"] is False
+    assert row["attendees"] == []
+    assert store.get("primary", "ghost") is None
+
+
 def test_last_sync_roundtrip(tmp_path):
     store = make_store(tmp_path)
     assert store.last_sync() is None

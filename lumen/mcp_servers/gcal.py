@@ -1,7 +1,7 @@
 """Google Calendar MCP server: list_events for what the local cache can't
-answer, and create_event — which the daemon only ever calls after the user
-approved the exact event in a confirm dialog. Shares the poller's OAuth token
-via google_auth. Run: python -m lumen.mcp_servers.gcal"""
+answer, plus create_event / delete_event — which the daemon only ever calls
+after the user approved the exact event in a confirm dialog. Shares the
+poller's OAuth token via google_auth. Run: python -m lumen.mcp_servers.gcal"""
 
 from datetime import date, datetime, time, timedelta
 
@@ -103,6 +103,21 @@ def _create_event(service, title: str, start: str, end: str, all_day: bool,
             + (f" ({link})" if link else ""))
 
 
+def _delete_event(service, event_id: str, calendar_id: str,
+                  notify_attendees: bool) -> str:
+    if not event_id:
+        return "event_id is required."
+    if service is None:
+        return NOT_CONNECTED
+    try:
+        service.events().delete(
+            calendarId=calendar_id or "primary", eventId=event_id,
+            sendUpdates="all" if notify_attendees else "none").execute()
+    except Exception:
+        return FAILED
+    return f"Deleted: {event_id}"
+
+
 @mcp.tool()
 def list_events(start: str, end: str) -> str:
     """List the user's Google Calendar events between two ISO dates (inclusive),
@@ -122,6 +137,17 @@ def create_event(title: str, start: str, end: str, all_day: bool = False,
     return _create_event(_service(google_auth.WRITE_SCOPES), title, start, end,
                          all_day, location, description, list(attendees),
                          recurrence)
+
+
+@mcp.tool()
+def delete_event(event_id: str, calendar_id: str = "primary",
+                 notify_attendees: bool = False) -> str:
+    """Permanently delete an event from the user's Google Calendar. The daemon
+    calls this only after the user explicitly confirmed the exact event in a
+    dialog — never call it speculatively."""
+    from lumen.daemon.connectors import google_auth
+    return _delete_event(_service(google_auth.WRITE_SCOPES), event_id,
+                         calendar_id, notify_attendees)
 
 
 if __name__ == "__main__":

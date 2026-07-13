@@ -79,6 +79,16 @@ def test_norm_book_and_event():
     assert allday["all_day"] is True and allday["date"] == "2026-07-20"
 
 
+def test_norm_event_carries_identity_for_delete():
+    # The day-view delete button needs the Google event/calendar ids; sample
+    # events have neither, which is what hides the button in sample mode.
+    tz = state_mod.datetime.now().astimezone().tzinfo
+    e = _norm_event({"id": "g1", "calendar_id": "work", "title": "Sync",
+                     "all_day": False, "start_at": "2026-07-11T09:30:00+00:00",
+                     "end_at": None, "color": None}, tz)
+    assert e["id"] == "g1" and e["calendar_id"] == "work"
+
+
 # ---- AppState live mode --------------------------------------------------
 
 def test_live_appstate_loads_and_normalizes(qtbot):
@@ -152,6 +162,58 @@ def test_fetch_calendar_sample_mode_carries_color(qtbot):
     st.fetch_calendar("2026-07-06", "2026-07-06", lambda r: got.update(r))
     assert got["connected"] and got["events"]
     assert all("color" in e and "start_min" in e for e in got["events"])
+
+
+def test_delete_event_routes_to_daemon(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    data.requests.clear()
+    st.delete_event("e1", "primary", lambda r: None)
+    assert data.requests[0][:2] == ("calendar.delete",
+                                    {"id": "e1", "calendar_id": "primary"})
+
+
+def daemon_event_row(**kw):
+    import datetime as dt
+    row = {"id": "g1", "calendar_id": "primary", "calendar_name": "Personal",
+           "color": "#7986cb", "title": "Standup",
+           "start_at": f"{dt.date.today().isoformat()}T09:30:00+00:00",
+           "end_at": None, "all_day": False, "location": None,
+           "description": None, "attendees": [], "status": "confirmed"}
+    row.update(kw)
+    return row
+
+
+def test_calendar_day_agenda_delete_goes_through_daemon(qtbot):
+    from lumen.ui_v2.screens.calendar import CalendarScreen
+    from lumen.ui_v2.widgets import ClickLabel
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = CalendarScreen(st)
+    qtbot.addWidget(sc)
+    sc._set_view(2)                       # day view of today
+    cb = [cb for t, _p, cb in data.requests if t == "calendar.list"][-1]
+    cb({"events": [daemon_event_row()], "connected": True})
+    xs = [w for w in sc.findChildren(ClickLabel) if w.text() == "✕"]
+    assert len(xs) == 1                   # one agenda row -> one delete
+    toasts = []
+    st.toast_requested.connect(toasts.append)
+    data.requests.clear()
+    xs[0]._on_click()
+    t, p, dcb = data.requests[0]
+    assert (t, p) == ("calendar.delete", {"id": "g1", "calendar_id": "primary"})
+    dcb({"deleted": True, "message": "Deleted: g1"})
+    assert toasts and "Deleted" in toasts[0]
+    assert any(t == "calendar.list" for t, _p, _cb in data.requests)   # re-read
+
+
+def test_calendar_sample_events_show_no_delete(qtbot):
+    from lumen.ui_v2.screens.calendar import CalendarScreen
+    from lumen.ui_v2.widgets import ClickLabel
+    sc = CalendarScreen(AppState())      # sample mode: events carry no id
+    qtbot.addWidget(sc)
+    sc._set_view(2)
+    assert not [w for w in sc.findChildren(ClickLabel) if w.text() == "✕"]
 
 
 # ---- launcher streaming --------------------------------------------------
@@ -261,6 +323,12 @@ def test_get_conversation_routes(qtbot):
     data = FakeClient()
     AppState(data=data).get_conversation(4, lambda r: None)
     assert data.requests[-1][:2] == ("conversations.get", {"id": 4})
+
+
+def test_delete_conversation_routes(qtbot):
+    data = FakeClient()
+    AppState(data=data).delete_conversation(4, lambda r: None)
+    assert data.requests[-1][:2] == ("conversations.delete", {"id": 4})
 
 
 # ---- launcher multi-turn + handoff ---------------------------------------
@@ -383,6 +451,44 @@ def test_chat_screen_new_chat_resets(qtbot):
     sc._submit()
     sc.new_chat()
     assert sc._conv_id is None and sc.resp_text is None
+
+
+def test_chat_sidebar_rows_have_delete_affordance(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    from lumen.ui_v2.widgets import ClickLabel
+    data = FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    data.cb_for("conversations.list")([{"id": 3, "title": "q", "updated_at": "x"}])
+    xs = [w for w in sc.list_host.findChildren(ClickLabel) if w.text() == "✕"]
+    assert len(xs) == 1
+
+
+def test_chat_delete_open_thread_resets_and_reloads(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    data, chat = FakeClient(), FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=chat)
+    qtbot.addWidget(sc)
+    data.cb_for("conversations.list")([{"id": 3, "title": "q", "updated_at": "x"}])
+    sc.load_conversation(3)
+    data.requests.clear()
+    sc.delete_conversation(3)
+    t, p, cb = data.requests[0]
+    assert (t, p) == ("conversations.delete", {"id": 3})
+    cb({"ok": True})
+    assert sc._conv_id is None     # the open thread is gone -> blank pane
+    assert any(t == "conversations.list" for t, _p, _cb in data.requests)
+
+
+def test_chat_delete_other_thread_keeps_current(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    data = FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    sc._conv_id = 9
+    sc.delete_conversation(3)
+    data.cb_for("conversations.delete")({"ok": True})
+    assert sc._conv_id == 9
 
 
 def test_window_registers_chat_and_open_chat_loads(qtbot):

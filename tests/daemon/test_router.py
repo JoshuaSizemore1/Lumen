@@ -272,6 +272,32 @@ async def test_conversations_unavailable_without_store():
     assert "unavailable" in out[0]["error"]
 
 
+async def test_conversations_delete_removes_thread(tmp_path):
+    conv = conv_store(tmp_path)
+    cid = conv.create("a question")
+    conv.add_message(cid, "user", "a question")
+    router = Router(FakeLLM(), FakeStore(), conversations=conv)
+    out = await collect(router, "conversations.delete", {"id": cid})
+    assert out[0]["result"]["ok"] is True
+    assert conv.get(cid) is None
+    listed = await collect(router, "conversations.list", {})
+    assert listed[0]["result"] == []
+
+
+async def test_conversations_delete_validates_payload(tmp_path):
+    router = Router(FakeLLM(), FakeStore(), conversations=conv_store(tmp_path))
+    out = await collect(router, "conversations.delete", {})
+    assert "needs {id}" in out[0]["error"]
+    out = await collect(router, "conversations.delete", {"id": "nope"})
+    assert "needs {id}" in out[0]["error"]
+
+
+async def test_conversations_delete_unavailable_without_store():
+    out = await collect(Router(FakeLLM(), FakeStore()),
+                        "conversations.delete", {"id": 1})
+    assert "unavailable" in out[0]["error"]
+
+
 async def test_unknown_type_errors():
     out = await collect(Router(FakeLLM(), FakeStore()), "frobnicate", {})
     assert "unknown" in out[0]["error"]
@@ -967,6 +993,11 @@ class FakeCal:
     def window(self):
         return ("2026-06-10", "2026-09-08")
 
+    def get(self, calendar_id, event_id):
+        return next((r for r in self.rows
+                     if r["calendar_id"] == calendar_id and r["id"] == event_id),
+                    None)
+
     @property
     def connected(self):
         return self._connected
@@ -1305,6 +1336,132 @@ async def test_create_chat_tool_side_failure_reports_not_created():
     await _aio.wait_for(task, timeout=2)
     assert events[-1]["result"]["created"] is False
     assert cal.synced == 0            # nothing created -> no eager re-sync
+
+
+# ---- calendar.delete (confirm-gated, UI one-shot) ----
+
+async def drive_oneshot(router, type_, payload, broker, approve):
+    """Consume a one-shot stream, answering the confirm_request when it appears."""
+    events = []
+
+    async def consume():
+        async for ev in router.handle(type_, payload):
+            events.append(ev)
+
+    task = _aio.ensure_future(consume())
+    for _ in range(200):
+        await _aio.sleep(0)
+        req = next((e for e in events if "confirm_request" in e), None)
+        if req is not None:
+            broker.resolve(req["confirm_id"], approve)
+            break
+    await _aio.wait_for(task, timeout=2)
+    return events
+
+
+async def test_calendar_delete_approved_deletes_logs_and_syncs():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge(result="Deleted: Standup")
+    tool_log = FakeToolLog()
+    router = create_router(bridge=bridge, cal=cal, broker=broker, tool_log=tool_log)
+    events = await drive_oneshot(router, "calendar.delete",
+                                 {"id": "t1", "calendar_id": "primary"},
+                                 broker, True)
+    req = next(e for e in events if "confirm_request" in e)
+    rows = dict(req["confirm_request"]["rows"])
+    assert rows["Title"] == "Standup"
+    assert "Personal" in rows["Calendar"]
+    # attendee cancellations are stated in the dialog, never silent
+    assert any("notified" in v for _k, v in req["confirm_request"]["rows"])
+    assert bridge.calls == [("delete_event", {"event_id": "t1",
+                                              "calendar_id": "primary",
+                                              "notify_attendees": True})]
+    assert tool_log.entries == [("delete_event", True)]
+    assert cal.synced == 1
+    assert events[-1]["result"]["deleted"] is True
+
+
+async def test_calendar_delete_declined_deletes_nothing():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge()
+    router = create_router(bridge=bridge, cal=cal, broker=broker)
+    events = await drive_oneshot(router, "calendar.delete",
+                                 {"id": "t1", "calendar_id": "primary"},
+                                 broker, False)
+    assert bridge.calls == [] and cal.synced == 0
+    assert events[-1]["result"]["deleted"] is False
+    assert "Cancelled" in events[-1]["result"]["message"]
+
+
+async def test_calendar_delete_no_attendees_skips_notify():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[ALLDAY_ROW])
+    bridge = FakeBridge(result="Deleted: PTO")
+    router = create_router(bridge=bridge, cal=cal, broker=broker)
+    events = await drive_oneshot(router, "calendar.delete",
+                                 {"id": "a1", "calendar_id": "primary"},
+                                 broker, True)
+    req = next(e for e in events if "confirm_request" in e)
+    assert not any("notified" in v for _k, v in req["confirm_request"]["rows"])
+    assert bridge.calls[0][1]["notify_attendees"] is False
+    assert events[-1]["result"]["deleted"] is True
+
+
+async def test_calendar_delete_unknown_event_is_an_error():
+    router = create_router(cal=SyncingFakeCal(rows=[CAL_ROW]))
+    out = await collect(router, "calendar.delete",
+                        {"id": "ghost", "calendar_id": "primary"})
+    assert "not found" in out[0]["error"]
+
+
+async def test_calendar_delete_validates_payload():
+    router = create_router(cal=SyncingFakeCal(rows=[CAL_ROW]))
+    out = await collect(router, "calendar.delete", {})
+    assert "needs {id, calendar_id}" in out[0]["error"]
+
+
+async def test_calendar_delete_unavailable_without_confirm():
+    router = Router(FakeLLM(), FakeStore(), calendar=FakeCal(rows=[CAL_ROW]),
+                    bridge=FakeBridge())
+    out = await collect(router, "calendar.delete",
+                        {"id": "t1", "calendar_id": "primary"})
+    assert "unavailable" in out[0]["error"]
+
+
+async def test_calendar_delete_tool_side_failure_reports_not_deleted():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge(result="Couldn't reach Google Calendar right now.")
+    router = create_router(bridge=bridge, cal=cal, broker=broker)
+    events = await drive_oneshot(router, "calendar.delete",
+                                 {"id": "t1", "calendar_id": "primary"},
+                                 broker, True)
+    assert events[-1]["result"]["deleted"] is False
+    assert cal.synced == 0            # nothing deleted -> no eager re-sync
+
+
+async def test_generic_tool_loop_never_offers_delete_event():
+    seen = {}
+
+    class CaptureLLM:
+        async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                                  max_iterations=4):
+            seen["tools"] = tools
+            yield {"content": "hi"}
+
+    bridge = FakeBridge(tools=(("list_events", {}), ("delete_event", {}),
+                               ("gcal__delete_event", {})))
+    router = Router(CaptureLLM(), FakeStore(), bridge=bridge,
+                    model_router=FakeModelRouter())
+    await collect(router, "chat", {"message": "search my files"})
+    names = [t["function"]["name"] for t in seen["tools"]]
+    assert "delete_event" not in names and "gcal__delete_event" not in names
 
 
 # ---- Task 9: emails.* one-shots + confirm-gated archive/mark-read ----

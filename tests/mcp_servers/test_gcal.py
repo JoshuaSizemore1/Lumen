@@ -135,3 +135,52 @@ def test_create_recurrence_gets_rrule_prefix_once():
 def test_create_not_connected_and_failure_degrade_gracefully():
     assert "isn't connected" in _create_event(None, **make_args())
     assert "Couldn't" in _create_event(WriteService(fail=True), **make_args())
+
+
+# ---- delete_event (write half) ----
+
+from lumen.mcp_servers.gcal import _delete_event
+
+
+class DeleteCapture:
+    def __init__(self, fail=False):
+        self.kwargs = None
+        self._fail = fail
+
+    def delete(self, **kwargs):
+        self.kwargs = kwargs
+        return FakeExec(RuntimeError("boom") if self._fail else {})
+
+
+class DeleteService:
+    def __init__(self, fail=False):
+        self.api = DeleteCapture(fail)
+
+    def events(self):
+        return self.api
+
+
+def test_delete_event_reports_deleted_and_targets_the_right_calendar():
+    svc = DeleteService()
+    out = _delete_event(svc, "ev123", "work@group.calendar.google.com", False)
+    assert out.startswith("Deleted")
+    assert svc.api.kwargs == {"calendarId": "work@group.calendar.google.com",
+                              "eventId": "ev123", "sendUpdates": "none"}
+
+
+def test_delete_event_notifies_attendees_when_asked():
+    svc = DeleteService()
+    _delete_event(svc, "ev123", "primary", True)
+    assert svc.api.kwargs["sendUpdates"] == "all"
+
+
+def test_delete_event_needs_an_id():
+    svc = DeleteService()
+    assert "event_id" in _delete_event(svc, "", "primary", False)
+    assert svc.api.kwargs is None
+
+
+def test_delete_not_connected_and_failure_degrade_gracefully():
+    assert "isn't connected" in _delete_event(None, "ev123", "primary", False)
+    assert "Couldn't" in _delete_event(DeleteService(fail=True), "ev123",
+                                       "primary", False)

@@ -44,6 +44,12 @@ class EventStore:
             (start_iso, end_iso)).fetchall()
         return [self._to_dict(r) for r in rows]
 
+    def get(self, calendar_id: str, event_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE calendar_id = ? AND id = ?",
+            (calendar_id, event_id)).fetchone()
+        return self._to_dict(row) if row is not None else None
+
     def set_last_sync(self, ts_iso: str) -> None:
         with self._conn:
             self._conn.execute(
@@ -80,6 +86,9 @@ class CalendarSync:
     # Facade the router consumes — one object for cache reads + sync status.
     def list_range(self, start_iso: str, end_iso: str) -> list[dict]:
         return self._store.list_range(start_iso, end_iso)
+
+    def get(self, calendar_id: str, event_id: str) -> dict | None:
+        return self._store.get(calendar_id, event_id)
 
     def last_sync(self) -> str | None:
         return self._store.last_sync()
