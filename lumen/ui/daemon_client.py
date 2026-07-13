@@ -18,6 +18,7 @@ class DaemonClient(QObject):
     tool_used = pyqtSignal(str)
     conversation = pyqtSignal(int)        # daemon assigned this chat a conversation id
     confirm_requested = pyqtSignal(dict)  # payload rows + confirm_id
+    compose_requested = pyqtSignal(dict)  # prefilled draft fields + compose_id
 
     def __init__(self, socket_path: str, parent=None):
         super().__init__(parent)
@@ -92,6 +93,9 @@ class DaemonClient(QObject):
             elif "confirm_request" in msg:
                 self.confirm_requested.emit(
                     {"confirm_id": msg.get("confirm_id"), **msg["confirm_request"]})
+            elif "compose_request" in msg:
+                self.compose_requested.emit(
+                    {"compose_id": msg.get("compose_id"), **msg["compose_request"]})
             elif "tool_used" in msg:
                 self.tool_used.emit(msg["tool_used"])
             elif "conversation_id" in msg:

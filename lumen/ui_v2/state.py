@@ -13,6 +13,7 @@ This module is the only place that knows the daemon's row shapes; it is the seam
 the mock was built around.
 """
 import copy
+import re
 import time
 from datetime import date, datetime
 
@@ -65,6 +66,8 @@ def _norm_mail(r: dict) -> dict:
     """Daemon email-mirror row -> screen shape ({from,subj,preview,time,date,unread,...})."""
     sender = r.get("sender", "")
     name = sender.split("<")[0].strip().strip('"') or sender
+    addr_m = re.search(r"<([^<>\s]+@[^<>\s]+)>", sender)
+    addr = addr_m.group(1) if addr_m else (sender.strip() if "@" in sender else "")
     received = r.get("received_at") or ""
     try:
         dt = datetime.fromisoformat(received).astimezone()
@@ -73,7 +76,8 @@ def _norm_mail(r: dict) -> dict:
         date_s = dt.strftime("%a, %b %d")
     except ValueError:
         time_s = date_s = ""
-    return {"id": r["id"], "from": name, "subj": r.get("subject") or "(no subject)",
+    return {"id": r["id"], "from": name, "from_addr": addr,
+            "subj": r.get("subject") or "(no subject)",
             "preview": r.get("snippet", ""), "time": time_s, "date": date_s,
             "unread": not r.get("is_read", True), "body": r.get("body", ""),
             "labels": r.get("labels", []), "attachments": r.get("attachments", [])}
@@ -122,6 +126,7 @@ class AppState(QObject):
     view_requested = pyqtSignal(str)      # tab key: launcher/dashboard/...
     open_chat_requested = pyqtSignal(int)  # hand a conversation off to the full Chat screen
     confirm_requested = pyqtSignal(dict)  # confirm-dialog payload (may carry confirm_id)
+    compose_requested = pyqtSignal(dict)  # compose-popup payload (may carry compose_id)
     toast_requested = pyqtSignal(str)
     accent_requested = pyqtSignal(str)    # accent hex from the settings picker
     status_requested = pyqtSignal(str)    # transient status line (daemon offline/errors)
@@ -143,8 +148,10 @@ class AppState(QObject):
             self.mail_total = 0
             data.error.connect(self.status_requested)
             self.attach_confirm_source(data)
+            self.attach_compose_source(data)
             if chat is not None:
                 self.attach_confirm_source(chat)
+                self.attach_compose_source(chat)
             self.refresh_todos()
             self.refresh_books()
             self.refresh_mails()
@@ -165,6 +172,36 @@ class AppState(QObject):
     def respond_confirm(self, confirm_id: int, approved: bool) -> None:
         if self._confirm is not None:
             self._confirm.respond_confirm(confirm_id, approved)
+
+    # ---- compose popup (Phase 7) ----
+    def attach_compose_source(self, client) -> None:
+        """A daemon compose_request on this client opens the compose popup."""
+        client.compose_requested.connect(self.compose_requested.emit)
+
+    def open_compose(self, prefill: dict | None = None) -> None:
+        """Mail-screen Compose/Reply: purely local popup — the daemon is only
+        involved when the user hits Send."""
+        self.compose_requested.emit(prefill or {})
+
+    def send_email(self, fields: dict, cb) -> None:
+        if self._data is not None:
+            self._data.request("emails.send", fields, cb)
+        else:
+            cb({"ok": True, "message": "Sent (sample mode — nothing left the app)."})
+
+    def revise_email(self, fields: dict, cb) -> None:
+        if self._data is not None:
+            self._data.request("emails.revise", fields, cb)
+
+    def respond_compose(self, compose_id: int, fields: dict | None, cb=None) -> None:
+        """Answer a chat-driven compose; fields=None cancels. Travels on the
+        dedicated confirm client — the chat connection is blocked awaiting it."""
+        if self._confirm is not None:
+            self._confirm.request(
+                "compose.response",
+                {"compose_id": compose_id, "send": fields is not None,
+                 "fields": fields or {}},
+                cb or (lambda _r: None))
 
     def sleep_model(self) -> None:
         if self._chat is not None:
@@ -367,20 +404,7 @@ class AppState(QObject):
                          ("Calendar", "Personal (primary)")],
                 "confirm_label": "Create event", "toast": "✓ Event added to calendar"})
 
-    # ---- mock write confirmations (no daemon send path yet: Phase 7) ----
-    def email_confirm(self):
-        self.confirm_requested.emit({
-            "icon": "✉", "title": "Send email",
-            "intro": "Lumen will send this message from your connected Gmail account.",
-            "rows": [
-                ("To", "priya.nair@company.com"),
-                ("Subject", "Re: sync interval defaults"),
-                ("Body", "Agreed — let’s ship 15 min as the default and expose it in [sync]. "
-                         "I’ll update the README today."),
-            ],
-            "confirm_label": "Send email", "toast": "✓ Email sent to Priya Nair",
-        })
-
+    # ---- mock reply confirmation (replaced by the compose popup in Task 7) ----
     def reply_confirm(self):
         m = self.sel_mail()
         subj = m["subj"] if m["subj"].lower().startswith("re:") else "Re: " + m["subj"]

@@ -15,6 +15,7 @@ class FakeClient(QObject):
     tool_used = pyqtSignal(str)
     conversation = pyqtSignal(int)
     confirm_requested = pyqtSignal(dict)
+    compose_requested = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()
@@ -521,3 +522,46 @@ def test_sample_window_builds_every_screen(qtbot):
         assert isinstance(win.screens[key], QWidget)
         win.switch_to(key)
     assert win.stack.currentWidget() is win.screens["settings"]
+
+
+# ---- Phase 7: compose plumbing --------------------------------------------
+
+def test_norm_mail_carries_sender_address():
+    row = {"id": "x", "sender": "Ada L <a@x.com>", "subject": "s", "snippet": "",
+           "received_at": "2026-07-10T10:00:00+00:00", "is_read": True}
+    assert _norm_mail(row)["from_addr"] == "a@x.com"
+    row["sender"] = "bare@x.com"
+    assert _norm_mail(row)["from_addr"] == "bare@x.com"
+    row["sender"] = "Just A Name"
+    assert _norm_mail(row)["from_addr"] == ""
+
+
+def test_appstate_compose_senders_route_to_daemon():
+    data, confirm = FakeClient(), FakeClient()
+    st = AppState(data=data, confirm=confirm)
+    st.send_email({"to": ["a@x.com"]}, lambda r: None)
+    assert data.requests[-1][0] == "emails.send"
+    st.revise_email({"subject": "s"}, lambda r: None)
+    assert data.requests[-1][0] == "emails.revise"
+    st.respond_compose(7, {"to": []})
+    t, p, _cb = confirm.requests[-1]
+    assert t == "compose.response" and p["compose_id"] == 7 and p["send"] is True
+    st.respond_compose(7, None)
+    assert confirm.requests[-1][1]["send"] is False
+
+
+def test_appstate_open_compose_and_attached_source_emit_signal(qtbot):
+    chat = FakeClient()
+    st = AppState(data=FakeClient(), chat=chat)
+    got = []
+    st.compose_requested.connect(got.append)
+    st.open_compose({"subject": "s"})
+    chat.compose_requested.emit({"compose_id": 3, "to": ["a@x.com"]})
+    assert got[0]["subject"] == "s" and got[1]["compose_id"] == 3
+
+
+def test_appstate_sample_mode_send_email_answers_ok():
+    st = AppState()
+    got = []
+    st.send_email({"to": ["a@x.com"]}, got.append)
+    assert got and got[0]["ok"] is True

@@ -174,3 +174,14 @@ def test_respond_confirm_writes_confirm_response_line(qtbot, tmp_path):
     assert received[0]["type"] == "confirm.response"
     assert received[0]["payload"] == {"confirm_id": 9, "approved": True}
     server.close()
+
+
+def test_compose_request_line_emits_signal(qtbot, tmp_path):
+    client = DaemonClient(str(tmp_path / "d.sock"))
+    payloads = []
+    client.compose_requested.connect(payloads.append)
+    client._buf = (json.dumps({
+        "id": 4, "compose_id": 7,
+        "compose_request": {"to": ["a@x.com"], "subject": "Hi"}}).encode() + b"\n")
+    client._process_buffer()
+    assert payloads == [{"compose_id": 7, "to": ["a@x.com"], "subject": "Hi"}]

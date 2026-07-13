@@ -77,6 +77,7 @@ def main() -> None:
 
     state = AppState(data=data_client, chat=chat_client, confirm=confirm_client)
     state.attach_confirm_source(overlay_chat)
+    state.attach_compose_source(overlay_chat)
 
     win = main_mod.LumenWindow(state)
     main_mod._active_window = win
