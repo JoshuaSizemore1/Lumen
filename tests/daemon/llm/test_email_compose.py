@@ -1,4 +1,5 @@
 """email_compose: extraction gate — editable-draft softness, no invented recipients."""
+from lumen.daemon.llm import writing_style
 from lumen.daemon.llm.email_compose import propose_email, revise_email, validate_draft
 
 
@@ -50,3 +51,22 @@ async def test_revise_email_returns_full_revision():
 async def test_revise_email_empty_body_fails():
     got, err = await revise_email(FakeLLM('{"subject": "s", "body": ""}'), "s", "b", "i")
     assert got is None and "revision" in err
+
+
+async def test_style_rules_ride_draft_and_revise_prompts(monkeypatch):
+    monkeypatch.setattr(writing_style, "load_rules",
+                        lambda path=None: "- Signs off Respectfully")
+    llm = FakeLLM('{"to": [], "cc": [], "subject": "S", "body": "B", "reply_hint": null}')
+    await propose_email(llm, "email sam about the demo")
+    assert "Respectfully" in llm.messages[0]["content"]
+
+    llm = FakeLLM('{"subject": "S", "body": "B"}')
+    await revise_email(llm, "s", "b", "shorter")
+    assert "Respectfully" in llm.messages[0]["content"]
+
+
+async def test_no_style_file_leaves_prompts_bare(monkeypatch):
+    monkeypatch.setattr(writing_style, "load_rules", lambda path=None: None)
+    llm = FakeLLM('{"to": [], "cc": [], "subject": "S", "body": "B", "reply_hint": null}')
+    await propose_email(llm, "email sam about the demo")
+    assert "sent mail" not in llm.messages[0]["content"]

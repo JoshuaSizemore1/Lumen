@@ -139,8 +139,9 @@ OAuth, the bulk-sync worker (bounded initial pull + resumable pagination), Histo
 
 **Success**: your mailbox is mirrored locally and searchable offline; closing and reopening the app only pulls new/changed mail, not a full re-list; an interrupted first sync resumes rather than restarting.
 
-## Phase 7 — Email send + writing style
+## Phase 7 — Email send + writing style — DONE (2026-07-13)
 Compose/send through the confirmation flow. Derive the writing-style ruleset once (cloud or local escalation model) and wire it into drafting.
+**Verified**: part 1 (compose/send) live 2026-07-13 — see the note under step 1. Parts 2–3 live 2026-07-13 over the real socket against real Ollama: the user chose the **cloud-via-Claude-Code-session** derivation route (design gate; over local qwen3:14b and an API key), Claude derived `~/.local/share/lumen/writing-style.md` from the 15 hand-written sends in the mirror (47 SENT rows minus Gmail auto-unsubscribes/empties), and a compose-shaped chat then produced a draft in Josh's actual voice ("Hello Vivian,", "I was wanting to…", "let me know what works with your schedule", "Respectfully,\nJoshua Sizemore"); cancel sent nothing. The hand-edit loop was proven live: the first run opened with filler ("I hope you're doing well"), one added avoid-list line fixed the next run. Application is `writing_style.styled()` wrapping both `propose_email`/`revise_email` system prompts — per-call file read (edits apply immediately, delete reverts), 2500-char cap, "user's explicit request wins" override. No derivation code shipped; the refresh recipe lives in `writing-style.md` "As built". Spec `docs/superpowers/specs/2026-07-13-phase7-writing-style-design.md`. Residual: 4B adherence is good-not-perfect (occasional em dash) — acceptable, the popup is editable.
 
 **Read first**: `writing-style.md` (derive-once/apply-often reasoning), `email-integration.md` (write-action flow).
 

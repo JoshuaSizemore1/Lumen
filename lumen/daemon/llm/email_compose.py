@@ -7,6 +7,7 @@ literally wrote (the reply path adds the mirrored sender, router-side)."""
 
 import re
 
+from lumen.daemon.llm import writing_style
 from lumen.daemon.llm.event_create import parse_proposal
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -57,7 +58,7 @@ async def _generate(llm, system: str, user: str) -> dict | None:
 
 async def propose_email(llm, message: str) -> tuple[dict | None, str | None]:
     """One structured generation on the fast model — no tools, no chain."""
-    raw = await _generate(llm, DRAFT_SYSTEM, message)
+    raw = await _generate(llm, writing_style.styled(DRAFT_SYSTEM), message)
     if raw is None:
         return None, ("I couldn't put a draft together from that — tell me "
                       "who it's for and roughly what to say.")
@@ -66,7 +67,7 @@ async def propose_email(llm, message: str) -> tuple[dict | None, str | None]:
 
 async def revise_email(llm, subject: str, body: str,
                        instruction: str) -> tuple[dict | None, str | None]:
-    raw = await _generate(llm, REVISE_SYSTEM,
+    raw = await _generate(llm, writing_style.styled(REVISE_SYSTEM),
                           f"Subject: {subject}\n\n{body}\n\nInstruction: {instruction}")
     if raw is None or not str(raw.get("body") or "").strip():
         return None, "revision failed — try rephrasing the instruction"

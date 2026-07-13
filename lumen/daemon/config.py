@@ -31,6 +31,12 @@ def default_grants_path() -> Path:
     return root / "lumen" / "write-grants.txt"
 
 
+def default_style_rules_path() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "writing-style.md"
+
+
 def default_google_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
