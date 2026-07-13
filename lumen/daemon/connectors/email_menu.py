@@ -10,6 +10,7 @@ import re as _re
 import sqlite3
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
 from html import unescape
 
 from lumen.daemon.connectors import google_auth
@@ -411,4 +412,58 @@ class GmailSync:
             self._store.update_labels(mid, add=[], remove=["UNREAD"])
         else:
             self._store.update_labels(mid, add=["UNREAD"], remove=[])
+        return True
+
+    async def send(self, to: list[str], cc: list[str], bcc: list[str],
+                   subject: str, body: str, *, reply_to: str | None = None) -> bool:
+        """Send via the Gmail API — only ever called downstream of the compose
+        popup's explicit Send click (the popup is the write confirmation).
+        gmail.modify, already granted, authorizes send — no new scope.
+        reply_to is a mirrored message id: its thread_id plus a metadata fetch
+        of the original's Message-ID make the reply thread properly."""
+        try:
+            service = (self._service_factory() if self._injected
+                       else self._build_service(write=True))
+        except Exception:
+            log.exception("could not build gmail service")
+            return False
+        if service is None:
+            return False
+        thread_id = None
+        if reply_to is not None:
+            row = self._store.get(reply_to)
+            thread_id = (row or {}).get("thread_id")
+
+        def blocking():
+            msg = EmailMessage()
+            msg["To"] = ", ".join(to)
+            if cc:
+                msg["Cc"] = ", ".join(cc)
+            if bcc:
+                msg["Bcc"] = ", ".join(bcc)
+            msg["Subject"] = subject
+            if reply_to is not None:
+                try:
+                    meta = service.users().messages().get(
+                        userId="me", id=reply_to, format="metadata",
+                        metadataHeaders=["Message-ID"]).execute()
+                    orig = next((h["value"] for h in
+                                 meta.get("payload", {}).get("headers", [])
+                                 if h.get("name", "").lower() == "message-id"), None)
+                except Exception:
+                    orig = None          # thread via threadId alone
+                if orig:
+                    msg["In-Reply-To"] = orig
+                    msg["References"] = orig
+            msg.set_content(body)
+            payload = {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+            if thread_id:
+                payload["threadId"] = thread_id
+            service.users().messages().send(userId="me", body=payload).execute()
+
+        try:
+            await asyncio.to_thread(blocking)
+        except Exception:
+            log.exception("gmail send failed")
+            return False
         return True

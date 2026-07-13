@@ -418,3 +418,62 @@ async def test_sync_once_serialized(tmp_path):
     sync._bulk = fake_bulk
     await asyncio.gather(sync.sync_once(), sync.sync_once())
     assert order == ["enter", "exit", "enter", "exit"]
+
+
+# ---- send (Phase 7) --------------------------------------------------------
+
+class SendService:
+    """users().messages().send/get fake capturing the outgoing payload."""
+
+    def __init__(self, message_id_header="<orig@mail.gmail.com>", fail=False):
+        self.sent, self._hdr, self._fail = [], message_id_header, fail
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def get(self, userId, id, format, metadataHeaders=None):
+        return FakeExec({"payload": {"headers": [
+            {"name": "Message-ID", "value": self._hdr}]}})
+
+    def send(self, userId, body):
+        if self._fail:
+            return FakeExec(RuntimeError("boom"))
+        self.sent.append(body)
+        return FakeExec({"id": "sent1"})
+
+
+def sent_mime(svc):
+    import email
+    return email.message_from_bytes(
+        base64.urlsafe_b64decode(svc.sent[0]["raw"]))
+
+
+async def test_send_builds_rfc822_and_posts(tmp_path):
+    svc = SendService()
+    _store, sync = make_sync(tmp_path, svc)
+    ok = await sync.send(["a@x.com"], ["c@x.com"], ["b@x.com"], "Subj", "Body text")
+    assert ok is True
+    m = sent_mime(svc)
+    assert m["To"] == "a@x.com" and m["Cc"] == "c@x.com" and m["Bcc"] == "b@x.com"
+    assert m["Subject"] == "Subj" and "Body text" in m.get_payload()
+    assert "threadId" not in svc.sent[0]
+
+
+async def test_send_reply_threads_via_mirror_and_message_id(tmp_path):
+    svc = SendService()
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])                     # id m1, thread_id t1
+    ok = await sync.send(["s1@x.com"], [], [], "Re: Subject 1", "b", reply_to="m1")
+    assert ok is True
+    assert svc.sent[0]["threadId"] == "t1"
+    m = sent_mime(svc)
+    assert m["In-Reply-To"] == "<orig@mail.gmail.com>"
+    assert m["References"] == "<orig@mail.gmail.com>"
+
+
+async def test_send_api_failure_returns_false(tmp_path):
+    _store, sync = make_sync(tmp_path, SendService(fail=True))
+    assert await sync.send(["a@x.com"], [], [], "s", "b") is False
