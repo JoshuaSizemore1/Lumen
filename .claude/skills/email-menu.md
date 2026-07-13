@@ -50,6 +50,7 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
 - **Incremental adds are fetched per-id**, not batched: a 404 on an individual id (message vanished upstream between the delta and the fetch) is skipped; any other fetch error leaves `historyId` unadvanced so the identical window retries on the next poll instead of silently losing messages.
 - **The dashboard reads the mirror directly** — no second lightweight metadata cache. See `email-integration.md` for the deviation and why.
 - **The mail MCP server (`lumen/mcp_servers/mail.py`) is read-only by design** — `search_email`/`get_email` only, over a read-only SQLite URI handle (`mode=ro`) on the mirror. Archive/mark-read are UI-confirmed one-shots through the router, never model-initiated tool calls.
+- **`emails_fts` is keyed to the implicit rowid of `emails`** (TEXT primary key); `VACUUM` renumbers implicit rowids and silently desyncs the index — if the DB is ever vacuumed, run `INSERT INTO emails_fts(emails_fts) VALUES('rebuild');` afterward.
 
 ## Decided gates (2026-07-12)
 - Bulk sync window: 6 months, configurable via `config.toml`'s `gmail_window_months` (default 6).

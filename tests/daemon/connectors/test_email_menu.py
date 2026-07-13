@@ -1,4 +1,5 @@
 """EmailStore: mirror reads/writes over the Task-1 schema."""
+import asyncio
 import base64
 
 from lumen.daemon import db
@@ -396,3 +397,24 @@ async def test_action_failure_leaves_mirror_untouched(tmp_path):
     store.upsert([msg(1)])
     assert await sync.archive("m1") is False
     assert "INBOX" in store.get("m1")["labels"]
+
+
+# Final-review fix: sync_once must be serialized so the poller and mail.refresh
+# can never run overlapping bulk pulls against the same persisted cursor.
+async def test_sync_once_serialized(tmp_path):
+    store = make_store(tmp_path)
+    store.set_state(HISTORY_KEY, None)   # both calls route through _bulk
+    sync = GmailSync(store, GoogleConfig(), SyncConfig(),
+                     service_factory=lambda: object())
+    order = []
+
+    async def fake_bulk(service):
+        order.append("enter")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        order.append("exit")
+        return True
+
+    sync._bulk = fake_bulk
+    await asyncio.gather(sync.sync_once(), sync.sync_once())
+    assert order == ["enter", "exit", "enter", "exit"]

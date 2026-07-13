@@ -185,6 +185,7 @@ class GmailSync:
         self._sync = sync_cfg
         self._injected = service_factory is not None
         self._service_factory = service_factory or self._build_service
+        self._sync_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -193,6 +194,10 @@ class GmailSync:
     @property
     def syncing(self) -> bool:
         return self._store.get_state(CURSOR_KEY) is not None
+
+    @property
+    def busy(self) -> bool:
+        return self._sync_lock.locked()
 
     def last_sync(self) -> str | None:
         return self._store.get_state(LAST_SYNC_KEY)
@@ -210,6 +215,10 @@ class GmailSync:
         return date.today() - timedelta(days=self._sync.gmail_window_months * 30)
 
     async def sync_once(self) -> bool:
+        async with self._sync_lock:
+            return await self._sync_once_locked()
+
+    async def _sync_once_locked(self) -> bool:
         try:
             service = self._service_factory()
         except Exception:

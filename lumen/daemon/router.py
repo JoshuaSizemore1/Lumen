@@ -385,7 +385,12 @@ class Router:
                 yield {"error": "email unavailable"}
                 return
             if type_ == "mail.refresh":
-                await self._mail.sync_once()
+                # A refresh during a running/pending bulk just returns the
+                # current page immediately — the poller finishes the sync —
+                # instead of awaiting inline and stalling the serial IPC
+                # channel for the whole sync's duration.
+                if not (self._mail.busy or self._mail.syncing):
+                    await self._mail.sync_once()
                 type_, payload = "emails.list", {}
             if type_ == "emails.list":
                 yield {"result": {

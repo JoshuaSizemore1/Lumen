@@ -251,12 +251,17 @@ class AppState(QObject):
         self.mails_changed.emit()
 
     def _set_mails(self, result: dict) -> None:
+        # emails.search responses carry only {"emails": [...]} — no status
+        # keys — so absent keys must fall back to the PRIOR state, not a
+        # reset default, or a search while disconnected would flip the
+        # status to "connected"/"synced".
         self.mails = [_norm_mail(r) for r in result.get("emails", [])]
-        self.mail_connected = result.get("connected", True)
-        self.mail_syncing = result.get("syncing", False)
-        self.mail_last_sync = result.get("last_sync")
-        counts = result.get("counts") or {}
-        self.mail_total = counts.get("total", len(self.mails))
+        self.mail_connected = result.get("connected", self.mail_connected)
+        self.mail_syncing = result.get("syncing", self.mail_syncing)
+        self.mail_last_sync = result.get("last_sync", self.mail_last_sync)
+        counts = result.get("counts")
+        if counts:
+            self.mail_total = counts.get("total", self.mail_total)
         if self.selected_mail not in {m["id"] for m in self.mails}:
             self.selected_mail = self.mails[0]["id"] if self.mails else None
         self.mails_changed.emit()

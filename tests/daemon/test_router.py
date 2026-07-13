@@ -84,7 +84,7 @@ class FakeMailStore:
 
 
 class FakeMailSync:
-    connected, syncing = True, False
+    connected, syncing, busy = True, False, False
 
     def __init__(self):
         self.archived, self.marked, self.synced = [], [], 0
@@ -1331,6 +1331,14 @@ async def test_mail_refresh_triggers_sync():
     router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
     out = await collect(router, "mail.refresh", {})
     assert sync.synced == 1 and "result" in out[-1]
+
+
+async def test_mail_refresh_skips_sync_when_already_syncing():
+    store, sync = FakeMailStore(), FakeMailSync()
+    sync.syncing = True
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "mail.refresh", {})
+    assert sync.synced == 0 and "result" in out[-1]
 
 
 async def test_emails_archive_confirm_approve_and_decline():

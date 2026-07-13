@@ -389,6 +389,21 @@ def test_search_mails_routes_query(qtbot):
     assert data.requests[-1][0] == "emails.list"
 
 
+def test_search_results_do_not_clobber_connection_status(qtbot):
+    # emails.search responses carry only {"emails": [...]} — no status keys —
+    # so _set_mails must preserve prior connection/sync/total state rather
+    # than resetting to its defaults.
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mail_connected = False
+    st.mail_total = 42
+    st.search_mails("budget")
+    data.cb_for("emails.search")({"emails": [daemon_mail_row()]})
+    assert st.mail_connected is False
+    assert st.mail_total == 42
+    assert st.mails[0]["id"] == "m1"
+
+
 def test_archive_result_toasts_and_refreshes(qtbot):
     data = FakeClient()
     st = AppState(data=data)
