@@ -565,3 +565,84 @@ def test_appstate_sample_mode_send_email_answers_ok():
     got = []
     st.send_email({"to": ["a@x.com"]}, got.append)
     assert got and got[0]["ok"] is True
+
+
+# ---- compose dialog --------------------------------------------------------
+
+def _compose_host(qtbot, data=None, confirm=None):
+    from PyQt6.QtWidgets import QWidget
+    from lumen.ui_v2.compose import ComposeDialog
+    st = AppState(data=data or FakeClient(), confirm=confirm or FakeClient())
+    host = QWidget()
+    qtbot.addWidget(host)
+    host.show()              # a child's isVisible() is False under a hidden parent
+    dlg = ComposeDialog(host, st)
+    dlg._test_host = host    # qtbot holds only a weakref; keep the parent alive
+    return dlg, st
+
+
+def test_compose_dialog_prefills_and_sends_oneshot(qtbot):
+    data = FakeClient()
+    dlg, st = _compose_host(qtbot, data=data)
+    dlg.open({"to": ["a@x.com"], "subject": "Hi", "body": "B", "reply_to": "m9"})
+    assert dlg.to_edit.text() == "a@x.com" and dlg.subject_edit.text() == "Hi"
+    dlg.cc_edit.setText("c@x.com, d@x.com")
+    dlg._send()
+    t, p, cb = data.requests[-1]
+    assert t == "emails.send" and p["cc"] == ["c@x.com", "d@x.com"]
+    assert p["reply_to"] == "m9" and p["body"] == "B"
+    cb({"ok": False, "message": "Couldn't reach Gmail — nothing was sent."})
+    assert dlg.isVisible()                      # failure keeps the draft open
+    assert "Gmail" in dlg.err_lab.text()
+    dlg._send()                                  # resend after the error
+    data.requests[-1][2]({"ok": True, "message": "Sent."})
+    assert not dlg.isVisible()
+
+
+def test_compose_dialog_chat_mode_resolves_broker_not_oneshot(qtbot):
+    data, confirm = FakeClient(), FakeClient()
+    dlg, st = _compose_host(qtbot, data=data, confirm=confirm)
+    dlg.open({"compose_id": 5, "to": ["a@x.com"], "body": "b"})
+    dlg._send()
+    assert not any(t == "emails.send" for t, _p, _cb in data.requests)
+    assert confirm.requests[-1][0] == "compose.response"
+    assert confirm.requests[-1][1]["send"] is True
+    assert not dlg.isVisible()                  # outcome lands in the chat turn
+    dlg.open({"compose_id": 6})
+    dlg._cancel()
+    assert confirm.requests[-1][1] == {"compose_id": 6, "send": False, "fields": {}}
+    assert not dlg.isVisible()
+
+
+def test_compose_dialog_revise_refreshes_draft(qtbot):
+    data = FakeClient()
+    dlg, st = _compose_host(qtbot, data=data)
+    dlg.open({"subject": "Long", "body": "Long body", "to": ["a@x.com"]})
+    dlg.revise_edit.setText("shorter")
+    dlg._revise()
+    t, p, cb = data.requests[-1]
+    assert t == "emails.revise" and p["instruction"] == "shorter"
+    assert not dlg.revise_btn.isEnabled()       # busy while the model works
+    cb({"subject": "Short", "body": "B."})
+    assert dlg.subject_edit.text() == "Short" and dlg.body_edit.toPlainText() == "B."
+    assert dlg.to_edit.text() == "a@x.com"      # recipients never touched
+    assert dlg.revise_btn.isEnabled() and dlg.revise_edit.text() == ""
+
+
+def test_compose_dialog_revise_unblocks_on_daemon_error(qtbot):
+    dlg, st = _compose_host(qtbot)
+    dlg.open({"body": "b"})
+    dlg.revise_edit.setText("shorter")
+    dlg._revise()
+    assert not dlg.revise_btn.isEnabled()
+    st.status_requested.emit("daemon offline")  # callback will never fire
+    assert dlg.revise_btn.isEnabled()
+
+
+def test_window_opens_compose_on_state_signal(qtbot):
+    from lumen.ui_v2.main import LumenWindow
+    st = AppState(data=FakeClient(), chat=FakeClient(), confirm=FakeClient())
+    win = LumenWindow(st)
+    qtbot.addWidget(win)
+    win.state.compose_requested.emit({"subject": "s"})
+    assert win.compose.isVisible() and win.compose.subject_edit.text() == "s"

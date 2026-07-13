@@ -136,7 +136,7 @@ QPushButton[variant="confirm"] {{
 }}
 
 /* ---- inputs ---- */
-QLineEdit {{
+QLineEdit, QTextEdit {{
     background: {T.BG_FIELD};
     border: 1px solid {T.BORDER_STRONG};
     border-radius: 5px;

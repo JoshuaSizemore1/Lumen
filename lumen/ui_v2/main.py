@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import theme as T
+from .compose import ComposeDialog
 from .confirm import ConfirmOverlay, Toast
 from .state import AppState
 from .styles import build_qss
@@ -94,11 +95,13 @@ class LumenWindow(QWidget):
         self.tab_group.idClicked.connect(self.stack.setCurrentIndex)
 
         self.overlay = ConfirmOverlay(self)
+        self.compose = ComposeDialog(self, self.state)
         self.toast = Toast(self)
 
         self.state.view_requested.connect(self.switch_to)
         self.state.open_chat_requested.connect(self._open_chat)
         self.state.confirm_requested.connect(self._open_confirm)
+        self.state.compose_requested.connect(self._open_compose)
         self.state.toast_requested.connect(self.toast.pop)
         self.state.status_requested.connect(self.toast.pop)
         self.state.mails_changed.connect(self._update_mail_badge)
@@ -195,6 +198,14 @@ class LumenWindow(QWidget):
         self.activateWindow()
         self.overlay.open(payload, self._on_confirm_result)
 
+    def _open_compose(self, payload: dict):
+        # A chat-driven draft can arrive while only the hotkey overlay is up;
+        # the popup lives in the main window, so surface it first.
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.compose.open(payload)
+
     def _on_confirm_result(self, approved: bool, payload: dict):
         confirm_id = payload.get("confirm_id")
         if confirm_id is not None:          # daemon confirm-over-IPC: always answer
@@ -233,6 +244,8 @@ class LumenWindow(QWidget):
         super().resizeEvent(ev)
         if self.overlay.isVisible():
             self.overlay.setGeometry(self.rect())
+        if self.compose.isVisible():
+            self.compose.setGeometry(self.rect())
         self.toast.reposition()
 
 
