@@ -646,3 +646,29 @@ def test_window_opens_compose_on_state_signal(qtbot):
     qtbot.addWidget(win)
     win.state.compose_requested.emit({"subject": "s"})
     assert win.compose.isVisible() and win.compose.subject_edit.text() == "s"
+
+
+def test_mail_screen_compose_button_opens_empty_popup(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    st = AppState()
+    got = []
+    st.compose_requested.connect(got.append)
+    sc = MailScreen(st)
+    qtbot.addWidget(sc)
+    sc.compose_btn.click()
+    assert got == [{}]
+
+
+def test_mail_screen_reply_prefills_sender_and_threading(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    st = AppState()
+    st.mails[0].update({"from_addr": "priya@x.com", "subj": "Budget"})
+    st.selected_mail = st.mails[0]["id"]
+    got = []
+    st.compose_requested.connect(got.append)
+    sc = MailScreen(st)
+    qtbot.addWidget(sc)
+    sc.reply_btn.click()
+    assert got[0]["to"] == ["priya@x.com"]
+    assert got[0]["subject"] == "Re: Budget"
+    assert got[0]["reply_to"] == st.mails[0]["id"]

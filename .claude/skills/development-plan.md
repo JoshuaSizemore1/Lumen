@@ -148,6 +148,7 @@ Compose/send through the confirmation flow. Derive the writing-style ruleset onc
 
 **Build order**:
 1. **Send path first, style second**: add the `gmail.send` scope; compose UI + chat-draft path; the confirmation dialog shows recipient, subject, and the *exact* body that will go out. Nothing sends without explicit confirmation — no exceptions, regardless of router confidence.
+   **Done 2026-07-13** (spec: `docs/superpowers/specs/2026-07-13-phase7-email-compose-design.md`). As built: the editable compose popup is itself the confirmation (Send is the explicit click; no second dialog), with an in-popup "Ask Lumen to revise" loop; `gmail.modify` already authorizes send, so no scope change was needed.
 2. **Derivation** (one-off job, not a background service): extract a rules file from the sent-mail corpus — plain markdown (patterns, tone, sign-off, avoid-list per the template in `writing-style.md`), saved to the XDG data dir, hand-editable. **Ask the user which derivation route** before running it: cloud (Claude API — best quality, sent mail transits the API once) vs. local escalation model (fully private, weaker result). That's a privacy/product call, not a technical one.
 3. **Apply**: inject the rules file into every draft prompt on the fast model. Static reference — do not re-derive per draft; refresh quarterly or on request.
 

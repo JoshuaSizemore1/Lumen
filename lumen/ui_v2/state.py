@@ -403,18 +403,3 @@ class AppState(QObject):
                          ("When", f"{proposal.get('start', '')} – {proposal.get('end', '')}"),
                          ("Calendar", "Personal (primary)")],
                 "confirm_label": "Create event", "toast": "✓ Event added to calendar"})
-
-    # ---- mock reply confirmation (replaced by the compose popup in Task 7) ----
-    def reply_confirm(self):
-        m = self.sel_mail()
-        subj = m["subj"] if m["subj"].lower().startswith("re:") else "Re: " + m["subj"]
-        self.confirm_requested.emit({
-            "icon": "✉", "title": "Send reply",
-            "intro": "Lumen will send this reply from your connected Gmail account.",
-            "rows": [
-                ("To", m["from"]),
-                ("Subject", subj),
-                ("Body", "Thanks — sounds good. I’ll follow up shortly."),
-            ],
-            "confirm_label": "Send reply", "toast": "✓ Reply sent to " + m["from"],
-        })

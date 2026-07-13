@@ -28,6 +28,11 @@ class MailScreen(QWidget):
         self.unread_lab = label("", 11, T.TEXT_DIM)
         top_row.addWidget(self.unread_lab)
         top_row.addStretch(1)
+        self.compose_btn = button("＋ Compose", "primary", px=11)
+        self.compose_btn.setFixedHeight(26)
+        self.compose_btn.setToolTip("Write a new email")
+        self.compose_btn.clicked.connect(lambda: state.open_compose())
+        top_row.addWidget(self.compose_btn)
         refresh_btn = button("↻", "outline", px=13)
         refresh_btn.setFixedSize(28, 26)
         refresh_btn.setToolTip("Refresh inbox")
@@ -112,6 +117,12 @@ class MailScreen(QWidget):
             return f"syncing — {self.state.mail_total} so far"
         return f"synced {self.state.mail_last_sync or '—'}"
 
+    def _reply(self, m: dict):
+        subj = m["subj"] if m["subj"].lower().startswith("re:") else f"Re: {m['subj']}"
+        self.state.open_compose({
+            "to": [m["from_addr"]] if m.get("from_addr") else [],
+            "subject": subj, "reply_to": m["id"]})
+
     def _populate_pane(self):
         clear_layout(self.pane_lay)
         m = self.state.sel_mail()
@@ -138,10 +149,10 @@ class MailScreen(QWidget):
         who.addWidget(label(m["from"], 13, T.TEXT_PRIMARY, 500))
         who.addWidget(label(f"to me · {m['date']}", 11, T.TEXT_DIM))
         sl.addLayout(who, 1)
-        reply = button("↳ Reply", "primary", px=11)
-        reply.setFixedHeight(29)
-        reply.clicked.connect(self.state.reply_confirm)
-        sl.addWidget(reply)
+        self.reply_btn = button("↳ Reply", "primary", px=11)
+        self.reply_btn.setFixedHeight(29)
+        self.reply_btn.clicked.connect(lambda: self._reply(m))
+        sl.addWidget(self.reply_btn)
         self.archive_btn = button("Archive", "outline", px=11)
         self.archive_btn.setFixedHeight(29)
         self.archive_btn.clicked.connect(lambda: self.state.archive_mail(m["id"]))

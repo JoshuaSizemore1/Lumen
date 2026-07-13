@@ -32,6 +32,12 @@ Use SQLite FTS5 (or an equivalent full-text index) over `subject`/`body`/`snippe
 ## Email menu UI behavior
 - Full list/search view, not just today's unread — this is the "manage it yourself" surface, same philosophy as the todo manager.
 - Compose/send goes through the standard write-confirmation flow from CLAUDE.md.
+  **As built (Phase 7, 2026-07-13):** the editable compose popup *is* the
+  confirmation — the user is looking at the exact recipients/body and clicks
+  Send; no second dialog. Chat-driven drafts open the same popup pre-filled
+  (`compose_request` over IPC; the turn awaits `compose.response`), the Mail
+  screen's Compose/Reply buttons open it locally and send via `emails.send`.
+  Sending needed no new scope — `gmail.modify` already authorizes it.
 - Read/archive/label actions are also writes — confirm before executing, same as send (even though these feel low-stakes, consistency matters more than shaving a click).
 
 ## Privacy note
