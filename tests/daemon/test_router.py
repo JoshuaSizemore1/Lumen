@@ -1441,3 +1441,138 @@ async def test_chat_mail_question_injects_context():
     await collect(router, "chat", {"message": "any new email?"})
     assert llm.messages[0]["role"] == "system"
     assert "Engines" in llm.messages[0]["content"]
+
+
+# ---- Phase 7: compose & send -----------------------------------------------
+
+class SendingMailSync(FakeMailSync):
+    def __init__(self, ok=True):
+        super().__init__()
+        self.sent, self._ok = [], ok
+
+    async def send(self, to, cc, bcc, subject, body, reply_to=None):
+        self.sent.append((to, cc, bcc, subject, body, reply_to))
+        return self._ok
+
+
+def compose_router(llm, sync=None, store=None):
+    return Router(llm, FakeStore(), mail=sync or SendingMailSync(),
+                  mail_store=store or FakeMailStore(), confirm=ConfirmBroker())
+
+
+def test_compose_hint_shapes():
+    from lumen.daemon.router import COMPOSE_HINT
+    hits = ["send an email to sam@x.com about friday",
+            "write an email telling the team we shipped",
+            "reply to Ada's email saying thanks",
+            "email Sarah about rescheduling"]
+    misses = ["did sarah email me back?", "any new email today?",
+              "search my email for invoices", "how many unread emails"]
+    assert all(COMPOSE_HINT.search(h) for h in hits)
+    assert not any(COMPOSE_HINT.search(m) for m in misses)
+
+
+DRAFT_JSON = ('{"to": ["sam@x.com"], "cc": [], "subject": "Friday", '
+              '"body": "Hi Sam", "reply_hint": null}')
+
+
+async def _drive_compose(router, message, respond):
+    """Collect the compose stream, answering the popup via `respond(event)`."""
+    out = []
+    async for ev in router.handle("chat", {"message": message}):
+        out.append(ev)
+        if "compose_request" in ev:
+            respond(ev)
+    return out
+
+
+async def test_chat_compose_send_roundtrip():
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM((DRAFT_JSON,)), sync)
+
+    def respond(ev):
+        assert ev["compose_request"]["to"] == ["sam@x.com"]
+        router._confirm.resolve(ev["compose_id"],
+                                {"to": ["sam@x.com"], "cc": [], "bcc": [],
+                                 "subject": "Friday (edited)", "body": "Hi Sam!",
+                                 "reply_to": None})
+    out = await _drive_compose(router, "send an email to sam@x.com about friday",
+                               respond)
+    assert sync.sent == [(["sam@x.com"], [], [], "Friday (edited)", "Hi Sam!", None)]
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "Sent." in text and {"done": True} in out
+
+
+async def test_chat_compose_cancel_sends_nothing():
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM((DRAFT_JSON,)), sync)
+    out = await _drive_compose(
+        router, "send an email to sam@x.com",
+        lambda ev: router._confirm.resolve(ev["compose_id"], False))
+    assert sync.sent == []
+    assert "Cancelled" in "".join(e.get("chunk", "") for e in out)
+
+
+async def test_chat_compose_reply_hint_prefills_from_mirror():
+    reply_json = ('{"to": [], "cc": [], "subject": "", "body": "Thanks!", '
+                  '"reply_hint": "engine"}')
+    router = compose_router(FakeLLM((reply_json,)))
+    seen = {}
+    await _drive_compose(
+        router, "reply to ada's email about engines saying thanks",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen["to"] == ["a@x.com"]            # FakeMailStore sender Ada <a@x.com>
+    assert seen["subject"] == "Re: Engines" and seen["reply_to"] == "m1"
+
+
+async def test_chat_compose_unparseable_draft_is_honest_chat():
+    router = compose_router(FakeLLM(("no json here",)))
+    out = await collect(router, "chat", {"message": "send an email to sam@x.com"})
+    assert not any("compose_request" in e for e in out)
+    assert "draft" in "".join(e.get("chunk", "") for e in out)
+
+
+async def test_emails_send_oneshot_validates_and_sends():
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM(), sync)
+    out = await collect(router, "emails.send",
+                        {"to": ["a@x.com"], "cc": [], "bcc": [],
+                         "subject": "s", "body": "b"})
+    assert out == [{"result": {"ok": True, "message": "Sent."}}]
+    assert sync.sent[-1][0] == ["a@x.com"]
+    bad = await collect(router, "emails.send",
+                        {"to": ["not-an-address"], "subject": "s", "body": "b"})
+    assert bad[0]["result"]["ok"] is False and len(sync.sent) == 1
+    empty = await collect(router, "emails.send", {"to": [], "body": "b"})
+    assert "recipient" in empty[0]["result"]["message"]
+
+
+async def test_emails_revise_oneshot():
+    router = compose_router(FakeLLM(('{"subject": "S2", "body": "B2"}',)))
+    out = await collect(router, "emails.revise",
+                        {"subject": "S", "body": "B", "instruction": "shorter"})
+    assert out == [{"result": {"subject": "S2", "body": "B2"}}]
+
+
+async def test_compose_response_expired_id_still_sends():
+    # The popup outlived the chat wait: a Send click must not be dropped.
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM(), sync)
+    out = await collect(router, "compose.response",
+                        {"compose_id": 999, "send": True,
+                         "fields": {"to": ["a@x.com"], "subject": "s", "body": "b"}})
+    assert sync.sent and out[0]["result"]["ok"] is True
+
+
+async def test_compose_response_cancel_never_sends():
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM(), sync)
+    out = await collect(router, "compose.response",
+                        {"compose_id": 999, "send": False, "fields": {}})
+    assert sync.sent == [] and out[0]["result"]["ok"] is True
+
+
+def test_identity_owns_sending():
+    from lumen.daemon.router import IDENTITY
+    assert "compose window" in IDENTITY

@@ -14,6 +14,8 @@ from pathlib import Path
 
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.client import LLMUnavailable
+from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
+                                            revise_email)
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
                                            validate_proposal)
 from lumen.daemon.llm.mcp_bridge import ToolCallError
@@ -62,6 +64,19 @@ EVENT_HINT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Compose-shaped requests jump to the draft → popup path before every other
+# chat route (EVENT_HINT would steal "draft an email to schedule a meeting").
+# Read-shaped mail questions ("did Sam email me back?") must NOT match.
+COMPOSE_HINT = re.compile(
+    r"\b(?:send|write|draft|compose|shoot)\b.{0,60}\b(?:e-?mails?|reply|message)\b"
+    r"|\breply(?:ing)?\b.{0,60}\b(?:e-?mails?|saying|telling|that)\b"
+    r"|\be-?mail\b.{0,40}\b(?:to|saying|telling|asking|about)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# A compose wait is an edit session, not a confirm click.
+COMPOSE_TIMEOUT_S = 1800.0
+
 MAIL_HINT = re.compile(
     r"\b(e-?mails?|inbox|unread|gmail|mail|messages?|newsletters?|senders?)\b",
     re.IGNORECASE,
@@ -87,7 +102,10 @@ IDENTITY = (
     "things up instead of guessing or apologizing, and never tell the user you "
     "can't access something you have a tool for. Never pretend to check or look "
     "something up: if this conversation gives you no tool or data for it, say so "
-    "plainly instead of inventing a result. Prefer specific, concise answers."
+    "plainly instead of inventing a result. When the user asks you to write, "
+    "send, or reply to an email, a compose window opens with your draft for "
+    "them to review and send — so never claim you can't send email. Prefer "
+    "specific, concise answers."
 )
 
 # Write-capable tools stay callable by the daemon (after a confirm) but are
@@ -127,6 +145,15 @@ def fs_context(home: Path) -> str:
         f"questions. If you don't know an exact folder name, list its parent "
         f"directory and read the names rather than using search_files."
     )
+
+
+def _sender_address(sender: str) -> str | None:
+    """'Ada Lovelace <a@x.com>' or bare 'a@x.com' -> the address."""
+    m = re.search(r"<([^<>@\s]+@[^<>@\s]+)>", sender or "")
+    if m:
+        return m.group(1)
+    s = (sender or "").strip()
+    return s if EMAIL.match(s) else None
 
 
 def calendar_context(events: list[dict], now: datetime, window_end: date) -> str:
@@ -314,6 +341,25 @@ class Router:
                                           bool(payload["approved"]))
                 except (KeyError, TypeError, ValueError):
                     log.warning("malformed confirm.response payload: %r", payload)
+        elif type_ == "compose.response":
+            # Resolves the chat turn awaiting this popup with its final fields
+            # (or a cancel). If the id already expired but the user clicked
+            # Send, send anyway — a Send click is never silently dropped.
+            try:
+                compose_id = int(payload["compose_id"])
+            except (KeyError, TypeError, ValueError):
+                yield {"error": "compose.response needs {compose_id}"}
+                return
+            fields = payload.get("fields")
+            sending = bool(payload.get("send")) and isinstance(fields, dict)
+            resolved = (self._confirm is not None
+                        and self._confirm.resolve(compose_id,
+                                                  fields if sending else False))
+            if not resolved and sending and self._mail is not None:
+                ok, text = await self._send_email(fields)
+                yield {"result": {"ok": ok, "message": text}}
+            else:
+                yield {"result": {"ok": True, "message": ""}}
         elif type_.startswith("books.") and self._books is None:
             yield {"error": "book catalog unavailable"}
         elif type_ == "books.list":
@@ -424,6 +470,19 @@ class Router:
             elif type_ in ("emails.archive", "emails.mark_read"):
                 async for ev in self._gated_mail_action(type_, payload):
                     yield ev
+            elif type_ == "emails.send":
+                ok, text = await self._send_email(payload)
+                yield {"result": {"ok": ok, "message": text}}
+            elif type_ == "emails.revise":
+                try:
+                    revised, err = await revise_email(
+                        self._llm, str(payload.get("subject", "")),
+                        str(payload.get("body", "")),
+                        str(payload.get("instruction", "")))
+                except LLMUnavailable as e:
+                    yield {"error": str(e)}
+                    return
+                yield {"error": err} if revised is None else {"result": revised}
             else:
                 yield {"error": f"unknown request type: {type_}"}
         else:
@@ -432,7 +491,10 @@ class Router:
     async def _chat(self, message: str, conv_id: int | None):
         """Pick the chat sub-path, stream it through, and write-through the
         assistant turn (with any tool names) once it completes."""
-        if (self._confirm is not None and self._bridge is not None
+        if (self._confirm is not None and self._mail is not None
+                and COMPOSE_HINT.search(message)):
+            sub = self._compose_email_chat(message)
+        elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and EVENT_HINT.search(message)):
             sub = self._create_event_chat(message)
         elif (self._books is not None and self._bridge is not None
@@ -553,6 +615,76 @@ class Router:
             except Exception:
                 log.exception("post-create sync failed")
         yield {"_outcome": (ok, text)}
+
+    async def _compose_email_chat(self, message: str):
+        """NL draft → editable compose popup → send/cancel. The popup is the
+        confirmation: the daemon sends exactly the fields the UI returns, and
+        only on an explicit Send."""
+        try:
+            draft, err = await propose_email(self._llm, message)
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if draft is None:
+            yield {"chunk": err}     # honest failure is an answer, not an IPC error
+            yield {"done": True}
+            return
+        reply_to = None
+        if draft["reply_hint"] and self._mail_store is not None:
+            hits = sorted(self._mail_store.search(draft["reply_hint"], limit=5),
+                          key=lambda r: r.get("received_at") or "", reverse=True)
+            if hits:            # newest plausible match; miss = plain compose
+                orig = hits[0]
+                reply_to = orig["id"]
+                addr = _sender_address(orig.get("sender", ""))
+                if addr:
+                    draft["to"] = [addr]
+                subj = orig.get("subject") or ""
+                draft["subject"] = (subj if subj.lower().startswith("re:")
+                                    else f"Re: {subj}")
+        compose_id = self._confirm.begin()
+        yield {"compose_request": {"to": draft["to"], "cc": draft["cc"], "bcc": [],
+                                   "subject": draft["subject"], "body": draft["body"],
+                                   "reply_to": reply_to},
+               "compose_id": compose_id}
+        yield {"chunk": "I've drafted it — review the compose window and hit "
+                        "Send when it's right."}
+        answer = await self._confirm.wait(compose_id, timeout=COMPOSE_TIMEOUT_S)
+        if not isinstance(answer, dict):
+            yield {"chunk": "\n\nCancelled — nothing was sent."}
+            yield {"done": True}
+            return
+        _ok, text = await self._send_email(answer)
+        yield {"chunk": f"\n\n{text}"}
+        yield {"done": True}
+
+    async def _send_email(self, fields: dict) -> tuple[bool, str]:
+        """Validate + send. No confirm gate: every caller is downstream of the
+        compose popup, whose Send click is the confirmation."""
+        def addrs(key):
+            out = []
+            for a in fields.get(key) or []:
+                a = str(a).strip()
+                if a and not EMAIL.match(a):
+                    raise ValueError(f"{a!r} isn't a valid email address — "
+                                     "nothing was sent.")
+                if a and a not in out:
+                    out.append(a)
+            return out
+        try:
+            to, cc, bcc = addrs("to"), addrs("cc"), addrs("bcc")
+        except ValueError as e:
+            return False, str(e)
+        if not to:
+            return False, "No valid recipient — nothing was sent."
+        body = str(fields.get("body") or "").strip()
+        if not body:
+            return False, "The email body is empty — nothing was sent."
+        subject = str(fields.get("subject") or "").strip()
+        ok = await self._mail.send(to, cc, bcc, subject, body,
+                                   reply_to=fields.get("reply_to") or None)
+        return ((True, "Sent.") if ok
+                else (False, "Couldn't reach Gmail — nothing was sent."))
 
     async def _gated_mail_action(self, type_: str, payload: dict):
         """Confirm-over-IPC then execute an archive / mark-read against Gmail.
