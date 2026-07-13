@@ -183,6 +183,7 @@ class GmailSync:
         self._store = store
         self._google = google_cfg
         self._sync = sync_cfg
+        self._injected = service_factory is not None
         self._service_factory = service_factory or self._build_service
 
     @property
@@ -196,8 +197,10 @@ class GmailSync:
     def last_sync(self) -> str | None:
         return self._store.get_state(LAST_SYNC_KEY)
 
-    def _build_service(self):
-        creds = google_auth.load_credentials(self._google, google_auth.GMAIL_READ_SCOPES)
+    def _build_service(self, write: bool = False):
+        scopes = (google_auth.GMAIL_WRITE_SCOPES if write
+                  else google_auth.GMAIL_READ_SCOPES)
+        creds = google_auth.load_credentials(self._google, scopes)
         if creds is None:
             return None
         from googleapiclient.discovery import build
@@ -364,3 +367,39 @@ class GmailSync:
             except Exception:
                 log.exception("gmail poll iteration failed")
             await asyncio.sleep(interval)
+
+    async def _modify(self, mid: str, body: dict) -> bool:
+        """Router (Task 9) only calls archive/mark_read AFTER a user confirm."""
+        try:
+            service = (self._service_factory() if self._injected
+                       else self._build_service(write=True))
+        except Exception:
+            log.exception("could not build gmail service")
+            return False
+        if service is None:
+            return False
+        try:
+            await asyncio.to_thread(
+                lambda: service.users().messages().modify(
+                    userId="me", id=mid, body=body).execute())
+        except Exception:
+            log.exception("gmail modify failed for %s", mid)
+            return False
+        return True
+
+    async def archive(self, mid: str) -> bool:
+        if not await self._modify(mid, {"removeLabelIds": ["INBOX"]}):
+            return False
+        self._store.update_labels(mid, add=[], remove=["INBOX"])
+        return True
+
+    async def mark_read(self, mid: str, read: bool) -> bool:
+        body = ({"removeLabelIds": ["UNREAD"]} if read
+                else {"addLabelIds": ["UNREAD"]})
+        if not await self._modify(mid, body):
+            return False
+        if read:
+            self._store.update_labels(mid, add=[], remove=["UNREAD"])
+        else:
+            self._store.update_labels(mid, add=["UNREAD"], remove=[])
+        return True

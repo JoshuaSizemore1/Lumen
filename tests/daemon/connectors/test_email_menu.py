@@ -350,3 +350,49 @@ async def test_incremental_add_fetch_failure_retries_next_poll(tmp_path):
     store.set_state(HISTORY_KEY, "h100")
     assert await sync.sync_once() is False
     assert store.get_state(HISTORY_KEY) == "h100"
+
+
+# Task 7: Manage-action executors (archive / mark-read)
+
+class ModifyingService(FakeService):
+    def __init__(self, *a, fail=False, **kw):
+        super().__init__(*a, **kw)
+        self.modified, self._fail = [], fail
+
+    def modify(self, userId, id, body):
+        if self._fail:
+            return FakeExec(RuntimeError("api down"))
+        self.modified.append((id, body))
+        return FakeExec({"id": id})
+
+
+async def test_archive_hits_api_then_mirror(tmp_path):
+    svc = ModifyingService({}, {})
+    svc._messages.modify = svc.modify           # messages() facade carries modify
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+    assert await sync.archive("m1") is True
+    assert svc.modified == [("m1", {"removeLabelIds": ["INBOX"]})]
+    assert "INBOX" not in store.get("m1")["labels"]
+
+
+async def test_mark_read_and_unread(tmp_path):
+    svc = ModifyingService({}, {})
+    svc._messages.modify = svc.modify
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+    assert await sync.mark_read("m1", True) is True
+    assert store.get("m1")["is_read"] is True
+    assert await sync.mark_read("m1", False) is True
+    assert store.get("m1")["is_read"] is False
+    assert svc.modified == [("m1", {"removeLabelIds": ["UNREAD"]}),
+                            ("m1", {"addLabelIds": ["UNREAD"]})]
+
+
+async def test_action_failure_leaves_mirror_untouched(tmp_path):
+    svc = ModifyingService({}, {}, fail=True)
+    svc._messages.modify = svc.modify
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+    assert await sync.archive("m1") is False
+    assert "INBOX" in store.get("m1")["labels"]
