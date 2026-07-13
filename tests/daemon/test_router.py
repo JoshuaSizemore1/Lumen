@@ -1374,3 +1374,36 @@ async def test_emails_unavailable_without_mail():
     router = Router(FakeLLM(), FakeStore())
     out = await collect(router, "emails.list", {})
     assert out[-1] == {"error": "email unavailable"}
+
+
+# ---- Task 10: chat grounding — MAIL_HINT + mail_context ----
+
+from lumen.daemon.router import MAIL_HINT, mail_context
+
+
+def test_mail_hint_vocabulary():
+    for msg_ in ("any new email?", "did priya e-mail me back", "check my inbox",
+                 "unread messages", "anything in gmail", "any mail from the bank"):
+        assert MAIL_HINT.search(msg_), msg_
+    assert not MAIL_HINT.search("what should I read next?")
+    assert not MAIL_HINT.search("list the files in my notes folder")
+
+
+def test_mail_context_lines_and_markers():
+    unread = [{"sender": "Ada <a@x.com>", "subject": "Engines",
+               "received_at": "2026-07-12T10:00:00+00:00"}]
+    ctx = mail_context(unread, {"total": 40, "unread": 1}, True)
+    assert "Ada" in ctx and "Engines" in ctx and "search_email" in ctx
+    empty = mail_context([], {"total": 40, "unread": 0}, True)
+    assert "no unread" in empty.lower()
+    off = mail_context([], {"total": 0, "unread": 0}, False)
+    assert "not connected" in off.lower()
+
+
+async def test_chat_mail_question_injects_context():
+    llm = FakeLLM()
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
+    await collect(router, "chat", {"message": "any new email?"})
+    assert llm.messages[0]["role"] == "system"
+    assert "Engines" in llm.messages[0]["content"]

@@ -62,6 +62,11 @@ EVENT_HINT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+MAIL_HINT = re.compile(
+    r"\b(e-?mails?|inbox|unread|gmail|mail|messages?|newsletters?|senders?)\b",
+    re.IGNORECASE,
+)
+
 CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 
 # In-context conversation history is a fixed size, not unbounded: only the most
@@ -152,6 +157,23 @@ def calendar_context(events: list[dict], now: datetime, window_end: date) -> str
     return "\n".join(lines)
 
 
+def mail_context(unread: list[dict], counts: dict, connected: bool) -> str:
+    """System-message context: unread summary from the local mirror, explicit
+    empty/not-connected markers, and a pointer at search_email for the rest."""
+    if not connected:
+        return ("Gmail is not connected yet — the user needs to run the one-time "
+                "Google setup. Say so if asked about email; do not invent messages.")
+    lines = [f"The user's mailbox mirror holds {counts['total']} messages, "
+             f"{counts['unread']} unread. Unread messages (only these are shown — "
+             "use the search_email tool for anything else):"]
+    if not unread:
+        lines.append("No unread messages.")
+    for m in unread:
+        when = m["received_at"][:16].replace("T", " ")
+        lines.append(f"- {when}: {m['sender']} — {m['subject']}")
+    return "\n".join(lines)
+
+
 def todo_context(todos: list[dict], today: date) -> str:
     """System-message context: today's date + one line per open todo, or an
     explicit empty marker so the model can't hallucinate around a blank list."""
@@ -210,6 +232,10 @@ class Router:
             context.append(calendar_context(
                 self._calendar.list_range(now.date().isoformat(), end.isoformat()),
                 now, end))
+        if self._mail_store is not None and (tool_loop or MAIL_HINT.search(message)):
+            context.append(mail_context(self._mail_store.unread(limit=10),
+                                        self._mail_store.counts(),
+                                        self._mail.connected if self._mail is not None else False))
         if self._bridge is not None and (tool_loop or TOOL_HINT.search(message)
                                          or FS_WRITE_HINT.search(message)):
             context.append(fs_context(Path.home()))
