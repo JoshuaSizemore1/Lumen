@@ -10,6 +10,7 @@ from lumen.daemon.config import load_config
 from lumen.daemon.confirm import ConfirmBroker
 from lumen.daemon.connectors.books import BookStore
 from lumen.daemon.connectors.conversations import ConversationStore
+from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.gcal import CalendarSync, EventStore
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
@@ -32,11 +33,14 @@ async def run() -> None:
     tool_log = ToolLog(cfg.mcp.log_path) if cfg.mcp.enabled else None
     events = EventStore(conn)
     calendar = CalendarSync(events, cfg.google, cfg.sync)
+    emails = EmailStore(conn)
+    mail = GmailSync(emails, cfg.google, cfg.sync)
     broker = ConfirmBroker()   # shared: router resolves, the write gate awaits
     write_gate = (WriteGate(GrantStore(cfg.mcp.grants_path), broker,
                             write_tools_map(cfg.mcp.servers))
                   if cfg.mcp.enabled else None)
     router = Router(llm, TodoStore(conn), BookStore(conn), calendar=calendar,
+                    mail=mail, mail_store=emails,
                     bridge=bridge, confirm=broker, write_gate=write_gate,
                     model_router=model_router, tool_log=tool_log,
                     conversations=ConversationStore(conn),
@@ -44,6 +48,7 @@ async def run() -> None:
     server = IPCServer(cfg.socket_path, router)
     await server.start()
     poll_task = asyncio.create_task(calendar.poll_forever())
+    mail_task = asyncio.create_task(mail.poll_forever())
     log.info("listening on %s (model=%s, keep_alive=%s, db=%s)",
              cfg.socket_path, cfg.model, cfg.keep_alive, cfg.db_path)
 
@@ -55,7 +60,8 @@ async def run() -> None:
 
     log.info("shutting down")
     poll_task.cancel()
-    await asyncio.gather(poll_task, return_exceptions=True)
+    mail_task.cancel()
+    await asyncio.gather(poll_task, mail_task, return_exceptions=True)
     await server.stop()
     await llm.aclose()
     if bridge is not None:

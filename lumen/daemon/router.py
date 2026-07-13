@@ -168,13 +168,16 @@ def todo_context(todos: list[dict], today: date) -> str:
 
 
 class Router:
-    def __init__(self, llm, todos, books=None, *, calendar=None, bridge=None,
-                 confirm=None, write_gate=None, model_router=None, tool_log=None,
-                 conversations=None, max_iterations=4):
+    def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
+                 mail_store=None, bridge=None, confirm=None, write_gate=None,
+                 model_router=None, tool_log=None, conversations=None,
+                 max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
         self._calendar = calendar   # CalendarSync facade: list_range/last_sync/connected
+        self._mail = mail           # GmailSync facade: poll_forever/connected
+        self._mail_store = mail_store   # EmailStore — local mirror the UI/chat read from
         self._bridge = bridge
         self._confirm = confirm     # ConfirmBroker — gates every external write
         self._write_gate = write_gate   # WriteGate — per-file grants for fs writes

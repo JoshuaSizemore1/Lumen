@@ -74,6 +74,10 @@ async def test_chat_llm_down_yields_error():
     assert len(out) == 1 and "down" in out[0]["error"]
 
 
+async def test_construction_accepts_mail_and_mail_store():
+    Router(FakeLLM(), FakeStore(), mail=object(), mail_store=object())
+
+
 async def test_sleep_unloads():
     llm = FakeLLM()
     out = await collect(Router(llm, FakeStore()), "sleep", {})
