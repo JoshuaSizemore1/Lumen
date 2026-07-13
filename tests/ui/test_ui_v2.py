@@ -5,7 +5,7 @@ A FakeClient stands in for DaemonClient — same signals + methods, no socket.""
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from lumen.ui_v2 import state as state_mod
-from lumen.ui_v2.state import AppState, _norm_book, _norm_event, _norm_todo
+from lumen.ui_v2.state import AppState, _norm_book, _norm_event, _norm_mail, _norm_todo
 
 
 class FakeClient(QObject):
@@ -354,6 +354,61 @@ def test_window_registers_chat_and_open_chat_loads(qtbot):
     win._open_chat(11)
     assert win.stack.currentWidget() is win.screens["chat"]
     assert win.screens["chat"]._conv_id == 11
+
+
+# ---- mail (live) -----------------------------------------------------------
+
+def daemon_mail_row(i=1, unread=True):
+    return {"id": f"m{i}", "sender": "Ada Lovelace <ada@x.com>", "recipients": "me",
+            "subject": f"Subject {i}", "snippet": "the analytical…", "body": "full body",
+            "labels": ["INBOX", "UNREAD"] if unread else ["INBOX"],
+            "received_at": "2026-07-12T10:00:00+00:00", "is_read": not unread,
+            "attachments": [], "thread_id": "t"}
+
+
+def test_refresh_mails_normalizes_and_signals(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    hits = []
+    st.mails_changed.connect(lambda: hits.append(1))
+    st.refresh_mails()
+    data.cb_for("emails.list")({"emails": [daemon_mail_row()], "connected": True,
+                                "syncing": False, "last_sync": "x",
+                                "counts": {"total": 12, "unread": 1}})
+    assert hits and st.mails[0]["from"] == "Ada Lovelace"
+    assert st.mails[0]["unread"] is True and st.mail_total == 12
+    assert st.mail_connected is True
+
+
+def test_search_mails_routes_query(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.search_mails("budget")
+    assert data.requests[-1][0] == "emails.search"
+    st.search_mails("")
+    assert data.requests[-1][0] == "emails.list"
+
+
+def test_archive_result_toasts_and_refreshes(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    toasts = []
+    st.toast_requested.connect(toasts.append)
+    st.archive_mail("m1")
+    data.cb_for("emails.archive")({"ok": True, "message": "Archived."})
+    assert toasts == ["✓ Archived."]
+    assert data.requests[-1][0] == "emails.list"      # refresh after action
+
+
+def test_select_mail_no_longer_marks_read_locally(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.refresh_mails()
+    data.cb_for("emails.list")({"emails": [daemon_mail_row()], "connected": True,
+                                "syncing": False, "last_sync": None,
+                                "counts": {"total": 1, "unread": 1}})
+    st.select_mail("m1")
+    assert st.mails[0]["unread"] is True             # decided gate: no silent flip
 
 
 def test_sample_window_builds_every_screen(qtbot):

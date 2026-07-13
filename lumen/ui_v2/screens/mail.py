@@ -80,6 +80,10 @@ class MailScreen(QWidget):
     def _populate_pane(self):
         clear_layout(self.pane_lay)
         m = self.state.sel_mail()
+        if m is None:
+            self.pane_lay.addWidget(label("No messages yet", 14, T.TEXT_DIM))
+            self.pane_lay.addStretch(1)
+            return
         subj = label(m["subj"], 18, T.TEXT_PRIMARY, 600, wrap=True)
         self.pane_lay.addWidget(subj)
         self.pane_lay.addSpacing(10)

@@ -21,9 +21,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from . import sample_data as S
 from . import theme as T
 
-# Mail has no daemon backend until Phase 6, so it stays sample-seeded in both
-# modes (the old dashboard showed the same placeholder).
-
 
 def _due_label(d: date, today: date) -> str:
     if 0 < (d - today).days <= 6:
@@ -62,6 +59,24 @@ def _norm_book(row: dict) -> dict:
     return {"id": row["id"], "title": row["title"], "author": row.get("author") or "",
             "rating": row.get("rating") or 0, "notes": row.get("notes") or "",
             "done": _finished_label(row.get("date_finished"))}
+
+
+def _norm_mail(r: dict) -> dict:
+    """Daemon email-mirror row -> screen shape ({from,subj,preview,time,date,unread,...})."""
+    sender = r.get("sender", "")
+    name = sender.split("<")[0].strip().strip('"') or sender
+    received = r.get("received_at") or ""
+    try:
+        dt = datetime.fromisoformat(received).astimezone()
+        time_s = dt.strftime("%H:%M") if dt.date() == datetime.now().date() \
+            else dt.strftime("%b %d")
+        date_s = dt.strftime("%a, %b %d")
+    except ValueError:
+        time_s = date_s = ""
+    return {"id": r["id"], "from": name, "subj": r.get("subject") or "(no subject)",
+            "preview": r.get("snippet", ""), "time": time_s, "date": date_s,
+            "unread": not r.get("is_read", True), "body": r.get("body", ""),
+            "labels": r.get("labels", []), "attachments": r.get("attachments", [])}
 
 
 def _norm_rec(rec: dict) -> dict:
@@ -118,22 +133,28 @@ class AppState(QObject):
         self._confirm = confirm  # dedicated confirm.response channel
         self.live = data is not None
 
-        self.mails = copy.deepcopy(S.MAILS)
+        self.mail_connected = True
+        self.mail_syncing = False
+        self.mail_last_sync = None
         self.selected_mail = "m1"
 
         if self.live:
-            self.todos, self.books, self.recs = [], [], []
+            self.todos, self.books, self.recs, self.mails = [], [], [], []
+            self.mail_total = 0
             data.error.connect(self.status_requested)
             self.attach_confirm_source(data)
             if chat is not None:
                 self.attach_confirm_source(chat)
             self.refresh_todos()
             self.refresh_books()
+            self.refresh_mails()
         else:
             self.todos = [{**t, "tags": [t["tag"]] if t.get("tag") else []}
                           for t in copy.deepcopy(S.TODOS)]
             self.books = copy.deepcopy(S.BOOKS)
             self.recs = [_norm_rec(r) for r in S.RECS]
+            self.mails = copy.deepcopy(S.MAILS)
+            self.mail_total = len(self.mails)
 
     # ---- confirm-over-IPC routing ----
     def attach_confirm_source(self, client) -> None:
@@ -212,22 +233,65 @@ class AppState(QObject):
             self.todos = [t for t in self.todos if t["id"] != tid]
             self.todos_changed.emit()
 
-    # ---- mail (sample-only until Phase 6) ----
+    # ---- mail (live from the daemon mirror; sample rows without a daemon) ----
     def unread_count(self) -> int:
         return sum(1 for m in self.mails if m["unread"])
 
     def unread_mails(self) -> list[dict]:
         return [m for m in self.mails if m["unread"]]
 
-    def sel_mail(self) -> dict:
-        return next((m for m in self.mails if m["id"] == self.selected_mail), self.mails[0])
+    def sel_mail(self) -> dict | None:
+        return next((m for m in self.mails if m["id"] == self.selected_mail),
+                    self.mails[0] if self.mails else None)
 
     def select_mail(self, mid: str):
+        # Selecting only selects: read-state changes are explicit, confirmed
+        # writes (decided 2026-07-12) — never a side effect of browsing.
         self.selected_mail = mid
-        for m in self.mails:
-            if m["id"] == mid:
-                m["unread"] = False
         self.mails_changed.emit()
+
+    def _set_mails(self, result: dict) -> None:
+        self.mails = [_norm_mail(r) for r in result.get("emails", [])]
+        self.mail_connected = result.get("connected", True)
+        self.mail_syncing = result.get("syncing", False)
+        self.mail_last_sync = result.get("last_sync")
+        counts = result.get("counts") or {}
+        self.mail_total = counts.get("total", len(self.mails))
+        if self.selected_mail not in {m["id"] for m in self.mails}:
+            self.selected_mail = self.mails[0]["id"] if self.mails else None
+        self.mails_changed.emit()
+
+    def refresh_mails(self) -> None:
+        if self._data is not None:
+            self._data.request("emails.list", {}, self._set_mails)
+
+    def refresh_inbox(self) -> None:
+        """Manual refresh: delta-sync against Gmail, then reload the page."""
+        if self._data is not None:
+            self._data.request("mail.refresh", {}, self._set_mails)
+
+    def search_mails(self, query: str) -> None:
+        query = query.strip()
+        if self._data is None:
+            return
+        if not query:
+            self.refresh_mails()
+            return
+        self._data.request("emails.search", {"query": query}, self._set_mails)
+
+    def _mail_action_done(self, result: dict) -> None:
+        msg = result.get("message", "")
+        self.toast_requested.emit(("✓ " if result.get("ok") else "") + msg)
+        self.refresh_mails()
+
+    def archive_mail(self, mid: str) -> None:
+        if self._data is not None:
+            self._data.request("emails.archive", {"id": mid}, self._mail_action_done)
+
+    def set_mail_read(self, mid: str, read: bool) -> None:
+        if self._data is not None:
+            self._data.request("emails.mark_read", {"id": mid, "read": read},
+                               self._mail_action_done)
 
     # ---- books ----
     def _set_books(self, rows: list[dict]) -> None:
