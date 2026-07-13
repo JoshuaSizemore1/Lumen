@@ -1,6 +1,6 @@
 """Mail screen: 334px message list | reading pane."""
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFrame, QLabel, QWidget
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 
 from .. import theme as T
 from ..state import AppState
@@ -22,11 +22,29 @@ class MailScreen(QWidget):
         col.setFixedWidth(334)
         cv = vbox(col)
         head = QWidget()
-        hv = hbox(head, (16, 16, 16, 12), 9)
-        hv.addWidget(label("Inbox", 15, T.TEXT_PRIMARY, 600))
+        hv = vbox(head, (16, 16, 16, 10), 8)
+        top_row = hbox(s=9)
+        top_row.addWidget(label("Inbox", 15, T.TEXT_PRIMARY, 600))
         self.unread_lab = label("", 11, T.TEXT_DIM)
-        hv.addWidget(self.unread_lab)
-        hv.addStretch(1)
+        top_row.addWidget(self.unread_lab)
+        top_row.addStretch(1)
+        refresh_btn = button("↻", "outline", px=13)
+        refresh_btn.setFixedSize(28, 26)
+        refresh_btn.setToolTip("Refresh inbox")
+        refresh_btn.clicked.connect(state.refresh_inbox)
+        top_row.addWidget(refresh_btn)
+        hv.addLayout(top_row)
+
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search mail…")
+        f = self.search_box.font()
+        f.setPixelSize(12)
+        self.search_box.setFont(f)
+        hv.addWidget(self.search_box)
+
+        self.status_lab = label("", 11, T.TEXT_DIM)
+        hv.addWidget(self.status_lab)
+
         cv.addWidget(head)
         sep = QFrame()
         sep.setFixedHeight(1)
@@ -44,11 +62,21 @@ class MailScreen(QWidget):
         self.pane_lay = vbox(pane, (26, 20, 26, 20), 0)
         root.addWidget(scroll(pane), 1)
 
+        # search box debounces 300ms before hitting the daemon
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(
+            lambda: self.state.search_mails(self.search_box.text()))
+        self.search_box.textChanged.connect(
+            lambda _t: self._search_timer.start())
+
         state.mails_changed.connect(self.populate)
         self.populate()
 
     def populate(self):
         self.unread_lab.setText(f"{self.state.unread_count()} unread")
+        self.status_lab.setText(self._status_text())
         clear_layout(self.rows_lay)
         for m in self.state.mails:
             selected = m["id"] == self.state.selected_mail
@@ -77,11 +105,18 @@ class MailScreen(QWidget):
         self.rows_lay.addStretch(1)
         self._populate_pane()
 
+    def _status_text(self) -> str:
+        if not self.state.mail_connected:
+            return "Gmail not connected — see setup"
+        if self.state.mail_syncing:
+            return f"syncing — {self.state.mail_total} so far"
+        return f"synced {self.state.mail_last_sync or '—'}"
+
     def _populate_pane(self):
         clear_layout(self.pane_lay)
         m = self.state.sel_mail()
         if m is None:
-            self.pane_lay.addWidget(label("No messages yet", 14, T.TEXT_DIM))
+            self.pane_lay.addWidget(label("No message selected", 14, T.TEXT_DIM))
             self.pane_lay.addStretch(1)
             return
         subj = label(m["subj"], 18, T.TEXT_PRIMARY, 600, wrap=True)
@@ -107,15 +142,25 @@ class MailScreen(QWidget):
         reply.setFixedHeight(29)
         reply.clicked.connect(self.state.reply_confirm)
         sl.addWidget(reply)
-        archive = button("Archive", "outline", px=11)
-        archive.setFixedHeight(29)
-        archive.clicked.connect(self._on_archive)
-        sl.addWidget(archive)
+        self.archive_btn = button("Archive", "outline", px=11)
+        self.archive_btn.setFixedHeight(29)
+        self.archive_btn.clicked.connect(lambda: self.state.archive_mail(m["id"]))
+        sl.addWidget(self.archive_btn)
+        self.read_btn = button("Mark read" if m["unread"] else "Mark unread", "outline", px=11)
+        self.read_btn.setFixedHeight(29)
+        self.read_btn.clicked.connect(
+            lambda: self.state.set_mail_read(m["id"], m["unread"]))
+        sl.addWidget(self.read_btn)
         self.pane_lay.addWidget(sender)
         sep = QFrame()
         sep.setFixedHeight(1)
         sep.setStyleSheet(f"background: {T.BORDER_SOFT};")
         self.pane_lay.addWidget(sep)
+
+        attachments = m.get("attachments") or []
+        if attachments:
+            self.pane_lay.addWidget(
+                label("📎 " + ", ".join(attachments), 11, T.TEXT_DIM, sans=True))
 
         body = label(m["body"], 13, T.TEXT_PRIMARY, sans=True, wrap=True)
         bw = QWidget()
@@ -123,7 +168,3 @@ class MailScreen(QWidget):
         bl.addWidget(body)
         self.pane_lay.addWidget(bw)
         self.pane_lay.addStretch(1)
-
-    def _on_archive(self):
-        # TODO: wire to daemon archive action
-        self.state.toast_requested.emit("✓ Archived (stub)")

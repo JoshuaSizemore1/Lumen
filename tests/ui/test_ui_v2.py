@@ -411,6 +411,51 @@ def test_select_mail_no_longer_marks_read_locally(qtbot):
     assert st.mails[0]["unread"] is True             # decided gate: no silent flip
 
 
+def test_mail_search_box_debounces_into_state(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()          # sample mode
+    calls = []
+    monkeypatch.setattr(state, "search_mails", lambda q: calls.append(q))
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    screen.search_box.setText("budget")
+    qtbot.wait(400)             # past the 300ms debounce
+    assert calls == ["budget"]
+
+
+def test_mail_action_buttons_call_state(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    archived, marked = [], []
+    monkeypatch.setattr(state, "archive_mail", archived.append)
+    monkeypatch.setattr(state, "set_mail_read", lambda i, r: marked.append((i, r)))
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    screen.archive_btn.click()
+    screen.read_btn.click()
+    sel = state.sel_mail()["id"]
+    assert archived == [sel] and marked and marked[0][0] == sel
+
+
+def test_mail_not_connected_and_empty_states(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    state.mails, state.selected_mail = [], None
+    state.mail_connected = False
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    assert "not connected" in screen.status_lab.text().lower()
+
+
+def test_mail_empty_pane_shows_no_message_selected(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    state.mails, state.selected_mail = [], None
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    assert "No message selected" in _label_texts(screen)
+
+
 def test_sample_window_builds_every_screen(qtbot):
     """Construct the full sample-mode window: every screen's layout builds."""
     from lumen.ui_v2.main import LumenWindow, TABS
