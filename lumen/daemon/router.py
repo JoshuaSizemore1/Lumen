@@ -1,7 +1,7 @@
 """Request router: chat streaming (plain, tool-augmented, book-rec, and
-event-creation paths), sleep, todos.*/books.*/calendar.* one-shots, and
-confirm.response resolution. Tool-call vs direct-answer classification is the
-regex hints below — cheap heuristics, no LLM pre-pass."""
+event-creation paths), sleep, todos.*/books.*/calendar.*/emails.* one-shots,
+and confirm.response resolution. Tool-call vs direct-answer classification is
+the regex hints below — cheap heuristics, no LLM pre-pass."""
 
 import asyncio
 import logging
@@ -354,6 +354,38 @@ class Router:
                 yield {"result": self._todos.delete(int(payload["id"]))}
             except (KeyError, TypeError, ValueError):
                 yield {"error": "todos.delete needs {id}"}
+        elif type_.startswith("emails.") or type_ == "mail.refresh":
+            if self._mail is None or self._mail_store is None:
+                yield {"error": "email unavailable"}
+                return
+            if type_ == "mail.refresh":
+                await self._mail.sync_once()
+                type_, payload = "emails.list", {}
+            if type_ == "emails.list":
+                yield {"result": {
+                    "emails": self._mail_store.list_page(
+                        payload.get("filter", "inbox"),
+                        int(payload.get("limit", 50)),
+                        int(payload.get("offset", 0))),
+                    "connected": self._mail.connected,
+                    "syncing": self._mail.syncing,
+                    "last_sync": self._mail.last_sync(),
+                    "counts": self._mail_store.counts()}}
+            elif type_ == "emails.search":
+                yield {"result": {"emails": self._mail_store.search(
+                    payload.get("query", ""), int(payload.get("limit", 50)))}}
+            elif type_ == "emails.get":
+                row = self._mail_store.get(str(payload.get("id", "")))
+                yield {"error": "email not found"} if row is None else {"result": row}
+            elif type_ == "emails.unread":
+                yield {"result": {
+                    "emails": self._mail_store.unread(int(payload.get("limit", 10))),
+                    "connected": self._mail.connected}}
+            elif type_ in ("emails.archive", "emails.mark_read"):
+                async for ev in self._gated_mail_action(type_, payload):
+                    yield ev
+            else:
+                yield {"error": f"unknown request type: {type_}"}
         else:
             yield {"error": f"unknown request type: {type_}"}
 
@@ -481,6 +513,42 @@ class Router:
             except Exception:
                 log.exception("post-create sync failed")
         yield {"_outcome": (ok, text)}
+
+    async def _gated_mail_action(self, type_: str, payload: dict):
+        """Confirm-over-IPC then execute an archive / mark-read against Gmail.
+        Low-stakes-feeling writes still confirm — consistency over a click."""
+        if self._confirm is None:
+            yield {"error": "email actions unavailable"}
+            return
+        row = self._mail_store.get(str(payload.get("id", "")))
+        if row is None:
+            yield {"error": "email not found"}
+            return
+        read = bool(payload.get("read", True))
+        if type_ == "emails.archive":
+            title, verb = "Archive email", "Archive"
+            intro = "Lumen will archive this message in your Gmail account."
+        else:
+            title = "Mark email as read" if read else "Mark email as unread"
+            verb = "Mark read" if read else "Mark unread"
+            intro = "Lumen will update this message's read state in your Gmail account."
+        confirm_id = self._confirm.begin()
+        yield {"confirm_request": {
+                   "icon": "✉", "title": title, "intro": intro,
+                   "rows": [("From", row["sender"]), ("Subject", row["subject"])],
+                   "confirm_label": verb},
+               "confirm_id": confirm_id}
+        if not await self._confirm.wait(confirm_id):
+            yield {"result": {"ok": False, "message": "Cancelled — nothing was changed."}}
+            return
+        if type_ == "emails.archive":
+            ok = await self._mail.archive(row["id"])
+            done = "Archived." if ok else "Couldn't reach Gmail — nothing was changed."
+        else:
+            ok = await self._mail.mark_read(row["id"], read)
+            done = ("Updated." if ok
+                    else "Couldn't reach Gmail — nothing was changed.")
+        yield {"result": {"ok": ok, "message": done}}
 
     async def _chat_with_tools(self, message: str, conv_id: int | None = None):
         try:

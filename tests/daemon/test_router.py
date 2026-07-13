@@ -60,6 +60,51 @@ class FakeStore:
         return self.rows
 
 
+class FakeMailStore:
+    def __init__(self):
+        self.rows = [{"id": "m1", "sender": "Ada <a@x.com>", "subject": "Engines",
+                      "snippet": "s", "body": "b", "labels": ["INBOX", "UNREAD"],
+                      "received_at": "2026-07-10T10:00:00+00:00", "is_read": False,
+                      "attachments": [], "thread_id": "t1", "recipients": "me"}]
+
+    def list_page(self, filter="inbox", limit=50, offset=0):
+        return self.rows
+
+    def search(self, query, limit=50):
+        return self.rows if "engine" in query.lower() else []
+
+    def get(self, mid):
+        return next((r for r in self.rows if r["id"] == mid), None)
+
+    def unread(self, limit=10):
+        return [r for r in self.rows if not r["is_read"]]
+
+    def counts(self):
+        return {"total": 1, "unread": 1}
+
+
+class FakeMailSync:
+    connected, syncing = True, False
+
+    def __init__(self):
+        self.archived, self.marked, self.synced = [], [], 0
+
+    def last_sync(self):
+        return "2026-07-12T13:00:00"
+
+    async def sync_once(self):
+        self.synced += 1
+        return True
+
+    async def archive(self, mid):
+        self.archived.append(mid)
+        return True
+
+    async def mark_read(self, mid, read):
+        self.marked.append((mid, read))
+        return True
+
+
 async def collect(router, type_, payload):
     return [r async for r in router.handle(type_, payload)]
 
@@ -1260,3 +1305,72 @@ async def test_create_chat_tool_side_failure_reports_not_created():
     await _aio.wait_for(task, timeout=2)
     assert events[-1]["result"]["created"] is False
     assert cal.synced == 0            # nothing created -> no eager re-sync
+
+
+# ---- Task 9: emails.* one-shots + confirm-gated archive/mark-read ----
+
+
+async def test_emails_list_search_get_unread():
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.list", {})
+    assert out[-1]["result"]["connected"] is True
+    assert out[-1]["result"]["emails"][0]["id"] == "m1"
+    out = await collect(router, "emails.search", {"query": "engines"})
+    assert out[-1]["result"]["emails"][0]["id"] == "m1"
+    out = await collect(router, "emails.get", {"id": "m1"})
+    assert out[-1]["result"]["subject"] == "Engines"
+    out = await collect(router, "emails.get", {"id": "nope"})
+    assert "error" in out[-1]
+    out = await collect(router, "emails.unread", {})
+    assert len(out[-1]["result"]["emails"]) == 1
+
+
+async def test_mail_refresh_triggers_sync():
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "mail.refresh", {})
+    assert sync.synced == 1 and "result" in out[-1]
+
+
+async def test_emails_archive_confirm_approve_and_decline():
+    store, sync = FakeMailStore(), FakeMailSync()
+    broker = ConfirmBroker()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store,
+                    confirm=broker)
+
+    async def drive_mail(approved):
+        events = []
+        async for ev in router.handle("emails.archive", {"id": "m1"}):
+            events.append(ev)
+            if "confirm_request" in ev:
+                broker.resolve(ev["confirm_id"], approved)
+        return events
+
+    events = await drive_mail(True)
+    assert events[0]["confirm_request"]["title"] == "Archive email"
+    assert ("From", "Ada <a@x.com>") in [tuple(r) for r in events[0]["confirm_request"]["rows"]]
+    assert events[-1]["result"]["ok"] is True and sync.archived == ["m1"]
+
+    sync.archived.clear()
+    events = await drive_mail(False)
+    assert events[-1]["result"]["ok"] is False and sync.archived == []
+
+
+async def test_emails_mark_read_confirmed():
+    store, sync = FakeMailStore(), FakeMailSync()
+    broker = ConfirmBroker()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store,
+                    confirm=broker)
+    events = []
+    async for ev in router.handle("emails.mark_read", {"id": "m1", "read": True}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], True)
+    assert events[-1]["result"]["ok"] is True and sync.marked == [("m1", True)]
+
+
+async def test_emails_unavailable_without_mail():
+    router = Router(FakeLLM(), FakeStore())
+    out = await collect(router, "emails.list", {})
+    assert out[-1] == {"error": "email unavailable"}
