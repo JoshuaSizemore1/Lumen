@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from lumen.daemon.llm.book_recs import recommend
+from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
                                             revise_email)
@@ -57,6 +58,11 @@ CAL_HINT = re.compile(
     r"weeks?|weekends?|today|tomorrow|tonight|upcoming|plans?)\b",
     re.IGNORECASE,
 )
+
+# The briefing route must be checked ahead of every other chat path: "my day"
+# phrasings also match CAL_HINT, and the plain path with calendar context would
+# otherwise steal them and answer without todos/mail.
+BRIEFING_HINT = re.compile(r"\b(?:brief(?:ing)?|my day)\b", re.IGNORECASE)
 
 EVENT_HINT = re.compile(
     r"\b(book|schedule|create|add|set ?up|put)\b"
@@ -348,6 +354,17 @@ class Router:
                 yield {"error": "conversations.delete needs {id}"}
                 return
             yield {"result": {"ok": True}}
+        elif type_ == "briefing.today":
+            # Dashboard one-shot: same pipeline as the chat route, collected.
+            text: list[str] = []
+            try:
+                async for chunk in compose_briefing(self._llm,
+                                                    self._briefing_sections()):
+                    text.append(chunk)
+            except LLMUnavailable as e:
+                yield {"error": str(e)}
+                return
+            yield {"result": {"text": "".join(text)}}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
@@ -529,7 +546,9 @@ class Router:
     async def _chat(self, message: str, conv_id: int | None):
         """Pick the chat sub-path, stream it through, and write-through the
         assistant turn (with any tool names) once it completes."""
-        if (self._confirm is not None and self._mail is not None
+        if BRIEFING_HINT.search(message):
+            sub = self._briefing_chat()
+        elif (self._confirm is not None and self._mail is not None
                 and COMPOSE_HINT.search(message)):
             sub = self._compose_email_chat(message)
         elif (self._confirm is not None and self._bridge is not None
@@ -576,6 +595,32 @@ class Router:
             model=self._pick_model(request or "recommend books"),
             tool_log=self._tool_log, request=request,
             max_iterations=self._max_iterations)
+
+    def _briefing_sections(self) -> str:
+        """Today's data from the three caches — unavailable subsystems get
+        their honest markers instead of being skipped."""
+        now = datetime.now().astimezone()
+        today = now.date().isoformat()
+        events = (self._calendar.list_range(today, today)
+                  if self._calendar is not None else [])
+        if self._mail_store is not None:
+            unread, counts = self._mail_store.unread(limit=8), self._mail_store.counts()
+        else:
+            unread, counts = [], {"total": 0, "unread": 0}
+        return build_sections(
+            events, self._todos.open_todos(), unread, counts, now,
+            cal_connected=(self._calendar is not None and self._calendar.connected),
+            mail_connected=(self._mail is not None and self._mail.connected),
+            mail_syncing=(self._mail is not None and self._mail.syncing))
+
+    async def _briefing_chat(self):
+        try:
+            async for chunk in compose_briefing(self._llm, self._briefing_sections()):
+                yield {"chunk": chunk}
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        yield {"done": True}
 
     async def _recommend_chat(self, message: str):
         try:

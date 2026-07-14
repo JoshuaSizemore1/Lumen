@@ -1446,6 +1446,82 @@ async def test_calendar_delete_tool_side_failure_reports_not_deleted():
     assert cal.synced == 0            # nothing deleted -> no eager re-sync
 
 
+# ---- morning briefing (Phase 8 feature 1) ----
+
+def test_briefing_hint_vocabulary():
+    from lumen.daemon.router import BRIEFING_HINT
+    for msg in ("what's my day look like", "brief me", "morning briefing",
+                "briefing", "how's my day looking", "what does my day look like",
+                "start my day"):
+        assert BRIEFING_HINT.search(msg), msg
+    for msg in ("where's my briefcase", "schedule a meeting with sam",
+                "what's due today", "any meetings tomorrow?"):
+        assert not BRIEFING_HINT.search(msg), msg
+
+
+def briefing_router(llm=None, cal=None, mail_store=None):
+    return Router(llm or FakeLLM(chunks=("Good ", "morning.")),
+                  FakeStore(rows=[{"id": 1, "text": "buy milk",
+                                   "due_date": "2020-01-01", "completed": False,
+                                   "tags": []}]),
+                  calendar=cal if cal is not None else FakeCal(rows=[CAL_ROW]),
+                  mail=FakeMailSync(),
+                  mail_store=mail_store if mail_store is not None else FakeMailStore())
+
+
+async def test_briefing_chat_streams_and_carries_sections():
+    llm = FakeLLM(chunks=("Good ", "morning."))
+    router = briefing_router(llm=llm)
+    out = await collect(router, "chat", {"message": "what's my day look like"})
+    assert "".join(e.get("chunk", "") for e in out) == "Good morning."
+    assert out[-1] == {"done": True}
+    user = llm.messages[-1]["content"]
+    for marker in ("CALENDAR TODAY", "TODOS DUE", "UNREAD MAIL",
+                   "Standup", "buy milk", "Engines"):
+        assert marker in user, marker
+
+
+async def test_briefing_beats_calendar_context_route():
+    # "my day" phrasings hit CAL_HINT too; the briefing route must win.
+    llm = FakeLLM(chunks=("hi",))
+    router = briefing_router(llm=llm)
+    await collect(router, "chat", {"message": "brief me on today"})
+    from lumen.daemon.llm.briefing import SYSTEM
+    assert llm.messages[0]["content"] == SYSTEM
+
+
+async def test_briefing_missing_subsystems_answer_honestly():
+    llm = FakeLLM(chunks=("ok",))
+    router = Router(llm, FakeStore())    # no calendar, no mail wired
+    out = await collect(router, "chat", {"message": "brief me"})
+    assert out[-1] == {"done": True}
+    user = llm.messages[-1]["content"]
+    assert "Calendar isn't connected" in user
+    assert "Gmail isn't connected" in user
+
+
+async def test_briefing_today_one_shot_collects_text():
+    router = briefing_router()
+    out = await collect(router, "briefing.today", {})
+    assert out[0]["result"]["text"] == "Good morning."
+
+
+async def test_briefing_today_llm_down_is_an_error():
+    router = briefing_router(llm=FakeLLM(fail=True))
+    out = await collect(router, "briefing.today", {})
+    assert "error" in out[0]
+
+
+async def test_briefing_turn_persists_to_conversation(tmp_path):
+    conv = conv_store(tmp_path)
+    llm = FakeLLM(chunks=("Good morning.",))
+    router = Router(llm, FakeStore(), conversations=conv)
+    out = await collect(router, "chat", {"message": "brief me"})
+    cid = next(e["conversation_id"] for e in out if "conversation_id" in e)
+    turns = conv.history(cid)
+    assert turns[-1] == {"role": "assistant", "content": "Good morning."}
+
+
 async def test_generic_tool_loop_never_offers_delete_event():
     seen = {}
 
