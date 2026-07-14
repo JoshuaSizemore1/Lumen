@@ -164,6 +164,42 @@ def test_fetch_calendar_sample_mode_carries_color(qtbot):
     assert all("color" in e and "start_min" in e for e in got["events"])
 
 
+def test_dashboard_briefing_button_fetches_and_shows_panel(qtbot):
+    from lumen.ui_v2.screens.dashboard import DashboardScreen
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = DashboardScreen(st)
+    qtbot.addWidget(sc)
+    assert not sc.brief_panel.isVisibleTo(sc)
+    sc._run_briefing()
+    assert not sc.brief_btn.isEnabled()      # busy state guards double-clicks
+    sc._run_briefing()                       # second click while busy is a no-op
+    cbs = [cb for t, _p, cb in data.requests if t == "briefing.today"]
+    assert len(cbs) == 1
+    cbs[0]({"text": "Good morning. One meeting at 9:30."})
+    assert sc.brief_text.text() == "Good morning. One meeting at 9:30."
+    assert sc.brief_panel.isVisibleTo(sc) and sc.brief_btn.isEnabled()
+    sc._hide_briefing()
+    assert not sc.brief_panel.isVisibleTo(sc)
+
+
+def test_dashboard_briefing_error_unsticks_button(qtbot):
+    from lumen.ui_v2.screens.dashboard import DashboardScreen
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = DashboardScreen(st)
+    qtbot.addWidget(sc)
+    sc._run_briefing()
+    st.status_requested.emit("ollama is not reachable")   # daemon error path
+    assert sc.brief_btn.isEnabled()
+
+
+def test_fetch_briefing_sample_mode_is_synchronous(qtbot):
+    got = []
+    AppState().fetch_briefing(got.append)
+    assert got and "daemon" in got[0]["text"]
+
+
 def test_delete_event_routes_to_daemon(qtbot):
     data = FakeClient()
     st = AppState(data=data)

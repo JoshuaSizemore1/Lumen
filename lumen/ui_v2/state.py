@@ -414,6 +414,13 @@ class AppState(QObject):
                          ("Calendar", "Personal (primary)")],
                 "confirm_label": "Create event", "toast": "✓ Event added to calendar"})
 
+    def fetch_briefing(self, cb) -> None:
+        """cb({text}) — the collected morning briefing (Dashboard button)."""
+        if self._data is not None:
+            self._data.request("briefing.today", {}, cb)
+        else:
+            cb({"text": "Sample mode — the briefing needs the daemon running."})
+
     def delete_event(self, event_id: str, calendar_id: str, cb=None) -> None:
         """External write: the daemon looks the event up in its cache and gates
         the delete behind the confirm overlay before touching Google Calendar."""

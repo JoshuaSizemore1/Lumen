@@ -12,8 +12,8 @@ from .. import theme as T
 from ..calendar_grids import DashDayGrid
 from ..state import AppState
 from ..widgets import (
-    ClickRow, Dot, ElideLabel, TodoCheck, button, clear_layout, hbox, hline,
-    label, scroll, tag_chip, vbox,
+    ClickLabel, ClickRow, Dot, ElideLabel, TodoCheck, button, clear_layout,
+    hbox, hline, label, scroll, tag_chip, vbox,
 )
 
 
@@ -44,12 +44,30 @@ class DashboardScreen(QWidget):
         head.addWidget(label(date.today().strftime("%a · %b %-d"), 17, T.TEXT_PRIMARY, 600))
         head.addWidget(label("today at a glance", 11, T.TEXT_DIM))
         head.addStretch(1)
+        self.brief_btn = button("☀ Briefing", "ghost-accent", px=11)
+        self.brief_btn.setFixedHeight(28)
+        self.brief_btn.clicked.connect(self._run_briefing)
+        head.addWidget(self.brief_btn)
         sync = hbox(s=6)
         sync.addWidget(Dot(6, T.OK))
         sync.addWidget(label("local", 10, T.TEXT_DIM))
         head.addLayout(sync)
         v.addLayout(head)
         v.addSpacing(16)
+
+        # briefing panel — hidden until the button runs, dismissible
+        self.brief_panel = QWidget()
+        bp = hbox(self.brief_panel, (14, 12, 14, 12), 10)
+        self.brief_text = label("", 13, T.TEXT_PRIMARY, sans=True, wrap=True)
+        bp.addWidget(self.brief_text, 1)
+        bp.addWidget(ClickLabel("✕", 12, T.TEXT_FAINT, self._hide_briefing,
+                                "Dismiss"), 0, Qt.AlignmentFlag.AlignTop)
+        self.brief_panel.setStyleSheet(
+            f"background: {T.BG_DIALOG}; border: 1px solid {T.BORDER_SOFT}; "
+            f"border-radius: 9px;")
+        self.brief_panel.hide()
+        v.addWidget(self.brief_panel)
+        v.addSpacing(0)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -94,6 +112,8 @@ class DashboardScreen(QWidget):
         root = vbox(self)
         root.addWidget(scroll(inner), 1)
 
+        self._brief_busy = False
+        state.status_requested.connect(self._briefing_reset)  # daemon errors unstick the button
         state.todos_changed.connect(self.populate_todos)
         state.mails_changed.connect(self.populate_mail)
         self.populate_todos()
@@ -103,6 +123,28 @@ class DashboardScreen(QWidget):
     def showEvent(self, ev):
         super().showEvent(ev)
         self._fetch_calendar()
+
+    # ---- briefing ----------------------------------------------------------
+    def _run_briefing(self):
+        if self._brief_busy:
+            return
+        self._brief_busy = True
+        self.brief_btn.setText("☀ composing…")
+        self.brief_btn.setEnabled(False)
+        self.state.fetch_briefing(self._show_briefing)
+
+    def _show_briefing(self, result: dict):
+        self._briefing_reset()
+        self.brief_text.setText(result.get("text") or "(no briefing)")
+        self.brief_panel.show()
+
+    def _briefing_reset(self, _msg: str = ""):
+        self._brief_busy = False
+        self.brief_btn.setText("☀ Briefing")
+        self.brief_btn.setEnabled(True)
+
+    def _hide_briefing(self):
+        self.brief_panel.hide()
 
     def _fetch_calendar(self):
         today = date.today().isoformat()
