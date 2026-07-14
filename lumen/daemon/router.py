@@ -12,6 +12,7 @@ from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from lumen.daemon.connectors.capture import classify
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -63,6 +64,16 @@ CAL_HINT = re.compile(
 # phrasings also match CAL_HINT, and the plain path with calendar context would
 # otherwise steal them and answer without todos/mail.
 BRIEFING_HINT = re.compile(r"\b(?:brief(?:ing)?|my day)\b", re.IGNORECASE)
+
+# NL todo add / mark-done: precise anchored shapes, checked ahead of even the
+# briefing route ("mark the briefing todo done" must not open a briefing).
+TODO_ADD = re.compile(r"^\s*(?:add\s+(?:a\s+)?todo:?|remind me to)\s+(.+)$",
+                      re.IGNORECASE | re.DOTALL)
+MARK_DONE = re.compile(r"^\s*(?:mark|check\s*off|tick)\b(.+?)(?:\bas\s+)?"
+                       r"\b(?:done|completed?|finished)\b", re.IGNORECASE)
+_MATCH_STOP = frozenset(
+    "the a an my that this one todo task to as off done complete completed "
+    "finished it mark please".split())
 
 EVENT_HINT = re.compile(
     r"\b(book|schedule|create|add|set ?up|put)\b"
@@ -318,6 +329,18 @@ class Router:
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
             message = payload.get("message", "")
+            # Quick capture (launcher only sets capture_ok): note-shaped text
+            # becomes a todo instead of a chat turn — before any conversation
+            # is created, so a captured note never litters the history.
+            if payload.get("capture_ok") and await self._is_capture(message):
+                try:
+                    rows = self._todos.add(message)
+                except ValueError:
+                    rows = []
+                if rows:
+                    yield {"captured": max(rows, key=lambda r: r["id"])}
+                    yield {"done": True}
+                    return
             conv_id = payload.get("conversation_id")
             if self._conv is not None:
                 if conv_id is None:
@@ -546,7 +569,11 @@ class Router:
     async def _chat(self, message: str, conv_id: int | None):
         """Pick the chat sub-path, stream it through, and write-through the
         assistant turn (with any tool names) once it completes."""
-        if BRIEFING_HINT.search(message):
+        if m := TODO_ADD.match(message):
+            sub = self._nl_add_chat(m.group(1).strip())
+        elif m := MARK_DONE.match(message):
+            sub = self._mark_done_chat(m.group(1))
+        elif BRIEFING_HINT.search(message):
             sub = self._briefing_chat()
         elif (self._confirm is not None and self._mail is not None
                 and COMPOSE_HINT.search(message)):
@@ -595,6 +622,61 @@ class Router:
             model=self._pick_model(request or "recommend books"),
             tool_log=self._tool_log, request=request,
             max_iterations=self._max_iterations)
+
+    async def _is_capture(self, message: str) -> bool:
+        verdict = classify(message)
+        if verdict != "ambiguous":
+            return verdict == "capture"
+        # one tiny fast-model opinion; unreachable model → capture (a wrong
+        # capture costs one Undo click, a lost note costs the note)
+        system = ("Decide whether the user's text is a NOTE/TASK they are "
+                  "jotting down to remember, or a MESSAGE addressed to an "
+                  "assistant. Reply with exactly one word: TODO or CHAT.")
+        try:
+            text = ""
+            async for chunk in self._llm.chat(
+                    [{"role": "system", "content": system},
+                     {"role": "user", "content": message}]):
+                text += chunk
+        except LLMUnavailable:
+            return True
+        return "chat" not in text.lower()
+
+    async def _nl_add_chat(self, text: str):
+        """'add a todo: X' / 'remind me to X' from any chat surface."""
+        try:
+            rows = self._todos.add(text)
+        except ValueError as e:
+            yield {"chunk": str(e)}
+            yield {"done": True}
+            return
+        new = max(rows, key=lambda r: r["id"])
+        extra = f" (due {new['due_date']})" if new.get("due_date") else ""
+        tags = f" [{', '.join(new['tags'])}]" if new.get("tags") else ""
+        yield {"chunk": f"Added todo: {new['text']}{extra}{tags}"}
+        yield {"done": True}
+
+    async def _mark_done_chat(self, query: str):
+        """'mark X done': fuzzy-match open todos; one match toggles, several
+        list themselves instead of guessing, none answers honestly."""
+        words = [w for w in re.findall(r"[\w']+", query.lower())
+                 if w not in _MATCH_STOP]
+        matches = []
+        if words:
+            for t in self._todos.open_todos():
+                todo_words = set(re.findall(r"[\w']+", t["text"].lower()))
+                if all(w in todo_words for w in words):
+                    matches.append(t)
+        if len(matches) == 1:
+            self._todos.toggle(matches[0]["id"], True)
+            yield {"chunk": f"Marked done: {matches[0]['text']}"}
+        elif matches:
+            lines = ["Which one? Several todos match:"]
+            lines += [f"• {t['text']}" for t in matches]
+            yield {"chunk": "\n".join(lines)}
+        else:
+            yield {"chunk": "No open todo matches that — nothing was changed."}
+        yield {"done": True}
 
     def _briefing_sections(self) -> str:
         """Today's data from the three caches — unavailable subsystems get

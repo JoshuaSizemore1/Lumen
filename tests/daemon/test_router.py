@@ -1446,6 +1446,122 @@ async def test_calendar_delete_tool_side_failure_reports_not_deleted():
     assert cal.synced == 0            # nothing deleted -> no eager re-sync
 
 
+# ---- quick capture (Phase 8 feature 2) ----
+
+def capture_store(created_id=9):
+    """FakeStore whose rows already contain the 'created' todo (real add
+    returns the fresh full list)."""
+    return FakeStore(rows=[{"id": created_id, "text": "buy milk",
+                            "due_date": "2026-07-14", "completed": False,
+                            "tags": ["errands"]}])
+
+
+async def test_capture_ok_fragment_becomes_todo_not_chat(tmp_path):
+    conv = conv_store(tmp_path)
+    store = capture_store()
+    router = Router(FakeLLM(), store, conversations=conv)
+    out = await collect(router, "chat", {"message": "buy milk @tomorrow #errands",
+                                         "capture_ok": True})
+    assert ("add", "buy milk @tomorrow #errands") in store.calls
+    assert out[0]["captured"]["id"] == 9
+    assert out[-1] == {"done": True}
+    assert not any("chunk" in e for e in out)
+    assert conv.list_recent() == []      # a captured note is not a conversation
+
+
+async def test_capture_ok_question_still_chats():
+    store = capture_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "what's due this week?", "capture_ok": True})
+    assert any("chunk" in e for e in out)
+    assert not any("captured" in e for e in out)
+    assert store.calls == []
+
+
+async def test_fragment_without_capture_ok_stays_chat():
+    store = capture_store()
+    out = await collect(Router(FakeLLM(), store), "chat", {"message": "buy milk"})
+    assert any("chunk" in e for e in out)
+    assert store.calls == []
+
+
+AMBIGUOUS = ("the thing about the garage door that keeps sticking when it "
+             "rains and needs some kind of adjustment before winter comes")
+
+
+async def test_ambiguous_asks_llm_todo_verdict_captures():
+    store = capture_store()
+    router = Router(FakeLLM(chunks=("TODO",)), store)
+    out = await collect(router, "chat", {"message": AMBIGUOUS, "capture_ok": True})
+    assert any("captured" in e for e in out)
+
+
+async def test_ambiguous_llm_chat_verdict_chats():
+    store = capture_store()
+    router = Router(FakeLLM(chunks=("CHAT", "hello", "there")), store)
+    out = await collect(router, "chat", {"message": AMBIGUOUS, "capture_ok": True})
+    assert not any("captured" in e for e in out)
+    assert any("chunk" in e for e in out)
+
+
+async def test_ambiguous_llm_down_falls_back_to_capture():
+    store = capture_store()
+    router = Router(FakeLLM(fail=True), store)
+    out = await collect(router, "chat", {"message": AMBIGUOUS, "capture_ok": True})
+    assert any("captured" in e for e in out)
+
+
+async def test_nl_add_todo_works_from_any_surface():
+    store = capture_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "add a todo: call the bank @friday"})
+    assert ("add", "call the bank @friday") in store.calls
+    assert any("Added todo" in e.get("chunk", "") for e in out)
+    assert out[-1] == {"done": True}
+
+
+async def test_nl_remind_me_adds_too():
+    store = capture_store()
+    await collect(Router(FakeLLM(), store), "chat",
+                  {"message": "remind me to water the plants @tomorrow"})
+    assert ("add", "water the plants @tomorrow") in store.calls
+
+
+def done_store():
+    return FakeStore(rows=[
+        {"id": 1, "text": "buy milk", "due_date": None, "completed": False,
+         "tags": []},
+        {"id": 2, "text": "call the dentist", "due_date": None,
+         "completed": False, "tags": []},
+        {"id": 3, "text": "call the bank", "due_date": None,
+         "completed": False, "tags": []}])
+
+
+async def test_mark_done_single_match_toggles():
+    store = done_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "mark buy milk as done"})
+    assert ("toggle", 1, True) in store.calls
+    assert any("buy milk" in e.get("chunk", "") for e in out)
+
+
+async def test_mark_done_multiple_matches_lists_instead_of_guessing():
+    store = done_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "mark the call one done"})
+    assert not any(c[0] == "toggle" for c in store.calls)
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "call the dentist" in text and "call the bank" in text
+
+
+async def test_mark_done_no_match_is_honest():
+    store = done_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "mark mow the lawn done"})
+    assert not any(c[0] == "toggle" for c in store.calls)
+    assert any("match" in e.get("chunk", "").lower() for e in out)
+
+
 # ---- morning briefing (Phase 8 feature 1) ----
 
 def test_briefing_hint_vocabulary():
