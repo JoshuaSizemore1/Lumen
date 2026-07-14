@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from lumen.daemon.connectors.capture import classify
-from lumen.daemon.llm import commitments
+from lumen.daemon.llm import commitments, meeting_prep
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -75,6 +75,14 @@ MARK_DONE = re.compile(r"^\s*(?:mark|check\s*off|tick)\b(.+?)(?:\bas\s+)?"
 _MATCH_STOP = frozenset(
     "the a an my that this one todo task to as off done complete completed "
     "finished it mark please".split())
+
+# Meeting prep: "prep (me) for X" shapes. Bare "prepare" stays out so
+# "prepare a speech" doesn't run the pipeline; a matched request with no
+# cache hit answers "I don't see that meeting", never a guess.
+PREP_HINT = re.compile(r"\bprep\b|\bprepare\s+(?:me\s+)?for\b", re.IGNORECASE)
+
+# The prep pipeline reads this many days ahead when resolving "the standup".
+PREP_WINDOW_DAYS = 7
 
 # Commitment questions run the sent-mail scan and answer with the pending
 # suggestions — a pull, never a background job.
@@ -620,6 +628,8 @@ class Router:
             sub = self._nl_add_chat(m.group(1).strip())
         elif m := MARK_DONE.match(message):
             sub = self._mark_done_chat(m.group(1))
+        elif self._calendar is not None and PREP_HINT.search(message):
+            sub = self._prep_chat(message)
         elif (self._suggestions is not None and self._mail_store is not None
                 and PROMISE_HINT.search(message)):
             sub = self._commitments_chat()
@@ -771,6 +781,34 @@ class Router:
     async def _briefing_chat(self):
         try:
             async for chunk in compose_briefing(self._llm, self._briefing_sections()):
+                yield {"chunk": chunk}
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        yield {"done": True}
+
+    async def _prep_chat(self, message: str):
+        """Meeting prep: deterministic event lookup + per-attendee mirror
+        history, one narration pass. No cache hit answers honestly."""
+        now = datetime.now().astimezone()
+        events = self._calendar.list_range(
+            now.date().isoformat(),
+            (now.date() + timedelta(days=PREP_WINDOW_DAYS)).isoformat())
+        event = meeting_prep.find_event(events, message, now)
+        if event is None:
+            yield {"chunk": ("I don't see that meeting on your calendar in the "
+                             f"next {PREP_WINDOW_DAYS} days.")}
+            yield {"done": True}
+            return
+        history = None
+        if self._mail_store is not None:
+            history = {a["email"]: self._mail_store.involving(
+                           a["email"], limit=meeting_prep.MAILS_PER_ATTENDEE)
+                       for a in event.get("attendees") or []
+                       if a.get("email") and not a.get("self")}
+        data = meeting_prep.build_prep_data(event, history, now)
+        try:
+            async for chunk in meeting_prep.compose_prep(self._llm, data):
                 yield {"chunk": chunk}
         except LLMUnavailable as e:
             yield {"error": str(e)}

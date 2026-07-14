@@ -66,6 +66,7 @@
 ## Features 4–8 (tasks firmed when each starts)
 
 - **4. Meeting prep** — `daemon/llm/meeting_prep.py`: event lookup by fuzzy title/time from cache → attendee addresses → mirror search per attendee (recent, bounded) → one narration pass with subjects/dates. `PREP_HINT` route. Live-verify with a real upcoming event.
+  **DONE 2026-07-13** — live-verified over the real socket (real attendee correspondence cited with checkable subjects/dates; no-match honest with no LLM pass). As-built notes in `daily-features.md`.
 - **5. Inbox triage digest** — `daemon/llm/triage.py`: unread + recent inbox (bounded) → bucket digest (needs response / worth reading / noise), every line naming sender+subject present in the input (mechanical grounding check like book recs). `TRIAGE_HINT` route.
 - **6. NL scheduling** — `connectors/free_slots.py`: deterministic slot finder (cache events, 8:00–20:00 local incl. weekends, config `[scheduling]`); `SLOT_HINT` route; proposal phrasing by the model; booking hands off to the existing event-creation confirm flow.
 - **7. Notes Q&A** — embedding model benchmark first (`llm-serving.md` rule; candidates: nomic-embed-text / embeddinggemma via Ollama) → `connectors/notes.py`: mtime-based index of `~/Documents/Notes` (config `[notes]`) into sqlite-vec chunks, on-demand reindex; `NOTES_HINT` route answering with passages + file paths. New dep: sqlite-vec.

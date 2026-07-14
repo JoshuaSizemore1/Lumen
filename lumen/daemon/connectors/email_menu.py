@@ -122,6 +122,17 @@ class EmailStore:
     def unread(self, limit: int = 10) -> list[dict]:
         return self.list_page("unread", limit=limit)
 
+    def involving(self, addr: str, limit: int = 5) -> list[dict]:
+        """Messages to or from `addr`, newest first — meeting-prep retrieval
+        is deterministic (the FTS index doesn't cover addresses)."""
+        esc = (addr.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_"))
+        pat = f"%{esc}%"
+        rows = self._conn.execute(
+            "SELECT * FROM emails WHERE sender LIKE ? ESCAPE '\\' "
+            "OR recipients LIKE ? ESCAPE '\\' "
+            "ORDER BY received_at DESC, id LIMIT ?", (pat, pat, limit)).fetchall()
+        return [self._to_dict(r) for r in rows]
+
     def sent(self, since_iso: str, limit: int = 20) -> list[dict]:
         """SENT messages after `since_iso`, oldest first — the commitment
         scan walks forward so its cursor only ever advances."""

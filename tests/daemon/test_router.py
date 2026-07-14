@@ -2011,3 +2011,73 @@ async def test_compose_response_cancel_never_sends():
 def test_identity_owns_sending():
     from lumen.daemon.router import IDENTITY
     assert "compose window" in IDENTITY
+
+
+# ---- meeting prep (Phase 8 feature 4) ----
+
+def test_prep_hint_vocabulary():
+    from lumen.daemon.router import PREP_HINT
+    for msg_ in ("prep me for my 2pm", "prep for the standup",
+                 "prepare me for the budget review", "meeting prep",
+                 "prep me for the meeting with sam"):
+        assert PREP_HINT.search(msg_), msg_
+    for msg_ in ("what's my day look like", "any meetings tomorrow?",
+                 "prepare a speech about engines", "what's due today"):
+        assert not PREP_HINT.search(msg_), msg_
+
+
+PREP_ROW = {"id": "p1", "calendar_id": "primary", "calendar_name": "Work",
+            "color": "#7986cb", "title": "Budget review",
+            "start_at": "2099-01-01T14:00:00+00:00",
+            "end_at": "2099-01-01T15:00:00+00:00", "all_day": False,
+            "location": None, "description": None,
+            "attendees": [{"email": "a@x.com", "name": "Ada", "self": False}],
+            "status": "confirmed"}
+
+
+class PrepMailStore(FakeMailStore):
+    def involving(self, addr, limit=5):
+        return self.rows if addr == "a@x.com" else []
+
+
+def prep_router(llm=None, cal=None, mail_store=PrepMailStore()):
+    return Router(llm or FakeLLM(chunks=("brief",)), FakeStore(),
+                  calendar=cal if cal is not None else FakeCal(rows=[PREP_ROW]),
+                  mail=FakeMailSync(), mail_store=mail_store)
+
+
+async def test_prep_chat_streams_with_event_and_history():
+    llm = FakeLLM(chunks=("Here's ", "the brief."))
+    router = prep_router(llm=llm)
+    out = await collect(router, "chat", {"message": "prep me for the budget review"})
+    assert "".join(e.get("chunk", "") for e in out) == "Here's the brief."
+    assert out[-1] == {"done": True}
+    from lumen.daemon.llm.meeting_prep import SYSTEM
+    assert llm.messages[0]["content"] == SYSTEM
+    user = llm.messages[-1]["content"]
+    assert "Budget review" in user and "Engines" in user
+
+
+async def test_prep_chat_no_match_is_honest_without_llm():
+    llm = FakeLLM()
+    router = prep_router(llm=llm)
+    out = await collect(router, "chat", {"message": "prep me for the offsite"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "don't see" in text
+    assert llm.messages is None            # no narration pass ran
+    assert out[-1] == {"done": True}
+
+
+async def test_prep_chat_without_mail_mirror_still_answers():
+    llm = FakeLLM(chunks=("ok",))
+    router = Router(llm, FakeStore(), calendar=FakeCal(rows=[PREP_ROW]))
+    out = await collect(router, "chat", {"message": "prep me for the budget review"})
+    assert out[-1] == {"done": True}
+    assert "unavailable" in llm.messages[-1]["content"].lower()
+
+
+async def test_prep_chat_without_calendar_falls_through_to_plain():
+    llm = FakeLLM(chunks=("plain",))
+    router = Router(llm, FakeStore())
+    out = await collect(router, "chat", {"message": "prep me for my 2pm"})
+    assert [e for e in out if "chunk" in e] == [{"chunk": "plain"}]

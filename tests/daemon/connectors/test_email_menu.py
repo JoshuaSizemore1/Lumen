@@ -487,3 +487,20 @@ def test_sent_query_walks_forward_from_cursor(tmp_path):
     got = store.sent("2026-07-01T10:00:00+00:00", limit=10)
     assert [m["id"] for m in got] == ["m2", "m4"]              # oldest first, after cursor
     assert store.sent("2026-07-01T10:00:00+00:00", limit=1)[0]["id"] == "m2"
+
+
+def test_involving_matches_either_direction_newest_first(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1, sender="Ada <ada@x.com>", recipients="me@x.com"),
+                  msg(2, sender="Me <me@x.com>", recipients="Ada <ada@x.com>"),
+                  msg(3, sender="Bob <bob@y.com>", recipients="me@x.com")])
+    got = store.involving("ada@x.com")
+    assert [m["id"] for m in got] == ["m2", "m1"]
+    assert store.involving("ada@x.com", limit=1) == [got[0]]
+    assert store.involving("nobody@z.com") == []
+
+
+def test_involving_escapes_like_wildcards(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1, sender="A <a_b@x.com>"), msg(2, sender="B <axb@x.com>")])
+    assert [m["id"] for m in store.involving("a_b@x.com")] == ["m1"]
