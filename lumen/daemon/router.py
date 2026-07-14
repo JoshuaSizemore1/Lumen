@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from lumen.daemon.connectors.capture import classify
-from lumen.daemon.llm import commitments, meeting_prep
+from lumen.daemon.llm import commitments, meeting_prep, triage
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -107,6 +107,14 @@ COMPOSE_HINT = re.compile(
 
 # A compose wait is an edit session, not a confirm click.
 COMPOSE_TIMEOUT_S = 1800.0
+
+# Triage is a pull ("what needs a reply?"), never a push. Checked after
+# COMPOSE so "reply to X saying thanks" still opens the compose popup.
+TRIAGE_HINT = re.compile(
+    r"\btriage\b|\bneeds?\s+(?:a\s+|an\s+|my\s+)?"
+    r"(?:reply|repl(?:y|ies)|response|answer(?:ing)?)\b",
+    re.IGNORECASE,
+)
 
 MAIL_HINT = re.compile(
     r"\b(e-?mails?|inbox|unread|gmail|mail|messages?|newsletters?|senders?)\b",
@@ -638,6 +646,8 @@ class Router:
         elif (self._confirm is not None and self._mail is not None
                 and COMPOSE_HINT.search(message)):
             sub = self._compose_email_chat(message)
+        elif self._mail_store is not None and TRIAGE_HINT.search(message):
+            sub = self._triage_chat()
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and EVENT_HINT.search(message)):
             sub = self._create_event_chat(message)
@@ -785,6 +795,44 @@ class Router:
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
+        yield {"done": True}
+
+    async def _triage_chat(self):
+        """One bucketing pass over unread + recent inbox from the mirror; the
+        digest is rendered from the rows, so names can't be invented."""
+        if self._mail is not None and not self._mail.connected:
+            yield {"chunk": ("Gmail isn't connected yet — run the one-time "
+                             "Google setup first, then I can triage your inbox.")}
+            yield {"done": True}
+            return
+        rows, seen = [], set()
+        for r in (self._mail_store.unread(limit=triage.UNREAD_LIMIT)
+                  + self._mail_store.list_page("inbox", limit=triage.INBOX_LIMIT)):
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                rows.append(r)
+        rows = rows[:triage.MAX_MESSAGES]
+        if not rows:
+            yield {"chunk": ("There's nothing to triage — no unread or recent "
+                             "inbox messages in the mirror.")}
+            yield {"done": True}
+            return
+        buckets: dict = {k: [] for k in triage.BUCKETS}
+        parsed_any = False
+        try:
+            for r in rows:
+                verdict = await triage.classify(self._llm, r)
+                if verdict is not None:
+                    parsed_any = True
+                    buckets[verdict[0]].append((r, verdict[1]))
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if not parsed_any:
+            yield {"chunk": ("I couldn't triage the inbox just now — the "
+                             "model's answers didn't parse. Try again.")}
+        else:
+            yield {"chunk": triage.render_digest(buckets, total=len(rows))}
         yield {"done": True}
 
     async def _prep_chat(self, message: str):

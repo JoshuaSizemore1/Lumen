@@ -2081,3 +2081,82 @@ async def test_prep_chat_without_calendar_falls_through_to_plain():
     router = Router(llm, FakeStore())
     out = await collect(router, "chat", {"message": "prep me for my 2pm"})
     assert [e for e in out if "chunk" in e] == [{"chunk": "plain"}]
+
+
+# ---- inbox triage digest (Phase 8 feature 5) ----
+
+def test_triage_hint_vocabulary():
+    from lumen.daemon.router import TRIAGE_HINT
+    for msg_ in ("triage my inbox", "what needs a reply?",
+                 "which emails need a response", "what needs answering",
+                 "anything need a reply?"):
+        assert TRIAGE_HINT.search(msg_), msg_
+    for msg_ in ("reply to ada's email saying thanks", "any new email?",
+                 "what's my day look like", "send an email to sam"):
+        assert not TRIAGE_HINT.search(msg_), msg_
+
+
+TRIAGE_JSON = '{"bucket": "needs_response", "why": "asks a question"}'
+
+
+async def test_triage_chat_renders_grounded_digest():
+    llm = FakeLLM(chunks=(TRIAGE_JSON,))
+    router = Router(llm, FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore())
+    out = await collect(router, "chat", {"message": "triage my inbox"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "Ada <a@x.com>" in text and "Engines" in text
+    assert "asks a question" in text
+    assert out[-1] == {"done": True}
+    from lumen.daemon.llm.triage import SYSTEM
+    assert llm.messages[0]["content"] == SYSTEM
+
+
+async def test_triage_chat_no_parseable_verdicts_is_honest():
+    llm = FakeLLM(chunks=("I think you should reply to Ada",))
+    router = Router(llm, FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore())
+    out = await collect(router, "chat", {"message": "triage my inbox"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "couldn't" in text.lower()
+    assert "Ada" not in text                     # no half-grounded digest
+
+
+async def test_triage_chat_empty_mirror_is_honest_without_llm():
+    class EmptyMailStore(FakeMailStore):
+        def __init__(self):
+            self.rows = []
+
+        def counts(self):
+            return {"total": 0, "unread": 0}
+
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), mail=FakeMailSync(),
+                    mail_store=EmptyMailStore())
+    out = await collect(router, "chat", {"message": "what needs a reply?"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "no" in text.lower() and llm.messages is None
+
+
+async def test_triage_chat_not_connected_is_honest():
+    class Offline(FakeMailSync):
+        connected = False
+
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), mail=Offline(), mail_store=FakeMailStore())
+    out = await collect(router, "chat", {"message": "triage my inbox"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "connected" in text.lower() and llm.messages is None
+
+
+async def test_compose_still_beats_triage_for_reply_requests():
+    router = compose_router(FakeLLM(('{"to": ["a@x.com"], "subject": "s", '
+                                     '"body": "b", "reply_hint": ""}',)))
+    out = []
+    async for ev in router.handle(
+            "chat", {"message": "reply to ada's email about engines saying "
+                                "thanks, she needs a response"}):
+        out.append(ev)
+        if "compose_request" in ev:
+            router._confirm.resolve(ev["compose_id"], False)
+    assert any("compose_request" in e for e in out)
