@@ -12,7 +12,8 @@ class TodoStore:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
 
-    def add(self, raw: str, today: date | None = None) -> list[dict]:
+    def add(self, raw: str, today: date | None = None,
+            source: str = "manual") -> list[dict]:
         text, due, tags = parse_todo_input(raw, today or date.today())
         if not text:
             raise ValueError("empty todo text")
@@ -20,7 +21,7 @@ class TodoStore:
             "INSERT INTO todos (text, due_date, created_at, source, tags) "
             "VALUES (?, ?, ?, ?, ?)",
             (text, due, datetime.now().isoformat(timespec="seconds"),
-             "manual", json.dumps(tags)),
+             source, json.dumps(tags)),
         )
         self._conn.commit()
         return self.list_all()

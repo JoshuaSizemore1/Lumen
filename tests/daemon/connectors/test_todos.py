@@ -63,3 +63,13 @@ def test_open_todos_excludes_completed_and_orders_by_due(tmp_path):
     done_id = store.add("done @today", today=TODAY)[-1]["id"]
     store.toggle(done_id, True)
     assert [t["text"] for t in store.open_todos()] == ["sooner", "later", "no date"]
+
+
+def test_add_with_source_records_it(tmp_path):
+    from lumen.daemon import db
+    from lumen.daemon.connectors.todos import TodoStore
+    store = TodoStore(db.connect(tmp_path / "src.db"))
+    rows = store.add("send the deck @2026-07-17", source="llm-extracted")
+    assert rows[-1]["source"] == "llm-extracted"
+    rows = store.add("plain one")
+    assert rows[-1]["source"] == "manual"

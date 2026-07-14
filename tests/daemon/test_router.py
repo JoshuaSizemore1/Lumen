@@ -1562,6 +1562,92 @@ async def test_mark_done_no_match_is_honest():
     assert any("match" in e.get("chunk", "").lower() for e in out)
 
 
+# ---- commitment tracking (Phase 8 feature 3) ----
+
+def sugg_router(tmp_path, llm=None, sent_rows=None):
+    from lumen.daemon.connectors.suggestions import SuggestionStore
+    from lumen.daemon.connectors.todos import TodoStore
+    conn = db.connect(tmp_path / "sugg.db")
+    store = SuggestionStore(conn)
+    todos = TodoStore(conn)
+    mail_store = FakeMailStore()
+    mail_store.sent_rows = sent_rows or []
+    mail_store.sent = lambda since, limit=20: [
+        r for r in mail_store.sent_rows if r["received_at"] > since][:limit]
+    router = Router(llm or FakeLLM(), todos, mail=FakeMailSync(),
+                    mail_store=mail_store, suggestions=store)
+    return router, store, todos
+
+
+PROMISE_BODY = "Sure — I'll send the report over Friday.\n\nJosh"
+PROMISE_JSON = ('[{"text": "send the report", "due": "2026-07-17", '
+                '"quote": "I\'ll send the report over Friday"}]')
+
+
+def promise_mail():
+    return {"id": "s1", "subject": "Re: report", "body": PROMISE_BODY,
+            "received_at": "2026-07-12T09:00:00+00:00"}
+
+
+async def test_scan_commitments_one_shot_finds_and_lists(tmp_path):
+    router, store, _todos = sugg_router(
+        tmp_path, llm=FakeLLM(chunks=(PROMISE_JSON,)),
+        sent_rows=[promise_mail()])
+    out = await collect(router, "todos.scan_commitments", {})
+    res = out[0]["result"]
+    assert res["found"] == 1
+    assert res["suggestions"][0]["text"] == "send the report"
+
+
+async def test_accept_suggestion_promotes_to_real_todo(tmp_path):
+    router, store, todos = sugg_router(tmp_path)
+    sid = store.add("send the report", "2026-07-17",
+                    "I'll send the report over Friday", "s1", "Re: report")
+    out = await collect(router, "todos.accept_suggestion", {"id": sid})
+    res = out[0]["result"]
+    assert res["suggestions"] == []
+    new = res["todos"][-1]
+    assert new["text"] == "send the report"
+    assert new["due_date"] == "2026-07-17"
+    assert new["source"] == "llm-extracted"
+
+
+async def test_dismiss_suggestion_buries_it(tmp_path):
+    router, store, _todos = sugg_router(tmp_path)
+    sid = store.add("send the report", None, "q", "s1", "Re: report")
+    out = await collect(router, "todos.dismiss_suggestion", {"id": sid})
+    assert out[0]["result"]["suggestions"] == []
+    assert store.has_email("s1")           # stays buried on re-scan
+
+
+async def test_suggestions_one_shots_validate_and_degrade(tmp_path):
+    router, _store, _todos = sugg_router(tmp_path)
+    out = await collect(router, "todos.accept_suggestion", {"id": 999})
+    assert "not found" in out[0]["error"]
+    out = await collect(router, "todos.accept_suggestion", {})
+    assert "needs {id}" in out[0]["error"]
+    bare = Router(FakeLLM(), FakeStore())
+    out = await collect(bare, "todos.suggestions", {})
+    assert "unavailable" in out[0]["error"]
+
+
+async def test_promise_chat_scans_and_answers(tmp_path):
+    router, _store, _todos = sugg_router(
+        tmp_path, llm=FakeLLM(chunks=(PROMISE_JSON,)),
+        sent_rows=[promise_mail()])
+    out = await collect(router, "chat", {"message": "did I promise anyone anything?"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "send the report" in text and "2026-07-17" in text
+    assert out[-1] == {"done": True}
+
+
+async def test_promise_chat_empty_is_honest(tmp_path):
+    router, _store, _todos = sugg_router(tmp_path)
+    out = await collect(router, "chat", {"message": "any commitments I forgot?"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "no" in text.lower()
+
+
 # ---- morning briefing (Phase 8 feature 1) ----
 
 def test_briefing_hint_vocabulary():

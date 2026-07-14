@@ -122,6 +122,15 @@ class EmailStore:
     def unread(self, limit: int = 10) -> list[dict]:
         return self.list_page("unread", limit=limit)
 
+    def sent(self, since_iso: str, limit: int = 20) -> list[dict]:
+        """SENT messages after `since_iso`, oldest first — the commitment
+        scan walks forward so its cursor only ever advances."""
+        rows = self._conn.execute(
+            "SELECT * FROM emails WHERE (',' || labels || ',') LIKE '%,SENT,%' "
+            "AND received_at > ? ORDER BY received_at, id LIMIT ?",
+            (since_iso, limit)).fetchall()
+        return [self._to_dict(r) for r in rows]
+
     def delete(self, mids: list[str]) -> None:
         with self._conn:
             self._conn.executemany("DELETE FROM emails WHERE id = ?",

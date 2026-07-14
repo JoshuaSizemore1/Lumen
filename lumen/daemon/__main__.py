@@ -12,6 +12,7 @@ from lumen.daemon.connectors.books import BookStore
 from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.gcal import CalendarSync, EventStore
+from lumen.daemon.connectors.suggestions import SuggestionStore
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
 from lumen.daemon.llm.client import OllamaClient
@@ -44,6 +45,7 @@ async def run() -> None:
                     bridge=bridge, confirm=broker, write_gate=write_gate,
                     model_router=model_router, tool_log=tool_log,
                     conversations=ConversationStore(conn),
+                    suggestions=SuggestionStore(conn),
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

@@ -477,3 +477,13 @@ async def test_send_reply_threads_via_mirror_and_message_id(tmp_path):
 async def test_send_api_failure_returns_false(tmp_path):
     _store, sync = make_sync(tmp_path, SendService(fail=True))
     assert await sync.send(["a@x.com"], [], [], "s", "b") is False
+
+
+def test_sent_query_walks_forward_from_cursor(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1, labels=["SENT"]), msg(2, labels=["SENT"]),
+                  msg(3, labels=["INBOX"]),                    # not sent
+                  msg(4, labels=["SENT", "INBOX"])])           # self-send counts
+    got = store.sent("2026-07-01T10:00:00+00:00", limit=10)
+    assert [m["id"] for m in got] == ["m2", "m4"]              # oldest first, after cursor
+    assert store.sent("2026-07-01T10:00:00+00:00", limit=1)[0]["id"] == "m2"

@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls TEXT,                       -- JSON array of tool names, nullable
     created_at TEXT NOT NULL               -- ISO timestamp
 );
+CREATE TABLE IF NOT EXISTS todo_suggestions (  -- LLM-extracted, pending user confirmation; never counted as todos
+    id INTEGER PRIMARY KEY,
+    text TEXT NOT NULL,
+    due_date TEXT,                          -- ISO local date, nullable
+    quote TEXT NOT NULL,                    -- the promise phrase found verbatim in the email
+    email_id TEXT NOT NULL,                 -- mirror message id (dedupe: never re-suggest)
+    subject TEXT,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | dismissed
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS emails (
     id TEXT PRIMARY KEY,                    -- Gmail message id
     thread_id TEXT,

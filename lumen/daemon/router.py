@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from lumen.daemon.connectors.capture import classify
+from lumen.daemon.llm import commitments
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -74,6 +75,11 @@ MARK_DONE = re.compile(r"^\s*(?:mark|check\s*off|tick)\b(.+?)(?:\bas\s+)?"
 _MATCH_STOP = frozenset(
     "the a an my that this one todo task to as off done complete completed "
     "finished it mark please".split())
+
+# Commitment questions run the sent-mail scan and answer with the pending
+# suggestions — a pull, never a background job.
+PROMISE_HINT = re.compile(r"\b(?:promis\w+|commit(?:ted|ments?)|owe[ds]?)\b",
+                          re.IGNORECASE)
 
 EVENT_HINT = re.compile(
     r"\b(book|schedule|create|add|set ?up|put)\b"
@@ -257,7 +263,7 @@ class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
-                 max_iterations=4):
+                 suggestions=None, max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
@@ -270,6 +276,7 @@ class Router:
         self._model_router = model_router
         self._tool_log = tool_log
         self._conv = conversations  # ConversationStore — transcript log + multi-turn state
+        self._suggestions = suggestions  # SuggestionStore — commitment tracking
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -513,6 +520,46 @@ class Router:
                 yield {"result": self._todos.delete(int(payload["id"]))}
             except (KeyError, TypeError, ValueError):
                 yield {"error": "todos.delete needs {id}"}
+        elif type_.startswith("todos.") and type_.endswith(
+                ("suggestions", "scan_commitments", "accept_suggestion",
+                 "dismiss_suggestion")):
+            if self._suggestions is None:
+                yield {"error": "suggestions unavailable"}
+                return
+            if type_ == "todos.suggestions":
+                yield {"result": {"suggestions": self._suggestions.pending()}}
+            elif type_ == "todos.scan_commitments":
+                if self._mail_store is None:
+                    yield {"error": "email mirror unavailable"}
+                    return
+                try:
+                    res = await commitments.scan(self._llm, self._mail_store,
+                                                 self._suggestions)
+                except LLMUnavailable as e:
+                    yield {"error": str(e)}
+                    return
+                yield {"result": {**res,
+                                  "suggestions": self._suggestions.pending()}}
+            elif type_ == "todos.accept_suggestion":
+                try:
+                    row = self._suggestions.accept(int(payload["id"]))
+                except (KeyError, TypeError, ValueError):
+                    yield {"error": "todos.accept_suggestion needs {id}"}
+                    return
+                if row is None:
+                    yield {"error": "suggestion not found"}
+                    return
+                raw = row["text"] + (f" @{row['due_date']}" if row["due_date"] else "")
+                todos = self._todos.add(raw, source="llm-extracted")
+                yield {"result": {"suggestions": self._suggestions.pending(),
+                                  "todos": todos}}
+            else:   # todos.dismiss_suggestion
+                try:
+                    self._suggestions.dismiss(int(payload["id"]))
+                except (KeyError, TypeError, ValueError):
+                    yield {"error": "todos.dismiss_suggestion needs {id}"}
+                    return
+                yield {"result": {"suggestions": self._suggestions.pending()}}
         elif type_.startswith("emails.") or type_ == "mail.refresh":
             if self._mail is None or self._mail_store is None:
                 yield {"error": "email unavailable"}
@@ -573,6 +620,9 @@ class Router:
             sub = self._nl_add_chat(m.group(1).strip())
         elif m := MARK_DONE.match(message):
             sub = self._mark_done_chat(m.group(1))
+        elif (self._suggestions is not None and self._mail_store is not None
+                and PROMISE_HINT.search(message)):
+            sub = self._commitments_chat()
         elif BRIEFING_HINT.search(message):
             sub = self._briefing_chat()
         elif (self._confirm is not None and self._mail is not None
@@ -676,6 +726,29 @@ class Router:
             yield {"chunk": "\n".join(lines)}
         else:
             yield {"chunk": "No open todo matches that — nothing was changed."}
+        yield {"done": True}
+
+    async def _commitments_chat(self):
+        """Scan sent mail (a pull — the user just asked) and answer with the
+        pending suggestions. Accept/dismiss lives in the Todos screen."""
+        try:
+            res = await commitments.scan(self._llm, self._mail_store,
+                                         self._suggestions)
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        pending = self._suggestions.pending()
+        if not pending:
+            yield {"chunk": ("No outstanding commitments found in your sent "
+                             f"mail (scanned {res['scanned']} new messages).")}
+        else:
+            lines = ["Commitments from your sent mail, waiting for your "
+                     "confirmation in the Todos screen:"]
+            for s in pending:
+                due = f" (due {s['due_date']})" if s["due_date"] else ""
+                src = f" — from “{s['subject']}”" if s["subject"] else ""
+                lines.append(f"• {s['text']}{due}{src}")
+            yield {"chunk": "\n".join(lines)}
         yield {"done": True}
 
     def _briefing_sections(self) -> str:
