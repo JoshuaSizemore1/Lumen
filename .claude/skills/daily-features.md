@@ -5,6 +5,8 @@ These are user-facing behaviors that compose across the email, calendar, and tod
 ## Morning briefing
 One query ("what's my day look like") pulls today's calendar, unread/priority email, and due todos into a single summary. Good first feature to build — it exercises all three connectors in one request and validates the router's ability to fan out to multiple tools and merge results.
 
+**Built 2026-07-13, live-verified.** As built: no tool fan-out — `daemon/llm/briefing.py` assembles the three caches deterministically (`build_sections`: explicit empty + not-connected + still-syncing markers per section) and one fast-model pass narrates it (`compose_briefing`; system prompt forbids padding/invention). `BRIEFING_HINT` (`brief(ing)?`/"my day") is checked **ahead of every other chat route** — "my day" phrasings also match `CAL_HINT`, and the plain path with calendar-only context would otherwise steal them. `briefing.today` is the collected one-shot behind the Dashboard "☀ Briefing" button (busy-guarded, dismissible panel; daemon errors unstick it via `status_requested`). Verified over the real socket: chat + one-shot both named the real event, real unread mail, honest "none due" todos. Residual: the 4B model narrates list-ishly (reproduces every unread line) — acceptable; tighten the system prompt if it grates.
+
 ## Commitment tracking
 Scans sent email for things you committed to ("I'll send that over Friday") and surfaces them as suggested todos. Reuses the existing `llm-extracted` source pattern from `todo-system.md` — never auto-commits these, always surfaces for confirmation like any other LLM-extracted todo.
 

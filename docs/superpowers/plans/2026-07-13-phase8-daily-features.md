@@ -22,20 +22,20 @@
 ### Task 1.1: `daemon/llm/briefing.py`
 **Produces:** `build_sections(events, todos, unread, counts, now, *, cal_connected, mail_connected, mail_syncing) -> str` — deterministic data block: three labeled sections (CALENDAR TODAY / TODOS DUE / UNREAD MAIL), compact one-line items reusing the formatting conventions of the router's context builders, explicit empty markers ("no events today") and honest not-connected/still-syncing markers per section. `SYSTEM` prompt: narrate only what's given, keep it short (a morning read, not a report), flag overdue todos, never invent or pad. `async compose_briefing(llm, sections, model=None)` → yields text chunks (one `llm.chat` pass, system+user).
 **Tests** (`tests/daemon/llm/test_briefing.py`): section markers + empty markers; not-connected/syncing markers; overdue vs due-today labeling; compose passes sections through to the LLM messages and streams chunks.
-- [ ] failing tests → implement → green → commit
+- [x] failing tests → implement → green → commit
 
 ### Task 1.2: Router — `BRIEFING_HINT` chat route + `briefing.today` one-shot
 **Produces:** `BRIEFING_HINT` (brief(ing)?/"my day"/"today look(ing)?"/"day look"/"start my day" shapes) checked **before** the other chat routes (must beat CAL_HINT's plain-path steal); `_briefing_chat` assembles today's events (`calendar.list_range(today, today)`), open todos due/overdue (due_date ≤ today), unread (limit 8) + counts, streams `compose_briefing`; missing subsystems produce the honest section markers, never an error. One-shot `briefing.today {}` → collects the same stream → `{"result": {"text": …}}`; `LLMUnavailable` → error.
 **Tests:** hint vocab (and negatives: "briefcase", "schedule a meeting" still routes to events); route precedence over CAL/TOOL paths; sections reach the LLM; per-subsystem absence (no calendar wired) still answers; one-shot result + LLM-down error.
-- [ ] failing tests → implement → green → commit
+- [x] failing tests → implement → green → commit
 
 ### Task 1.3: UI — Dashboard "Briefing" button
 **Produces:** `AppState.fetch_briefing(cb)` → `briefing.today`; Dashboard header button "☀ Briefing" (live mode only) → busy state → result text shown in a dismissible panel at the top of the dashboard; errors surface as the panel text.
 **Tests** (`tests/ui/test_ui_v2.py`): request routed; result text lands in the panel; busy state guards double-clicks.
-- [ ] failing tests → implement → green → commit
+- [x] failing tests → implement → green → commit
 
 ### Task 1.4: Live verification + docs
-- [ ] Over the real socket: "what's my day look like" streams a briefing naming the real events/todos/unread; `briefing.today` one-shot returns the same; dashboard button shows it (offscreen render). Kill one subsystem's data (e.g. no calendar rows) → honest section. Update `daily-features.md` with as-built notes; commit.
+- [x] Over the real socket: "what's my day look like" streams a briefing naming the real events/todos/unread; `briefing.today` one-shot returns the same; dashboard button shows it (offscreen render). Kill one subsystem's data (e.g. no calendar rows) → honest section. Update `daily-features.md` with as-built notes; commit.
 
 ## Feature 2 — Quick capture
 
