@@ -157,8 +157,10 @@ Compose/send through the confirmation flow. Derive the writing-style ruleset onc
 
 **Success**: drafting an email produces something that actually reads like you wrote it, and nothing sends without explicit confirmation.
 
-## Phase 8 — Cross-cutting daily features
+## Phase 8 — Cross-cutting daily features — DONE (2026-07-14)
 Morning briefing, commitment tracking, meeting prep, inbox triage digest, NL scheduling, local notes Q&A, quick capture, Japanese-study nudge — each composes subsystems that are now stable.
+
+**Verified**: all eight features live over the real socket against real Ollama, real Google data, and the real Manabi DB, each before the next started (features 1–3 on 2026-07-13, 4–8 on 2026-07-13/14; per-feature verification notes in `daily-features.md`, per-feature DONE notes in the plan file). Success criterion held: every pipeline is its own module + router route, and each was explicitly verified to answer honestly with a subsystem absent (briefing without calendar/mail, prep without the mirror, triage/slots/notes/nudge with empty or unconfigured sources) rather than erroring or taking a sibling down. Durable decisions recorded in `daily-features.md` (one as-built block per feature) and `llm-serving.md` (embedding slot: `nomic-embed-text`, benchmarked). Three deviations worth remembering, all forced by live verification on the 4B: triage rebuilt as per-message verdicts (a 20-message batch prompt collapsed); slot proposals rendered deterministically (exact times beat model phrasing); the event attendee gate now drops non-user-typed addresses instead of refusing (the model reliably invents one for "call with Chris" and prompt steering failed). Spec `docs/superpowers/specs/2026-07-13-phase8-daily-features-design.md`, plan `docs/superpowers/plans/2026-07-13-phase8-daily-features.md`. New dep: `sqlite-vec`. Suite 668.
 
 **Read first**: `daily-features.md` (one section per feature, with dependencies), `todo-system.md` (NL capture design).
 
