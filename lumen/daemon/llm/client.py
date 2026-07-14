@@ -129,6 +129,23 @@ class OllamaClient:
                 convo.append({"role": "tool", "content": result_text, "tool_name": name})
         yield {"content": "", "capped": True}
 
+    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        """Embeddings for the notes index. keep_alive rides along — the
+        embedding model idle-unloads like everything else."""
+        body = {"model": model, "input": texts, "keep_alive": self.keep_alive}
+        try:
+            resp = await self._http.post("/api/embed", json=body)
+            if resp.status_code == 404:
+                raise LLMUnavailable(
+                    f"model '{model}' not found — run: ollama pull {model}")
+            resp.raise_for_status()
+            return resp.json().get("embeddings", [])
+        except httpx.HTTPError as e:
+            raise LLMUnavailable(
+                f"Ollama request failed ({type(e).__name__}) at {self.base_url} — is the "
+                "service running? (systemctl --user status ollama)"
+            ) from e
+
     async def warm(self) -> None:
         """Preload the model into RAM (the inverse of unload) so the next real
         request skips the cold load. Fire-and-forget: if Ollama is down or busy,

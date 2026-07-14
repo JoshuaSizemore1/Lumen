@@ -52,6 +52,15 @@ class GoogleConfig:
 
 
 @dataclass(frozen=True)
+class NotesConfig:
+    # Notes Q&A folder (user decision 2026-07-13: ~/Documents/Notes, created
+    # if absent). Markdown/plain text only. Embedding model benchmarked
+    # 2026-07-14 (see llm-serving.md): nomic-embed-text.
+    folder: Path = field(default_factory=lambda: Path.home() / "Documents" / "Notes")
+    embed_model: str = "nomic-embed-text"
+
+
+@dataclass(frozen=True)
 class SchedulingConfig:
     # Proposable hours for NL scheduling (user decision 2026-07-13:
     # 8:00–20:00 local, weekends included).
@@ -101,6 +110,7 @@ class Config:
     google: "GoogleConfig" = field(default_factory=lambda: GoogleConfig())
     sync: "SyncConfig" = field(default_factory=lambda: SyncConfig())
     scheduling: "SchedulingConfig" = field(default_factory=lambda: SchedulingConfig())
+    notes: "NotesConfig" = field(default_factory=lambda: NotesConfig())
 
     @property
     def keep_alive(self) -> str:
@@ -198,6 +208,14 @@ def load_config(path: Path | None = None) -> Config:
         if sync_cfg.gmail_window_months < 1:
             raise SystemExit("lumen: gmail_window_months must be at least 1")
         kwargs["sync"] = sync_cfg
+    notes_raw = data.get("notes")
+    if notes_raw is not None:
+        n_kwargs = {}
+        if "folder" in notes_raw:
+            n_kwargs["folder"] = Path(notes_raw["folder"]).expanduser()
+        if "embed_model" in notes_raw:
+            n_kwargs["embed_model"] = str(notes_raw["embed_model"])
+        kwargs["notes"] = NotesConfig(**n_kwargs)
     sched_raw = data.get("scheduling")
     if sched_raw is not None:
         sched_kwargs = {k: str(sched_raw[k]) for k in ("day_start", "day_end")

@@ -2262,3 +2262,76 @@ async def test_book_followup_without_slot_context_stays_on_normal_paths():
                     bridge=FakeBridge(), model_router=FakeModelRouter())
     out = await collect(router, "chat", {"message": "book the first one"})
     assert not any("confirm_request" in e for e in out)
+
+
+# ---- notes Q&A (Phase 8 feature 7) ----
+
+def test_notes_hint_vocabulary():
+    from lumen.daemon.router import NOTES_HINT
+    for msg_ in ("where did I write down the router password?",
+                 "what do my notes say about the garden",
+                 "search my notes for tax stuff", "check my notes",
+                 "where did I jot down that address"):
+        assert NOTES_HINT.search(msg_), msg_
+    for msg_ in ("list the files in my notes folder",
+                 "what's due today", "any new email?"):
+        assert not NOTES_HINT.search(msg_), msg_
+
+
+class FakeNotes:
+    folder = "/home/u/Documents/Notes"
+
+    def __init__(self, hits=None, files=1):
+        self.hits = hits if hits is not None else []
+        self.files = files
+        self.reindexed = 0
+
+    async def reindex(self):
+        self.reindexed += 1
+        return {"files": self.files, "indexed": 0, "removed": 0}
+
+    async def search(self, query, k=4):
+        return self.hits
+
+    def file_count(self):
+        return self.files
+
+
+NOTE_HIT = {"path": "/home/u/Notes/net.md",
+            "content": "The router password is hunter2.", "distance": 0.1}
+
+
+async def test_notes_chat_reindexes_then_streams_grounded_answer():
+    llm = FakeLLM(chunks=("hunter2",))
+    notes = FakeNotes(hits=[NOTE_HIT])
+    router = Router(llm, FakeStore(), notes=notes)
+    out = await collect(router, "chat",
+                        {"message": "where did I write down the router password?"})
+    assert notes.reindexed == 1
+    assert "".join(e.get("chunk", "") for e in out) == "hunter2"
+    from lumen.daemon.llm.notes_qa import SYSTEM
+    assert llm.messages[0]["content"] == SYSTEM
+    assert "net.md" in llm.messages[1]["content"]
+
+
+async def test_notes_chat_empty_folder_is_honest_without_narration():
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), notes=FakeNotes(files=0))
+    out = await collect(router, "chat", {"message": "what do my notes say about x"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "no notes" in text.lower() and llm.messages is None
+
+
+async def test_notes_chat_no_hits_is_honest():
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), notes=FakeNotes(hits=[], files=3))
+    out = await collect(router, "chat", {"message": "check my notes for dragons"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "nothing" in text.lower() and llm.messages is None
+
+
+async def test_notes_chat_without_store_falls_through():
+    llm = FakeLLM(chunks=("plain",))
+    router = Router(llm, FakeStore())
+    out = await collect(router, "chat", {"message": "what do my notes say about x"})
+    assert [e for e in out if "chunk" in e] == [{"chunk": "plain"}]

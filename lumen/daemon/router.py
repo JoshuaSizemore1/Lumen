@@ -14,7 +14,7 @@ from pathlib import Path
 
 from lumen.daemon.connectors import free_slots
 from lumen.daemon.connectors.capture import classify
-from lumen.daemon.llm import commitments, meeting_prep, triage
+from lumen.daemon.llm import commitments, meeting_prep, notes_qa, triage
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -134,6 +134,16 @@ TRIAGE_HINT = re.compile(
     r"(?:reply|repl(?:y|ies)|response|answer(?:ing)?)\b",
     re.IGNORECASE,
 )
+
+# Notes questions go to the semantic index, not the fs tool loop ("notes"
+# is a TOOL_HINT word). "my notes folder" stays with the file tools.
+NOTES_HINT = re.compile(
+    r"\bwhere did i (?:write|note|jot)\b"
+    r"|\b(?:my|the) notes?\b(?!\s*(?:folder|director|file))"
+    r"|\bnotes? (?:say|mention)\b",
+    re.IGNORECASE,
+)
+NOTES_K = 4
 
 MAIL_HINT = re.compile(
     r"\b(e-?mails?|inbox|unread|gmail|mail|messages?|newsletters?|senders?)\b",
@@ -298,7 +308,8 @@ class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
-                 suggestions=None, scheduling=None, max_iterations=4):
+                 suggestions=None, scheduling=None, notes=None,
+                 max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
@@ -313,6 +324,7 @@ class Router:
         self._conv = conversations  # ConversationStore — transcript log + multi-turn state
         self._suggestions = suggestions  # SuggestionStore — commitment tracking
         self._scheduling = scheduling    # SchedulingConfig — proposable hours
+        self._notes = notes              # NotesStore — semantic notes index
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -677,6 +689,8 @@ class Router:
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and EVENT_HINT.search(message)):
             sub = self._create_event_chat(message)
+        elif self._notes is not None and NOTES_HINT.search(message):
+            sub = self._notes_chat(message)
         elif (self._books is not None and self._bridge is not None
               and REC_HINT.search(message)):
             sub = self._recommend_chat(message)
@@ -883,6 +897,35 @@ class Router:
         data = meeting_prep.build_prep_data(event, history, now)
         try:
             async for chunk in meeting_prep.compose_prep(self._llm, data):
+                yield {"chunk": chunk}
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        yield {"done": True}
+
+    async def _notes_chat(self, message: str):
+        """Semantic notes Q&A: on-demand mtime reindex, KNN over sqlite-vec,
+        one narration pass over the retrieved passages + their paths."""
+        try:
+            await self._notes.reindex()
+            hits = (await self._notes.search(message, k=NOTES_K)
+                    if self._notes.file_count() else [])
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if self._notes.file_count() == 0:
+            yield {"chunk": (f"You have no notes yet — I looked in "
+                             f"{self._notes.folder}. Drop .md or .txt files "
+                             "there and ask again.")}
+            yield {"done": True}
+            return
+        if not hits:
+            yield {"chunk": "Nothing in your notes matches that."}
+            yield {"done": True}
+            return
+        data = notes_qa.build_notes_data(hits)
+        try:
+            async for chunk in notes_qa.compose_answer(self._llm, message, data):
                 yield {"chunk": chunk}
         except LLMUnavailable as e:
             yield {"error": str(e)}
