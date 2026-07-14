@@ -17,6 +17,7 @@ class DaemonClient(QObject):
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
     conversation = pyqtSignal(int)        # daemon assigned this chat a conversation id
+    captured = pyqtSignal(dict)           # quick capture: the todo that was created
     confirm_requested = pyqtSignal(dict)  # payload rows + confirm_id
     compose_requested = pyqtSignal(dict)  # prefilled draft fields + compose_id
 
@@ -100,5 +101,7 @@ class DaemonClient(QObject):
                 self.tool_used.emit(msg["tool_used"])
             elif "conversation_id" in msg:
                 self.conversation.emit(msg["conversation_id"])
+            elif "captured" in msg:
+                self.captured.emit(msg["captured"])
             elif "chunk" in msg:
                 self.chunk.emit(msg["chunk"])

@@ -84,6 +84,7 @@ class LauncherPalette(QFrame):
             self.chat.error.connect(self._on_error)
             self.chat.tool_used.connect(self._on_tool)
             self.chat.conversation.connect(self._on_conversation)
+            self.chat.captured.connect(self._on_captured)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
@@ -198,6 +199,10 @@ class LauncherPalette(QFrame):
         payload = {"message": msg}
         if self._conv_id is not None:   # continue the same thread on follow-ups
             payload["conversation_id"] = self._conv_id
+        else:
+            # first turn only: note-shaped text may become a todo (quick
+            # capture); once a conversation is going, you're chatting
+            payload["capture_ok"] = True
         self.chat.send("chat", payload)
 
     def _open_in_chat(self):
@@ -207,6 +212,26 @@ class LauncherPalette(QFrame):
     def _on_conversation(self, cid: int):
         if self._busy:                  # only claim the id for the turn we launched
             self._conv_id = cid
+
+    def _on_captured(self, todo: dict):
+        """Quick capture landed: the turn's answer is a toast, not prose."""
+        if not self._busy:
+            return
+        self._wake.stop()
+        self._eyebrow("✓ captured", T.OK)
+        extra = f" · due {todo['due_date']}" if todo.get("due_date") else ""
+        tags = f" [{', '.join(todo['tags'])}]" if todo.get("tags") else ""
+        self._acc = f"✓ Added todo: {todo['text']}{extra}{tags}"
+        self.resp_text.setText(self._acc)
+        self._undo_lab = ClickLabel("Undo", 11, T.ACCENT,
+                                    on_click=lambda tid=todo["id"]: self._undo_capture(tid))
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, self._undo_lab)
+        self.state.refresh_todos()      # the Todos screen shows it immediately
+
+    def _undo_capture(self, tid):
+        self.state.delete_todo(tid)
+        self._undo_lab.setText("removed")
+        self._undo_lab._on_click = None
 
     def _on_tool(self, name: str):
         if self._busy and getattr(self, "tool_lab", None) is not None:

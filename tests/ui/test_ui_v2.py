@@ -14,6 +14,7 @@ class FakeClient(QObject):
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
     conversation = pyqtSignal(int)
+    captured = pyqtSignal(dict)
     confirm_requested = pyqtSignal(dict)
     compose_requested = pyqtSignal(dict)
 
@@ -262,7 +263,8 @@ def test_launcher_palette_streams(qtbot):
     qtbot.addWidget(pal)
     pal.input.setText("what's on today")
     pal._submit()
-    assert chat.sent[0] == ("chat", {"message": "what's on today"})
+    assert chat.sent[0] == ("chat", {"message": "what's on today",
+                                     "capture_ok": True})
     chat.chunk.emit("On ")
     chat.chunk.emit("today: standup.")
     assert pal.resp_text.text() == "On today: standup."
@@ -376,7 +378,8 @@ def test_launcher_followup_reuses_conversation_id(qtbot):
     qtbot.addWidget(pal)
     pal.input.setText("first")
     pal._submit()
-    assert chat.sent[0] == ("chat", {"message": "first"})   # first turn: no id yet
+    # first turn: no id yet, capture offered
+    assert chat.sent[0] == ("chat", {"message": "first", "capture_ok": True})
     chat.conversation.emit(2)
     chat.chunk.emit("a")
     chat.done.emit()
@@ -400,6 +403,51 @@ def test_launcher_handoff_emits_open_chat(qtbot):
     chat.done.emit()
     pal._open_in_chat()
     assert seen == [5]
+
+
+# ---- quick capture (launcher) ---------------------------------------------
+
+def test_launcher_first_turn_offers_capture_but_followups_dont(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    chat = FakeClient()
+    pal = LauncherPalette(AppState(), chat)
+    qtbot.addWidget(pal)
+    pal.input.setText("buy milk")
+    pal._submit()
+    assert chat.sent[0] == ("chat", {"message": "buy milk", "capture_ok": True})
+    chat.conversation.emit(4)          # turned out to be a chat after all
+    chat.chunk.emit("a")
+    chat.done.emit()
+    pal.input.setText("second")
+    pal._submit()
+    assert chat.sent[1] == ("chat", {"message": "second", "conversation_id": 4})
+
+
+def test_launcher_captured_renders_toast_and_undo_deletes(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    data, chat = FakeClient(), FakeClient()
+    st = AppState(data=data)
+    pal = LauncherPalette(st, chat)
+    qtbot.addWidget(pal)
+    pal.input.setText("buy milk @tomorrow #errands")
+    pal._submit()
+    chat.captured.emit({"id": 9, "text": "buy milk",
+                        "due_date": "2026-07-14", "tags": ["errands"]})
+    chat.done.emit()
+    assert "Added todo: buy milk" in pal.resp_text.text()
+    assert "2026-07-14" in pal.resp_text.text()
+    assert not pal._busy               # palette ready for the next input
+    data.requests.clear()
+    pal._undo_capture(9)
+    assert data.requests[0][:2] == ("todos.delete", {"id": 9})
+
+
+def test_launcher_captured_when_idle_is_ignored(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    pal = LauncherPalette(AppState(), FakeClient())
+    qtbot.addWidget(pal)
+    pal.chat.captured.emit({"id": 1, "text": "x", "due_date": None, "tags": []})
+    assert pal.resp_text is None       # no turn in flight -> nothing rendered
 
 
 # ---- full Chat screen ----------------------------------------------------
