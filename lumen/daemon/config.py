@@ -52,6 +52,14 @@ class GoogleConfig:
 
 
 @dataclass(frozen=True)
+class SchedulingConfig:
+    # Proposable hours for NL scheduling (user decision 2026-07-13:
+    # 8:00–20:00 local, weekends included).
+    day_start: str = "08:00"
+    day_end: str = "20:00"
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     calendar_poll_minutes: int = 5
     calendar_window_past_days: int = 30
@@ -92,10 +100,19 @@ class Config:
     mcp: "MCPConfig" = field(default_factory=lambda: MCPConfig())
     google: "GoogleConfig" = field(default_factory=lambda: GoogleConfig())
     sync: "SyncConfig" = field(default_factory=lambda: SyncConfig())
+    scheduling: "SchedulingConfig" = field(default_factory=lambda: SchedulingConfig())
 
     @property
     def keep_alive(self) -> str:
         return f"{self.idle_unload_minutes}m"
+
+
+def _parse_hhmm(value: str) -> tuple[int, int]:
+    h, m = value.split(":")
+    h, m = int(h), int(m)
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(value)
+    return h, m
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -181,6 +198,19 @@ def load_config(path: Path | None = None) -> Config:
         if sync_cfg.gmail_window_months < 1:
             raise SystemExit("lumen: gmail_window_months must be at least 1")
         kwargs["sync"] = sync_cfg
+    sched_raw = data.get("scheduling")
+    if sched_raw is not None:
+        sched_kwargs = {k: str(sched_raw[k]) for k in ("day_start", "day_end")
+                        if k in sched_raw}
+        sched = SchedulingConfig(**sched_kwargs)
+        try:
+            start_t = _parse_hhmm(sched.day_start)
+            end_t = _parse_hhmm(sched.day_end)
+        except ValueError:
+            raise SystemExit("lumen: [scheduling] day_start/day_end must be HH:MM")
+        if start_t >= end_t:
+            raise SystemExit("lumen: [scheduling] day_start must be before day_end")
+        kwargs["scheduling"] = sched
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:
         raise SystemExit(

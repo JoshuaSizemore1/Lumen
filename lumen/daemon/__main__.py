@@ -46,6 +46,7 @@ async def run() -> None:
                     model_router=model_router, tool_log=tool_log,
                     conversations=ConversationStore(conn),
                     suggestions=SuggestionStore(conn),
+                    scheduling=cfg.scheduling,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

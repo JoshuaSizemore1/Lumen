@@ -55,9 +55,12 @@ def _parse_local(value: str, tzinfo) -> datetime | None:
     return dt.replace(tzinfo=tzinfo) if dt.tzinfo is None else dt
 
 
-def validate_proposal(p: dict, *, now: datetime,
-                      user_message: str) -> tuple[dict | None, str | None]:
-    """Normalized proposal or (None, honest reason the user can act on)."""
+def validate_proposal(p: dict, *, now: datetime, user_message: str,
+                      context: str = "") -> tuple[dict | None, str | None]:
+    """Normalized proposal or (None, honest reason the user can act on).
+    `context` is the daemon-authored slot-proposal block (plus the user's
+    originating ask) for booking follow-ups — addresses typed there count
+    as user-typed."""
     title = (p.get("title") or "").strip()
     if not title:
         return None, "I couldn't work out a title for the event — try rephrasing."
@@ -91,17 +94,17 @@ def validate_proposal(p: dict, *, now: datetime,
             return None, "That time is in the past."
         start_s, end_s = start.isoformat(), end.isoformat()
 
+    # Drop, don't refuse: an invite may only go to an address the user
+    # literally typed. Names and invented addresses (the 4B reliably guesses
+    # one for "call with Chris" — live 2026-07-14) fall out of the attendee
+    # list instead of sinking the whole event; the confirm dialog then shows
+    # no invite, so what will happen stays fully visible.
     attendees = []
-    msg_folded = (user_message or "").casefold()
+    haystack = f"{user_message or ''}\n{context or ''}".casefold()
     for a in p.get("attendees") or []:
         a = str(a).strip()
-        if not EMAIL.match(a):
-            return None, (f"I can only invite explicit email addresses, and "
-                          f"{a!r} isn't one — say the address itself.")
-        if a.casefold() not in msg_folded:
-            return None, (f"I won't invite {a} — you didn't write that address "
-                          "in your request, so I can't be sure it's right.")
-        attendees.append(a)
+        if EMAIL.match(a) and a.casefold() in haystack:
+            attendees.append(a)
 
     recurrence = (p.get("recurrence") or "").strip() or None
     if recurrence:
@@ -157,12 +160,19 @@ def confirm_payload(p: dict) -> dict:
             "rows": rows, "confirm_label": "Create event"}
 
 
-async def propose_event(llm, message: str, *, now: datetime,
-                        model=None) -> tuple[dict | None, str | None]:
-    """One structured generation on the fast model — no tools, no chain."""
+async def propose_event(llm, message: str, *, now: datetime, model=None,
+                        context: str | None = None) -> tuple[dict | None, str | None]:
+    """One structured generation on the fast model — no tools, no chain.
+    `context` carries a just-proposed slot list so "book the first one"
+    resolves to an exact time; the validation gate applies unchanged."""
     system = (f"{SYSTEM_PROMPT}\nNow: {now.strftime('%Y-%m-%d %H:%M')} "
               f"({now.strftime('%A')}), timezone "
               f"UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}.")
+    if context:
+        system += ("\nYou just proposed these times to the user; they are "
+                   f"choosing one of them:\n{context}\n"
+                   "Remember: names of people go in the title only — never "
+                   "invent an email address for the attendees list.")
     text = ""
     async for chunk in llm.chat([{"role": "system", "content": system},
                                  {"role": "user", "content": message}]):
@@ -171,4 +181,5 @@ async def propose_event(llm, message: str, *, now: datetime,
     if raw is None:
         return None, ("I couldn't turn that into an event — try including a "
                       "day and a time, like 'call with Sam Friday 2pm'.")
-    return validate_proposal(raw, now=now, user_message=message)
+    return validate_proposal(raw, now=now, user_message=message,
+                             context=context or "")

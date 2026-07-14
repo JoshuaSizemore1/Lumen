@@ -12,6 +12,7 @@ from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from lumen.daemon.connectors import free_slots
 from lumen.daemon.connectors.capture import classify
 from lumen.daemon.llm import commitments, meeting_prep, triage
 from lumen.daemon.llm.book_recs import recommend
@@ -92,6 +93,24 @@ PROMISE_HINT = re.compile(r"\b(?:promis\w+|commit(?:ted|ments?)|owe[ds]?)\b",
 EVENT_HINT = re.compile(
     r"\b(book|schedule|create|add|set ?up|put)\b"
     r".*\b(meeting|call|event|appointment|lunch|dinner|coffee|calendar)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Find-a-time shapes ("find 30 minutes...") — slot math is deterministic
+# daemon code; a booking request with a concrete time stays on EVENT_HINT.
+SLOT_HINT = re.compile(
+    r"\bfind\b.{0,40}\b(?:minutes?|mins?|hours?|slot|time)\b"
+    r"|\bwhen\s+am\s+i\s+free\b|\bfree\s+(?:slot|time)s?\b"
+    r"|\bavailabilit(?:y|ies)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# "book the first one" after a slot proposal: only taken when the previous
+# assistant turn actually proposed slots (SLOT_HEADER in its text), so a bare
+# "book that" can't reach event creation with nothing to resolve against.
+BOOKING_HINT = re.compile(
+    r"\b(?:book|grab|take|go\s+with|schedule)\b.{0,40}"
+    r"\b(?:one|that|first|second|third|slot|option|it)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -279,7 +298,7 @@ class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
-                 suggestions=None, max_iterations=4):
+                 suggestions=None, scheduling=None, max_iterations=4):
         self._llm = llm
         self._todos = todos
         self._books = books
@@ -293,6 +312,7 @@ class Router:
         self._tool_log = tool_log
         self._conv = conversations  # ConversationStore — transcript log + multi-turn state
         self._suggestions = suggestions  # SuggestionStore — commitment tracking
+        self._scheduling = scheduling    # SchedulingConfig — proposable hours
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -648,6 +668,12 @@ class Router:
             sub = self._compose_email_chat(message)
         elif self._mail_store is not None and TRIAGE_HINT.search(message):
             sub = self._triage_chat()
+        elif self._calendar is not None and SLOT_HINT.search(message):
+            sub = self._slots_chat(message)
+        elif (self._confirm is not None and self._bridge is not None
+                and self._calendar is not None and BOOKING_HINT.search(message)
+                and (slot_ctx := self._slot_context(conv_id))):
+            sub = self._create_event_chat(message, context=slot_ctx)
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and EVENT_HINT.search(message)):
             sub = self._create_event_chat(message)
@@ -879,11 +905,59 @@ class Router:
             yield {"chunk": "\n".join(lines)}
         yield {"done": True}
 
-    async def _create_event_chat(self, message: str):
+    def _slot_context(self, conv_id: int | None) -> str | None:
+        """The previous assistant turn, if it was a slot proposal — the
+        booking follow-up's extraction resolves 'the first one' against it.
+        The originating request rides along so the event title keeps its
+        purpose ("call with Chris"), not a generic 'Meeting'."""
+        if self._conv is None or conv_id is None:
+            return None
+        turns = self._conv.history(conv_id, limit=HISTORY_TURNS)
+        for i in range(len(turns) - 1, -1, -1):
+            if turns[i]["role"] != "assistant":
+                continue
+            if free_slots.SLOT_HEADER not in turns[i]["content"]:
+                return None
+            asked = next((t["content"] for t in reversed(turns[:i])
+                          if t["role"] == "user"), "")
+            prefix = f"The user originally asked: {asked!r}\n" if asked else ""
+            return prefix + turns[i]["content"]
+        return None
+
+    async def _slots_chat(self, message: str):
+        """Deterministic free-slot proposal from the calendar cache — the
+        model is never woken; exact times make the booking follow-up safe."""
+        if not self._calendar.connected:
+            yield {"chunk": ("Your calendar isn't connected yet — run the "
+                             "one-time Google setup first, then I can find "
+                             "free times.")}
+            yield {"done": True}
+            return
+        now = datetime.now().astimezone()
+        duration = free_slots.parse_duration(message)
+        start_d, end_d = free_slots.parse_window(message, now)
+        events = self._calendar.list_range(start_d.isoformat(), end_d.isoformat())
+        hours = ({"day_start": self._scheduling.day_start,
+                  "day_end": self._scheduling.day_end}
+                 if self._scheduling is not None else {})
+        slots = free_slots.find_slots(events, duration_min=duration,
+                                      start_date=start_d, end_date=end_d,
+                                      now=now, **hours)
+        if not slots:
+            yield {"chunk": (f"No free {duration}-minute stretch between "
+                             f"{start_d.isoformat()} and {end_d.isoformat()} "
+                             "inside your working hours — try a different "
+                             "range or a shorter meeting.")}
+        else:
+            yield {"chunk": free_slots.render_slots(slots, duration)}
+        yield {"done": True}
+
+    async def _create_event_chat(self, message: str, context: str | None = None):
         """NL event creation: extract → validate → confirm dialog → create."""
         now = datetime.now().astimezone()
         try:
-            proposal, err = await propose_event(self._llm, message, now=now)
+            proposal, err = await propose_event(self._llm, message, now=now,
+                                                context=context)
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return

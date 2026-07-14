@@ -2160,3 +2160,105 @@ async def test_compose_still_beats_triage_for_reply_requests():
         if "compose_request" in ev:
             router._confirm.resolve(ev["compose_id"], False)
     assert any("compose_request" in e for e in out)
+
+
+# ---- NL scheduling (Phase 8 feature 6) ----
+
+def test_slot_hint_vocabulary():
+    from lumen.daemon.router import SLOT_HINT
+    for msg_ in ("find 30 minutes for a call with Sam this week",
+                 "find an hour tomorrow", "when am I free this week?",
+                 "find a slot on friday", "find time for a call"):
+        assert SLOT_HINT.search(msg_), msg_
+    for msg_ in ("book a call with Sam tomorrow 2pm",
+                 "schedule a meeting with sam friday",
+                 "what's on my calendar today"):
+        assert not SLOT_HINT.search(msg_), msg_
+
+
+async def test_slots_chat_renders_deterministic_options():
+    from lumen.daemon.connectors.free_slots import SLOT_HEADER
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), calendar=SyncingFakeCal())
+    out = await collect(router, "chat",
+                        {"message": "find 30 minutes for a call next week"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert SLOT_HEADER in text and "1. " in text
+    assert llm.messages is None                     # slot math never wakes the model
+    assert out[-1] == {"done": True}
+
+
+async def test_slots_chat_not_connected_is_honest():
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(),
+                    calendar=SyncingFakeCal(connected=False))
+    out = await collect(router, "chat", {"message": "find 30 minutes this week"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "connected" in text.lower() and llm.messages is None
+
+
+async def test_slots_chat_fully_busy_is_honest():
+    # one event spanning yesterday -> +2 days blocks today entirely,
+    # regardless of the machine's local timezone
+    now = datetime.now().astimezone()
+    busy = dict(CAL_ROW,
+                start_at=(now - _td(days=1)).isoformat(),
+                end_at=(now + _td(days=2)).isoformat())
+
+    class BusyCal(SyncingFakeCal):
+        def list_range(self, a, b):
+            return [busy]
+
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), calendar=BusyCal())
+    out = await collect(router, "chat", {"message": "find 30 minutes today"})
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "no free" in text.lower() and llm.messages is None
+
+
+async def test_book_followup_carries_slot_context_to_proposal(tmp_path):
+    from lumen.daemon.confirm import ConfirmBroker
+    from lumen.daemon.connectors.free_slots import SLOT_HEADER
+    conv = conv_store(tmp_path)
+    broker = ConfirmBroker()
+    llm = FakeLLM(chunks=(VALID_JSON,))
+    router = Router(llm, FakeStore(), calendar=SyncingFakeCal(),
+                    bridge=FakeBridge(result="Created: Call with Sam"),
+                    confirm=broker, model_router=FakeModelRouter(),
+                    conversations=conv)
+    cid = conv.create("find 30 minutes")
+    conv.add_message(cid, "user", "find 30 minutes")
+    conv.add_message(cid, "assistant",
+                     f"{SLOT_HEADER}\n1. Tue 2026-07-14 08:00–08:30")
+    conv.add_message(cid, "user", "book the first one")
+
+    events = []
+
+    async def consume():
+        async for ev in router.handle(
+                "chat", {"message": "book the first one",
+                         "conversation_id": cid}):
+            events.append(ev)
+
+    task = _aio.ensure_future(consume())
+    for _ in range(200):
+        await _aio.sleep(0)
+        req = next((e for e in events if "confirm_request" in e), None)
+        if req is not None:
+            broker.resolve(req["confirm_id"], True)
+            break
+    await _aio.wait_for(task, timeout=2)
+    assert any("confirm_request" in e for e in events)
+    # the extraction prompt carried the proposed options AND the original ask
+    assert SLOT_HEADER in llm.messages[0]["content"]
+    assert "find 30 minutes" in llm.messages[0]["content"]
+
+
+async def test_book_followup_without_slot_context_stays_on_normal_paths():
+    # "book the first one" with no prior proposal must not enter the create
+    # flow with empty context — no confirm_request appears.
+    llm = FakeLLM(chunks=("ok",))
+    router = Router(llm, FakeStore(), calendar=SyncingFakeCal(),
+                    bridge=FakeBridge(), model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "book the first one"})
+    assert not any("confirm_request" in e for e in out)

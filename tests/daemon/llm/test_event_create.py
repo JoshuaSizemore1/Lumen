@@ -86,14 +86,25 @@ def test_attendee_must_be_email_written_by_user():
     p, err = validate_proposal(proposal(attendees=["priya.nair@company.com"]),
                                now=NOW, user_message=msg)
     assert err is None and p["attendees"] == ["priya.nair@company.com"]
-    # model invented an address the user never typed -> rejected, named
+    # model invented an address the user never typed -> dropped, never
+    # invited (the 4B reliably guesses one for "call with Chris"; a hard
+    # refusal made every booking follow-up fail — live 2026-07-14)
     p, err = valid(proposal(attendees=["sam@guessed.com"]))
-    assert p is None and "sam@guessed.com" in err
+    assert err is None and p["attendees"] == []
 
 
-def test_non_email_attendee_rejected():
+def test_attendee_typed_in_booking_context_survives():
+    p, err = validate_proposal(
+        proposal(attendees=["priya.nair@company.com"]), now=NOW,
+        user_message="book the first one",
+        context='The user originally asked: "find 30 minutes with '
+                'priya.nair@company.com"\nFree times...')
+    assert err is None and p["attendees"] == ["priya.nair@company.com"]
+
+
+def test_non_email_attendee_dropped():
     p, err = valid(proposal(attendees=["Sam"]))
-    assert p is None
+    assert err is None and p["attendees"] == []
 
 
 def test_recurrence_validated_and_kept_verbatim():

@@ -272,3 +272,28 @@ def test_sync_gmail_rejects_tight_poll_and_bad_window(tmp_path):
     p.write_text("[sync]\ngmail_window_months = 0\n")
     with pytest.raises(SystemExit):
         load_config(p)
+
+
+def test_scheduling_section_parses_and_validates(tmp_path):
+    from lumen.daemon.config import load_config
+    p = tmp_path / "config.toml"
+    p.write_text('[scheduling]\nday_start = "09:00"\nday_end = "17:30"\n')
+    cfg = load_config(p)
+    assert cfg.scheduling.day_start == "09:00"
+    assert cfg.scheduling.day_end == "17:30"
+    # defaults when the section is absent
+    (tmp_path / "empty.toml").write_text("")
+    d = load_config(tmp_path / "empty.toml")
+    assert d.scheduling.day_start == "08:00" and d.scheduling.day_end == "20:00"
+
+
+def test_scheduling_rejects_bad_hours(tmp_path):
+    import pytest
+    from lumen.daemon.config import load_config
+    p = tmp_path / "config.toml"
+    p.write_text('[scheduling]\nday_start = "20:00"\nday_end = "08:00"\n')
+    with pytest.raises(SystemExit):
+        load_config(p)
+    p.write_text('[scheduling]\nday_start = "8am"\n')
+    with pytest.raises(SystemExit):
+        load_config(p)
