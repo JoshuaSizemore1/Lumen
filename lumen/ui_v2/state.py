@@ -123,6 +123,7 @@ def _sample_events() -> list[dict]:
 
 class AppState(QObject):
     todos_changed = pyqtSignal()
+    suggestions_changed = pyqtSignal()
     mails_changed = pyqtSignal()
     books_changed = pyqtSignal()
     recs_changed = pyqtSignal()
@@ -146,6 +147,7 @@ class AppState(QObject):
         self.mail_last_sync = None
         self.selected_mail = "m1"
 
+        self.suggestions: list[dict] = []
         if self.live:
             self.todos, self.books, self.recs, self.mails = [], [], [], []
             self.mail_total = 0
@@ -158,6 +160,7 @@ class AppState(QObject):
             self.refresh_todos()
             self.refresh_books()
             self.refresh_mails()
+            self.refresh_suggestions()
         else:
             self.todos = [{**t, "tags": [t["tag"]] if t.get("tag") else []}
                           for t in copy.deepcopy(S.TODOS)]
@@ -279,6 +282,40 @@ class AppState(QObject):
         else:
             self.todos = [t for t in self.todos if t["id"] != tid]
             self.todos_changed.emit()
+
+    # ---- commitment suggestions (Phase 8 feature 3) ----
+    def _set_suggestions(self, result: dict) -> None:
+        self.suggestions = result.get("suggestions", [])
+        if "todos" in result:              # accept returns the fresh todo list too
+            self._set_todos(result["todos"])
+        self.suggestions_changed.emit()
+
+    def refresh_suggestions(self) -> None:
+        if self._data is not None:
+            self._data.request("todos.suggestions", {}, self._set_suggestions)
+
+    def scan_commitments(self, cb=None) -> None:
+        """User-triggered scan of sent mail; cb(result) gets {scanned, found}."""
+        if self._data is None:
+            if cb:
+                cb({"scanned": 0, "found": 0, "suggestions": []})
+            return
+
+        def handle(result):
+            self._set_suggestions(result)
+            if cb:
+                cb(result)
+        self._data.request("todos.scan_commitments", {}, handle)
+
+    def accept_suggestion(self, sid: int) -> None:
+        if self._data is not None:
+            self._data.request("todos.accept_suggestion", {"id": sid},
+                               self._set_suggestions)
+
+    def dismiss_suggestion(self, sid: int) -> None:
+        if self._data is not None:
+            self._data.request("todos.dismiss_suggestion", {"id": sid},
+                               self._set_suggestions)
 
     # ---- mail (live from the daemon mirror; sample rows without a daemon) ----
     def unread_count(self) -> int:

@@ -405,6 +405,52 @@ def test_launcher_handoff_emits_open_chat(qtbot):
     assert seen == [5]
 
 
+# ---- commitment suggestions (todos screen) ---------------------------------
+
+SUGG = {"id": 5, "text": "send the report", "due_date": "2026-07-17",
+        "quote": "I'll send the report over Friday", "email_id": "s1",
+        "subject": "Re: report", "status": "pending"}
+
+
+def test_suggestion_state_routes_and_accept_updates_todos(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    assert any(t == "todos.suggestions" for t, _p, _cb in data.requests)
+    data.cb_for("todos.suggestions")({"suggestions": [SUGG]})
+    assert st.suggestions[0]["text"] == "send the report"
+    data.requests.clear()
+    st.accept_suggestion(5)
+    t, p, cb = data.requests[0]
+    assert (t, p) == ("todos.accept_suggestion", {"id": 5})
+    cb({"suggestions": [], "todos": [{"id": 9, "text": "send the report",
+                                      "completed": False,
+                                      "due_date": "2026-07-17", "tags": []}]})
+    assert st.suggestions == [] and st.todos[0]["text"] == "send the report"
+    st.dismiss_suggestion(4)
+    assert data.requests[1][:2] == ("todos.dismiss_suggestion", {"id": 4})
+
+
+def test_todos_screen_suggested_section_and_scan_busy(qtbot):
+    from lumen.ui_v2.screens.todos import TodosScreen
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = TodosScreen(st)
+    qtbot.addWidget(sc)
+    data.cb_for("todos.suggestions")({"suggestions": [SUGG]})
+    texts = _label_texts(sc)
+    assert "send the report" in texts and "Re: report" in texts
+    sc._scan()
+    assert not sc.scan_btn.isEnabled()
+    sc._scan()                              # double click is a no-op
+    cbs = [cb for t, _p, cb in data.requests if t == "todos.scan_commitments"]
+    assert len(cbs) == 1
+    toasts = []
+    st.toast_requested.connect(toasts.append)
+    cbs[0]({"scanned": 3, "found": 1, "suggestions": [SUGG]})
+    assert sc.scan_btn.isEnabled()
+    assert toasts and "1 new suggestion" in toasts[0]
+
+
 # ---- quick capture (launcher) ---------------------------------------------
 
 def test_launcher_first_turn_offers_capture_but_followups_dont(qtbot):
