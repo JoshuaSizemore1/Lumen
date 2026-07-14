@@ -57,11 +57,11 @@
 ### Task 3.1: Scan pipeline + storage
 **Produces:** `daemon/llm/commitments.py`: scan SENT mirror rows since last scan (bounded, e.g. 90 days first run), fast-model extraction of promise-shaped commitments `{text, due_date?, source_email_id}` with a mechanical gate (must quote a promise phrase found in the body — grounding rule); suggestions stored as todos `source='llm-extracted', suggested=1` (new column or a `suggestions` table — decide at task start) + scan-state (`sync_state` keys: last scanned internal date; dismissed email ids never re-suggest). Router one-shots: `todos.suggestions`, `todos.scan_commitments`, `todos.accept_suggestion {id}`, `todos.dismiss_suggestion {id}`; chat hint ("did I promise…") routes to the same scan.
 **Tests:** extraction gate rejects unquoted inventions; scan-state bounds re-scans; dismissed never resurfaces; accept promotes to a real open todo.
-- [ ] failing tests → implement → green → commit
+- [x] failing tests → implement → green → commit
 
 ### Task 3.2: Todos screen "Suggested" section + live verification
 **Produces:** Suggested section (distinct styling, source subject shown) with per-row Accept/Dismiss + a "Scan sent mail" button with busy state. Live-verify against the real mirror's SENT mail.
-- [ ] failing tests → implement → green → live-verify → docs → commit
+- [x] failing tests → implement → green → live-verify → docs → commit
 
 ## Features 4–8 (tasks firmed when each starts)
 
