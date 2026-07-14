@@ -42,15 +42,15 @@
 ### Task 2.1: Capture heuristic + router
 **Produces:** `connectors/capture.py`: `classify(text) -> "chat" | "capture" | "ambiguous"` — question marks, interrogative/imperative-assistant openers (what/when/where/why/how/who/can/could/should/do/does/did/is/are/will/find/show/search/tell/explain…), greetings → chat; short imperative fragments → capture; genuinely unclear → ambiguous. Router: launcher `chat` requests gain a `capture_ok` flag (only the launcher sets it); `capture`-classified text → `todos.add` via the @date/#tag parser, response event `{"captured": {todo row…}}`; `ambiguous` → one tiny fast-model classification (chat vs capture), fallback capture. NL add/mark-done chat abilities: "add a todo: X" imperative always captures; `TODO_DONE_HINT` → fuzzy match open todos, single match toggles + answers, multiple matches answers with the list.
 **Tests:** classifier vocab table; capture path adds a todo and emits `captured`; question still chats; ambiguous falls to LLM then capture; mark-done single/multi-match behavior.
-- [ ] failing tests → implement → green → commit
+- [x] failing tests → implement → green → commit
 
 ### Task 2.2: Launcher UI — capture toast + Undo
 **Produces:** launcher handles `captured` events: "✓ Added todo: … — Undo" line (Undo → `todos.delete`); palette stays ready for the next input.
 **Tests:** captured event renders + Undo deletes; chat answers unaffected.
-- [ ] failing tests → implement → green → commit
+- [x] failing tests → implement → green → commit
 
 ### Task 2.3: Live verification + docs
-- [ ] Real socket + offscreen UI: "buy milk @tomorrow #errands" captures with due date + tag; Undo removes; "what's due this week" still chats. Docs; commit.
+- [x] Real socket + offscreen UI: "buy milk @tomorrow #errands" captures with due date + tag; Undo removes; "what's due this week" still chats. Docs; commit.
 
 ## Feature 3 — Commitment tracking
 

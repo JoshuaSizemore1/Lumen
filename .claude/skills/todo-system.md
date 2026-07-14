@@ -39,6 +39,8 @@ and NL capture later.
 - "Mark X done"
 - Suggest todos from scanned email/calendar content, clearly flagged as suggestions
 
+Status update (Phase 8, 2026-07-13): NL add / mark-done / quick capture are LIVE — see `daily-features.md` "Quick capture" for the as-built (capture.py classifier, `capture_ok` flag, TODO_ADD/MARK_DONE routes). LLM-extracted suggestions land with commitment tracking (feature 3).
+
 Status (Phase 2, 2026-07-08): read queries are live — "what's due today/this
 week" via router context injection behind a keyword heuristic (`todo(s)`,
 `task(s)`, `due`, `overdue`). NL add / mark-done / suggestions are not built;
