@@ -123,6 +123,7 @@ class DashboardScreen(QWidget):
     def showEvent(self, ev):
         super().showEvent(ev)
         self._fetch_calendar()
+        self.state.refresh_manabi()
 
     # ---- briefing ----------------------------------------------------------
     def _run_briefing(self):
@@ -166,6 +167,16 @@ class DashboardScreen(QWidget):
         clear_layout(self.todo_lay)
         self.todo_lay.addWidget(_section_head("TODAY · TODOS", f"{self.state.open_count()} open"))
         self.todo_lay.addSpacing(9)
+        if self.state.manabi_due:
+            # Japanese-study nudge: due-today shaped, but not a todo row —
+            # nothing to click; doing the reviews in Manabi clears it.
+            row = QWidget()
+            rl = hbox(row, (2, 8, 2, 8), 10)
+            rl.addWidget(label("日", 13, T.ACCENT), 0, Qt.AlignmentFlag.AlignTop)
+            rl.addWidget(label("Japanese reviews not done yet today", 13,
+                               T.TEXT_PRIMARY, wrap=True), 1)
+            self.todo_lay.addWidget(row)
+            self.todo_lay.addWidget(hline(T.BORDER_FAINT))
         shown = [t for t in self.state.todos if not t["done"]][:4]
         for t in shown:
             row = QWidget()

@@ -34,7 +34,8 @@ def _todo_line(t: dict, today: date) -> str:
 
 def build_sections(events: list[dict], todos: list[dict], unread: list[dict],
                    counts: dict, now: datetime, *, cal_connected: bool,
-                   mail_connected: bool, mail_syncing: bool) -> str:
+                   mail_connected: bool, mail_syncing: bool,
+                   manabi_due: bool = False) -> str:
     """The exact data block the model narrates: three labeled sections with
     explicit empty/unavailable markers so silence can't be padded over."""
     today = now.date()
@@ -52,12 +53,15 @@ def build_sections(events: list[dict], todos: list[dict], unread: list[dict],
            if t.get("due_date") and date.fromisoformat(t["due_date"]) <= today]
     lines.append("")
     lines.append("TODOS DUE:")
-    if not due:
+    if not due and not manabi_due:
         lines.append("No todos due.")
     else:
         # overdue first — the system prompt calls them out
         due.sort(key=lambda t: t["due_date"])
         lines.extend(_todo_line(t, today) for t in due)
+        if manabi_due:
+            lines.append("- Japanese reviews in Manabi (due today — none "
+                         "done yet)")
 
     lines.append("")
     lines.append(f"UNREAD MAIL ({counts.get('unread', 0)} unread of "

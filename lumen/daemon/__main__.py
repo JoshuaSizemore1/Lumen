@@ -12,6 +12,7 @@ from lumen.daemon.connectors.books import BookStore
 from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.gcal import CalendarSync, EventStore
+from lumen.daemon.connectors.manabi import ManabiStatus
 from lumen.daemon.connectors.notes import NotesStore
 from lumen.daemon.connectors.suggestions import SuggestionStore
 from lumen.daemon.connectors.todos import TodoStore
@@ -52,6 +53,7 @@ async def run() -> None:
                         conn,
                         lambda texts: llm.embed(texts, cfg.notes.embed_model),
                         cfg.notes.folder, cfg.notes.embed_model),
+                    manabi=ManabiStatus(cfg.manabi.db_path),
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

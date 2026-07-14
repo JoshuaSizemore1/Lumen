@@ -915,3 +915,34 @@ def test_mail_screen_reply_prefills_sender_and_threading(qtbot):
     assert got[0]["to"] == ["priya@x.com"]
     assert got[0]["subject"] == "Re: Budget"
     assert got[0]["reply_to"] == st.mails[0]["id"]
+
+
+def test_dashboard_manabi_nudge_row(qtbot):
+    from lumen.ui_v2.screens.dashboard import DashboardScreen
+    from PyQt6.QtWidgets import QLabel
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = DashboardScreen(st)
+    qtbot.addWidget(sc)
+
+    def texts():
+        return [l.text() for l in sc.todo_col.findChildren(QLabel)]
+
+    assert not any("Japanese" in t for t in texts())
+    st.refresh_manabi()
+    cbs = [cb for t, _p, cb in data.requests if t == "manabi.status"]
+    cbs[-1]({"configured": True, "due": True, "last_review": None})
+    assert st.manabi_due is True
+    assert any("Japanese reviews not done" in t for t in texts())
+    # doing the reviews clears it on the next fetch
+    st.refresh_manabi()
+    cbs = [cb for t, _p, cb in data.requests if t == "manabi.status"]
+    cbs[-1]({"configured": True, "due": False,
+             "last_review": "2026-07-14T08:00:00-06:00"})
+    assert not any("Japanese" in t for t in texts())
+
+
+def test_manabi_sample_mode_never_nudges(qtbot):
+    st = AppState()
+    st.refresh_manabi()                     # no client — must be a no-op
+    assert st.manabi_due is False

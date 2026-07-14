@@ -105,3 +105,16 @@ async def test_compose_streams_and_carries_sections():
     assert llm.messages[0]["content"] == SYSTEM
     assert llm.messages[1]["role"] == "user"
     assert s in llm.messages[1]["content"]
+
+
+def test_manabi_nudge_appears_in_todos_section():
+    s = sections(manabi_due=True)
+    assert "Japanese reviews" in s
+    s_none = sections(todos=[], manabi_due=True)
+    assert "Japanese reviews" in s_none
+    assert "No todos due." not in s_none            # the nudge IS a due item
+
+
+def test_no_nudge_when_done_or_unconfigured():
+    assert "Japanese" not in sections(manabi_due=False)
+    assert "Japanese" not in sections()

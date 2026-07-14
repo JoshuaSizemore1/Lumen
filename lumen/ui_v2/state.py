@@ -148,6 +148,7 @@ class AppState(QObject):
         self.selected_mail = "m1"
 
         self.suggestions: list[dict] = []
+        self.manabi_due = False
         if self.live:
             self.todos, self.books, self.recs, self.mails = [], [], [], []
             self.mail_total = 0
@@ -457,6 +458,20 @@ class AppState(QObject):
             self._data.request("briefing.today", {}, cb)
         else:
             cb({"text": "Sample mode — the briefing needs the daemon running."})
+
+    def refresh_manabi(self) -> None:
+        """Japanese-study nudge for the dashboard: a cheap daemon-side
+        read-only peek at Manabi's last-review signal."""
+        if self._data is None:
+            return
+
+        def handle(result: dict) -> None:
+            due = bool(result.get("due"))
+            if due != self.manabi_due:
+                self.manabi_due = due
+                self.todos_changed.emit()      # repaint the dashboard column
+
+        self._data.request("manabi.status", {}, handle)
 
     def delete_event(self, event_id: str, calendar_id: str, cb=None) -> None:
         """External write: the daemon looks the event up in its cache and gates

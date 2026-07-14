@@ -52,6 +52,13 @@ class GoogleConfig:
 
 
 @dataclass(frozen=True)
+class ManabiConfig:
+    # Japanese-study nudge: path to Manabi's SQLite DB (read-only). None =
+    # feature off; Lumen never nags without a readable signal.
+    db_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class NotesConfig:
     # Notes Q&A folder (user decision 2026-07-13: ~/Documents/Notes, created
     # if absent). Markdown/plain text only. Embedding model benchmarked
@@ -111,6 +118,7 @@ class Config:
     sync: "SyncConfig" = field(default_factory=lambda: SyncConfig())
     scheduling: "SchedulingConfig" = field(default_factory=lambda: SchedulingConfig())
     notes: "NotesConfig" = field(default_factory=lambda: NotesConfig())
+    manabi: "ManabiConfig" = field(default_factory=lambda: ManabiConfig())
 
     @property
     def keep_alive(self) -> str:
@@ -208,6 +216,10 @@ def load_config(path: Path | None = None) -> Config:
         if sync_cfg.gmail_window_months < 1:
             raise SystemExit("lumen: gmail_window_months must be at least 1")
         kwargs["sync"] = sync_cfg
+    manabi_raw = data.get("manabi")
+    if manabi_raw is not None and "db_path" in manabi_raw:
+        kwargs["manabi"] = ManabiConfig(
+            db_path=Path(manabi_raw["db_path"]).expanduser())
     notes_raw = data.get("notes")
     if notes_raw is not None:
         n_kwargs = {}

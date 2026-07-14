@@ -308,7 +308,7 @@ class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
-                 suggestions=None, scheduling=None, notes=None,
+                 suggestions=None, scheduling=None, notes=None, manabi=None,
                  max_iterations=4):
         self._llm = llm
         self._todos = todos
@@ -325,6 +325,7 @@ class Router:
         self._suggestions = suggestions  # SuggestionStore — commitment tracking
         self._scheduling = scheduling    # SchedulingConfig — proposable hours
         self._notes = notes              # NotesStore — semantic notes index
+        self._manabi = manabi            # ManabiStatus — Japanese-study nudge
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -443,6 +444,11 @@ class Router:
                 yield {"error": str(e)}
                 return
             yield {"result": {"text": "".join(text)}}
+        elif type_ == "manabi.status":
+            # Dashboard nudge one-shot: a cheap read-only DB peek, no LLM.
+            yield {"result": (self._manabi.status() if self._manabi is not None
+                              else {"configured": False, "due": None,
+                                    "last_review": None})}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
@@ -826,7 +832,9 @@ class Router:
             events, self._todos.open_todos(), unread, counts, now,
             cal_connected=(self._calendar is not None and self._calendar.connected),
             mail_connected=(self._mail is not None and self._mail.connected),
-            mail_syncing=(self._mail is not None and self._mail.syncing))
+            mail_syncing=(self._mail is not None and self._mail.syncing),
+            manabi_due=(self._manabi is not None
+                        and self._manabi.status(now)["due"] is True))
 
     async def _briefing_chat(self):
         try:

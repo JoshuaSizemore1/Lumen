@@ -74,6 +74,7 @@
 - **7. Notes Q&A** — embedding model benchmark first (`llm-serving.md` rule; candidates: nomic-embed-text / embeddinggemma via Ollama) → `connectors/notes.py`: mtime-based index of `~/Documents/Notes` (config `[notes]`) into sqlite-vec chunks, on-demand reindex; `NOTES_HINT` route answering with passages + file paths. New dep: sqlite-vec.
   **DONE 2026-07-14** — benchmark picked nomic-embed-text (numbers in `llm-serving.md`); live-verified over the real socket (grounded answer with path + verbatim phrase, honest no-match, edit picked up by reindex). As-built notes in `daily-features.md`.
 - **8. Manabi nudge** — `connectors/manabi.py`: read last-review timestamp from a config-pointed path (locate/create the signal in the Manabi repo first — one-line file write on review completion if none exists); due-today item in briefing + dashboard when stale. No SRS logic.
+  **DONE 2026-07-14** — no Manabi change needed (its SQLite already exposes the signal; read-only MAX over reviews + kana_sessions). Live-verified: real last-study date surfaced as due in briefing + dashboard row; a review in a scratch DB copy cleared it. As-built notes in `daily-features.md`.
 
-- [ ] Each: failing tests → implement → green → live-verify → docs → commit
-- [ ] Phase close: all eight live-verified; mark Phase 8 DONE in `development-plan.md` with dated Verified note; record durable decisions in `daily-features.md` / `todo-system.md`.
+- [x] Each: failing tests → implement → green → live-verify → docs → commit
+- [x] Phase close: all eight live-verified; mark Phase 8 DONE in `development-plan.md` with dated Verified note; record durable decisions in `daily-features.md` / `todo-system.md`.
