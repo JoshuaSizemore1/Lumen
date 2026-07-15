@@ -13,6 +13,7 @@ from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.gcal import CalendarSync, EventStore
 from lumen.daemon.connectors.manabi import ManabiStatus
+from lumen.daemon.connectors.memory_log import MemoryLog
 from lumen.daemon.connectors.notes import NotesStore
 from lumen.daemon.connectors.suggestions import SuggestionStore
 from lumen.daemon.connectors.todos import TodoStore
@@ -21,6 +22,7 @@ from lumen.daemon.llm.client import OllamaClient
 from lumen.daemon.llm.mcp_bridge import LazyBridge
 from lumen.daemon.llm.model_router import ModelRouter
 from lumen.daemon.llm.tool_log import ToolLog
+from lumen.daemon.memory_worker import MemoryWorker
 from lumen.daemon.router import Router
 from lumen.daemon.write_gate import GrantStore, WriteGate, write_tools_map
 
@@ -38,6 +40,8 @@ async def run() -> None:
     calendar = CalendarSync(events, cfg.google, cfg.sync)
     emails = EmailStore(conn)
     mail = GmailSync(emails, cfg.google, cfg.sync)
+    memory_log = MemoryLog(conn)
+    memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory)
     broker = ConfirmBroker()   # shared: router resolves, the write gate awaits
     write_gate = (WriteGate(GrantStore(cfg.mcp.grants_path), broker,
                             write_tools_map(cfg.mcp.servers))
@@ -54,6 +58,9 @@ async def run() -> None:
                         lambda texts: llm.embed(texts, cfg.notes.embed_model),
                         cfg.notes.folder, cfg.notes.embed_model),
                     manabi=ManabiStatus(cfg.manabi.db_path),
+                    memory=memory_log, memory_path=cfg.memory_path,
+                    memory_cap=cfg.memory.blob_cap_chars,
+                    distill_trigger=memory_worker.schedule,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()
@@ -73,6 +80,7 @@ async def run() -> None:
     mail_task.cancel()
     await asyncio.gather(poll_task, mail_task, return_exceptions=True)
     await server.stop()
+    await memory_worker.aclose()
     await llm.aclose()
     if bridge is not None:
         await bridge.aclose()
