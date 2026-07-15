@@ -4,6 +4,7 @@ Renders turns and sends messages only — the daemon owns thread state, storage,
 and history truncation. Streaming reuses the shared chat client; the sidebar and
 thread come from the daemon's conversations.list / conversations.get.
 """
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 
 from .. import theme as T
@@ -12,6 +13,13 @@ from ..widgets import (
     ClickLabel, ClickRow, ElideLabel, button, clear_layout, hbox, hline,
     label, scroll, vbox, vline,
 )
+
+# Shared with the launcher's "TRY" hints so both surfaces suggest the same thing.
+EXAMPLE_PROMPTS = [
+    "what's on my calendar today",
+    "summarize unread from Priya",
+    "recommend a book like my last two",
+]
 
 
 class ChatScreen(QWidget):
@@ -23,11 +31,13 @@ class ChatScreen(QWidget):
         self._busy = False
         self._acc = ""
         self.resp_text = None      # current assistant bubble
+        self._empty = None         # empty-state block when the thread has no turns
 
         root = hbox(self, (0, 0, 0, 0), 0)
         root.addWidget(self._build_sidebar())
         root.addWidget(vline(T.BORDER_SOFT))
         root.addWidget(self._build_main(), 1)
+        self._show_empty()
 
         if self.chat is not None:      # sample mode (screenshots) has no daemon
             self.chat.chunk.connect(self._on_chunk)
@@ -106,6 +116,47 @@ class ChatScreen(QWidget):
         v.addLayout(inrow)
         return main
 
+    # ---- empty state -----------------------------------------------------
+    def _build_empty_state(self) -> QWidget:
+        w = QWidget()
+        v = vbox(w, (0, 0, 0, 0), 6)
+        head = label("❯ Lumen", 20, T.TEXT_PRIMARY, 600)
+        head.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub = label("local · private · on-device", 11, T.TEXT_DIM)
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(head)
+        v.addWidget(sub)
+        v.addSpacing(16)
+        tryl = label("Try asking:", 10, T.TEXT_FAINT, ls=1)
+        tryl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(tryl)
+        for prompt in EXAMPLE_PROMPTS:
+            row = ClickLabel(f"❯  {prompt}", 13, T.TEXT_SECONDARY,
+                             lambda p=prompt: self._submit_text(p))
+            row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v.addWidget(row)
+        return w
+
+    def _show_empty(self):
+        if self._empty is not None:
+            return
+        # Center the block with a *leading* stretch while keeping the trailing
+        # one (turns still pack to the top once a conversation starts):
+        # [leading stretch, empty block, trailing stretch].
+        self.thread_lay.insertStretch(self.thread_lay.count() - 1, 1)
+        self._empty = self._build_empty_state()
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, self._empty)
+
+    def _clear_empty(self):
+        if self._empty is None:
+            return
+        self._empty.setParent(None)
+        self._empty.deleteLater()
+        self._empty = None
+        # drop the leading centering stretch; leave the trailing one intact
+        if self.thread_lay.count() >= 2:
+            self.thread_lay.takeAt(self.thread_lay.count() - 2)
+
     def _pin_bottom(self, _lo: int, hi: int):
         if self._busy:      # follow the stream; leave a browsing user alone
             self._vsb.setValue(hi)
@@ -134,8 +185,10 @@ class ChatScreen(QWidget):
         self._conv_id = None
         self._busy = False
         self.resp_text = None
+        self._empty = None              # clear_layout below drops the old widget
         clear_layout(self.thread_lay)
         self.thread_lay.addStretch(1)   # clear_layout drops the stretch too
+        self._show_empty()
         self.input.setFocus()
 
     def load_conversation(self, cid: int):
@@ -144,20 +197,28 @@ class ChatScreen(QWidget):
         self.state.get_conversation(cid, self._render_thread)
 
     def _render_thread(self, got: dict):
+        self._empty = None              # clear_layout below drops the old widget
         clear_layout(self.thread_lay)
         self.thread_lay.addStretch(1)   # clear_layout drops the stretch too
         self.resp_text = None
-        for m in got.get("messages", []):
+        messages = got.get("messages", [])
+        for m in messages:
             if m["role"] == "user":
                 self._add_user_turn(m["content"])
             else:
                 self._turn("LUMEN", T.ACCENT, m["content"], T.TEXT_PRIMARY)
+        if not messages:
+            self._show_empty()
 
     def _submit(self):
-        msg = self.input.text().strip()
+        self._submit_text(self.input.text())
+
+    def _submit_text(self, text: str):
+        msg = text.strip()
         if self.chat is None or not msg or self._busy:
             return
         self._busy = True
+        self._clear_empty()
         self._add_user_turn(msg)
         self._begin_assistant_turn()
         self.input.clear()
