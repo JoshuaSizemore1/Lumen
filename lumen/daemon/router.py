@@ -22,6 +22,7 @@ from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
                                             revise_email)
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
                                            validate_proposal)
+from lumen.daemon.llm import memory as memory_mod
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 from lumen.daemon.llm.model_router import FS_WRITE_HINT
 
@@ -309,6 +310,8 @@ class Router:
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
                  suggestions=None, scheduling=None, notes=None, manabi=None,
+                 memory=None, memory_path=None, memory_cap=4000,
+                 procedures=None, distill_trigger=None,
                  max_iterations=4):
         self._llm = llm
         self._todos = todos
@@ -326,6 +329,11 @@ class Router:
         self._scheduling = scheduling    # SchedulingConfig — proposable hours
         self._notes = notes              # NotesStore — semantic notes index
         self._manabi = manabi            # ManabiStatus — Japanese-study nudge
+        self._memory = memory                # MemoryLog — tier-1 raw log
+        self._memory_path = memory_path      # Path to memory.md
+        self._memory_cap = memory_cap
+        self._procedures = procedures        # ProcedureStore
+        self._distill_trigger = distill_trigger  # callable() scheduling a run
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -342,6 +350,10 @@ class Router:
         follow-up in a tool-engaged thread still knows where the user's files
         live instead of scanning '/' (found in live verification)."""
         context = [IDENTITY]
+        if self._memory_path is not None:
+            mem = memory_mod.memory_context(self._memory_path, self._memory_cap)
+            if mem:
+                context.append(mem)
         if TODO_HINT.search(message):
             context.append(todo_context(self._todos.open_todos(), date.today()))
         if self._books is not None and BOOK_HINT.search(message):
