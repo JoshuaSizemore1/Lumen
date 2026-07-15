@@ -119,6 +119,23 @@ def scroll(inner: QWidget) -> QScrollArea:
     return sa
 
 
+def empty_state(text: str, sub: str | None = None) -> QWidget:
+    """Centered muted placeholder for offline/loading/empty/error panes.
+    One helper so wording and styling stay consistent across screens."""
+    w = QWidget()
+    lay = vbox(w, (0, 0, 0, 0), 4)
+    lay.addStretch(1)
+    title = label(text, 13, T.TEXT_DIM)
+    title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lay.addWidget(title)
+    if sub:
+        s = label(sub, 11, T.TEXT_FAINT)
+        s.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(s)
+    lay.addStretch(1)
+    return w
+
+
 def button(text: str, variant: str, px: int | None = None, height: int | None = None) -> QPushButton:
     b = QPushButton(text)
     b.setProperty("variant", variant)
