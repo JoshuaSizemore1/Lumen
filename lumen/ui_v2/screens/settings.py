@@ -4,7 +4,8 @@ from PyQt6.QtGui import QPainter, QPen
 from PyQt6.QtWidgets import QAbstractButton, QLabel, QSizePolicy, QWidget
 
 from .. import theme as T
-from ..widgets import Switch, font, hbox, hline, label, qcolor, scroll, vbox
+from ..widgets import (Switch, button, clear_layout, font, hbox, hline, label,
+                       qcolor, scroll, vbox)
 from ..state import AppState
 
 
@@ -164,10 +165,70 @@ class SettingsScreen(QWidget):
         rl.addWidget(label(f'"{current}" · {T.ACCENT}', 11, T.TEXT_DIM), 1)
         v.addWidget(row)
         v.addWidget(hline(T.BORDER_FAINT))
+        v.addSpacing(20)
+
+        # [memory] — what Lumen has learned + supervised procedures (Phase 9)
+        v.addWidget(label("[memory]", 12, T.ACCENT))
+        v.addSpacing(8)
+        v.addWidget(label("Lumen learns your patterns into a small, editable "
+                          "file. Deleting a line corrects it.", 11, T.TEXT_DIM))
+        v.addSpacing(8)
+        view_btn = button("View what Lumen has learned", "ghost", 12, 30)
+        view_btn.clicked.connect(self.state.open_memory_file)
+        vr = hbox(s=8)
+        vr.addWidget(view_btn)
+        vr.addStretch(1)
+        v.addLayout(vr)
+        v.addSpacing(12)
+        self._proc_box = QWidget()
+        vbox(self._proc_box, (0, 0, 0, 0), 6)
+        v.addWidget(self._proc_box)
         v.addStretch(1)
+
+        self.state.procedures_changed.connect(self._rebuild_procedures)
+        self._rebuild_procedures()
 
         root = vbox(self)
         root.addWidget(scroll(inner), 1)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.state.refresh_procedures()
+
+    def _proc_row(self, proc: dict, actions: list[tuple]) -> QWidget:
+        row = QWidget()
+        rl = hbox(row, (12, 8, 12, 8), 10)
+        rl.addWidget(label(proc.get("name") or proc.get("slug", "routine"),
+                           12, T.TEXT_SECONDARY), 1)
+        for text, variant, handler in actions:
+            b = button(text, variant, 11, 26)
+            b.clicked.connect(handler)
+            rl.addWidget(b)
+        return row
+
+    def _rebuild_procedures(self):
+        box = self._proc_box.layout()
+        clear_layout(box)
+        proposed = self.state.proposed_procedures
+        active = self.state.active_procedures
+        if proposed:
+            box.addWidget(label("PROPOSED ROUTINES", 10, T.TEXT_DIM, 600))
+            for p in proposed:
+                slug = p["slug"]
+                box.addWidget(self._proc_row(p, [
+                    ("Approve", "primary",
+                     lambda _=False, s=slug: self.state.approve_procedure(s)),
+                    ("Dismiss", "ghost",
+                     lambda _=False, s=slug: self.state.dismiss_procedure(s))]))
+        if active:
+            box.addWidget(label("ACTIVE ROUTINES", 10, T.TEXT_DIM, 600))
+            for p in active:
+                slug = p["slug"]
+                box.addWidget(self._proc_row(p, [
+                    ("Remove", "ghost",
+                     lambda _=False, s=slug: self.state.remove_procedure(s))]))
+        if not proposed and not active:
+            box.addWidget(label("No learned routines yet.", 11, T.TEXT_FAINT))
 
     def _set(self, group: str, key: str, on: bool):
         # TODO: persist to config.toml via the daemon

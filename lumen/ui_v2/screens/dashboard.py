@@ -69,6 +69,29 @@ class DashboardScreen(QWidget):
         v.addWidget(self.brief_panel)
         v.addSpacing(0)
 
+        # procedure-proposal card — hidden unless the distiller proposed a
+        # routine; Approve/Dismiss are the same supervised actions as Settings.
+        self.proc_card = QWidget()
+        self.proc_card.setStyleSheet(
+            f"background: {T.BG_DIALOG}; border: 1px solid {T.BORDER_SOFT}; "
+            f"border-radius: 9px;")
+        pc = vbox(self.proc_card, (14, 12, 14, 12), 6)
+        pc.addWidget(label("✨ Lumen noticed a routine you repeat", 12,
+                           T.ACCENT, 600))
+        self.proc_card_name = label("", 13, T.TEXT_PRIMARY, sans=True, wrap=True)
+        pc.addWidget(self.proc_card_name)
+        pc_actions = hbox(s=8)
+        approve = button("Save as routine", "primary", 11, 26)
+        approve.clicked.connect(self._approve_top_proposal)
+        dismiss = button("Dismiss", "ghost", 11, 26)
+        dismiss.clicked.connect(self._dismiss_top_proposal)
+        pc_actions.addWidget(approve)
+        pc_actions.addWidget(dismiss)
+        pc_actions.addStretch(1)
+        pc.addLayout(pc_actions)
+        self.proc_card.hide()
+        v.addWidget(self.proc_card)
+
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(22)
@@ -116,14 +139,35 @@ class DashboardScreen(QWidget):
         state.status_requested.connect(self._briefing_reset)  # daemon errors unstick the button
         state.todos_changed.connect(self.populate_todos)
         state.mails_changed.connect(self.populate_mail)
+        state.procedures_changed.connect(self._refresh_proc_card)
         self.populate_todos()
         self.populate_mail()
+        self._refresh_proc_card()
         self._fetch_calendar()
 
     def showEvent(self, ev):
         super().showEvent(ev)
         self._fetch_calendar()
         self.state.refresh_manabi()
+        self.state.refresh_procedures()
+
+    # ---- procedure proposal card -------------------------------------------
+    def _refresh_proc_card(self):
+        proposed = self.state.proposed_procedures
+        if proposed:
+            top = proposed[0]
+            self.proc_card_name.setText(top.get("name") or top.get("slug", "routine"))
+            self.proc_card.show()
+        else:
+            self.proc_card.hide()
+
+    def _approve_top_proposal(self):
+        if self.state.proposed_procedures:
+            self.state.approve_procedure(self.state.proposed_procedures[0]["slug"])
+
+    def _dismiss_top_proposal(self):
+        if self.state.proposed_procedures:
+            self.state.dismiss_procedure(self.state.proposed_procedures[0]["slug"])
 
     # ---- briefing ----------------------------------------------------------
     def _run_briefing(self):

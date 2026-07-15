@@ -124,6 +124,7 @@ def _sample_events() -> list[dict]:
 class AppState(QObject):
     todos_changed = pyqtSignal()
     suggestions_changed = pyqtSignal()
+    procedures_changed = pyqtSignal()
     mails_changed = pyqtSignal()
     books_changed = pyqtSignal()
     recs_changed = pyqtSignal()
@@ -148,6 +149,8 @@ class AppState(QObject):
         self.selected_mail = "m1"
 
         self.suggestions: list[dict] = []
+        self.proposed_procedures: list[dict] = []
+        self.active_procedures: list[dict] = []
         self.manabi_due = False
         if self.live:
             self.todos, self.books, self.recs, self.mails = [], [], [], []
@@ -162,6 +165,7 @@ class AppState(QObject):
             self.refresh_books()
             self.refresh_mails()
             self.refresh_suggestions()
+            self.refresh_procedures()
         else:
             self.todos = [{**t, "tags": [t["tag"]] if t.get("tag") else []}
                           for t in copy.deepcopy(S.TODOS)]
@@ -317,6 +321,39 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("todos.dismiss_suggestion", {"id": sid},
                                self._set_suggestions)
+
+    # ---- memory: learned procedures (Phase 9) ----
+    def _set_procedures(self, result: dict) -> None:
+        self.proposed_procedures = result.get("proposed", [])
+        self.active_procedures = result.get("active", [])
+        self.procedures_changed.emit()
+
+    def refresh_procedures(self) -> None:
+        if self._data is not None:
+            self._data.request("memory.procedures", {}, self._set_procedures)
+
+    def approve_procedure(self, slug: str) -> None:
+        if self._data is not None:
+            self._data.request("memory.approve_procedure", {"slug": slug},
+                               self._set_procedures)
+
+    def dismiss_procedure(self, slug: str) -> None:
+        if self._data is not None:
+            self._data.request("memory.dismiss_procedure", {"slug": slug},
+                               self._set_procedures)
+
+    def remove_procedure(self, slug: str) -> None:
+        if self._data is not None:
+            self._data.request("memory.remove_procedure", {"slug": slug},
+                               self._set_procedures)
+
+    def open_memory_file(self) -> None:
+        """Open the hand-editable memory.md in the user's default editor."""
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+
+        from lumen.daemon.config import default_memory_path
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(default_memory_path())))
 
     # ---- mail (live from the daemon mirror; sample rows without a daemon) ----
     def unread_count(self) -> int:
