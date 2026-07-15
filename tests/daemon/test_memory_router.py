@@ -47,3 +47,39 @@ async def test_todos_add_logs_habit(tmp_path):
 async def test_no_memory_is_silent(tmp_path):
     r = Router(FakeLLM(), FakeStore(rows=[]))   # memory=None
     await collect(r, "chat", {"message": "what's due today?"})   # must not raise
+
+
+class ForgetLLM:
+    """Echoes the topic keyword the forget path should match on."""
+    def __init__(self, keyword):
+        self._keyword = keyword
+
+    async def chat(self, messages):
+        yield self._keyword
+
+
+async def test_forget_removes_matching_line(tmp_path):
+    p = tmp_path / "memory.md"
+    p.write_text("## Email\n- Archives PulteGroup newsletters unread. (last seen 2026-07-14)\n"
+                 "## Todos\n- Groups errands. (last seen 2026-07-14)\n")
+    m = MemoryLog(db.connect(tmp_path / "mem.db"))
+    m.log("email", "query", {"message": "archive PulteGroup newsletter"})
+    r = Router(ForgetLLM("PulteGroup"), FakeStore(rows=[]), memory=m,
+               memory_path=p, memory_cap=4000)
+    await collect(r, "chat", {"message": "forget about PulteGroup"})
+    text = p.read_text()
+    assert "PulteGroup" not in text
+    assert "Groups errands" in text        # unrelated line survives
+    assert m.delete_matching("pultegroup") == 0   # log rows already gone
+
+
+async def test_forget_nothing_matched_is_honest(tmp_path):
+    p = tmp_path / "memory.md"
+    p.write_text("## Todos\n- Groups errands. (last seen 2026-07-14)\n")
+    m = MemoryLog(db.connect(tmp_path / "mem.db"))
+    r = Router(ForgetLLM("zzz-nomatch"), FakeStore(rows=[]), memory=m,
+               memory_path=p, memory_cap=4000)
+    out = await collect(r, "chat", {"message": "forget about zzz-nomatch"})
+    joined = "".join(e.get("chunk", "") for e in out)
+    assert "Groups errands" in p.read_text()
+    assert joined                          # some honest reply was streamed

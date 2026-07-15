@@ -151,6 +151,13 @@ MAIL_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# Explicit forget: prune the topic from both memory tiers. Checked ahead of
+# every other chat route so "forget the PulteGroup thing" never becomes a
+# generic chat turn.
+FORGET_HINT = re.compile(
+    r"\bforget\b|\bstop remembering\b|\bdelete what you (?:know|remember)\b",
+    re.IGNORECASE)
+
 # A follow-up in this shape is a correction (stronger memory signal than a
 # routine query): "no, I meant…", "not that", "actually…", "that's wrong".
 CORRECTION_HINT = re.compile(
@@ -702,7 +709,13 @@ class Router:
         """Pick the chat sub-path, stream it through, write-through the
         assistant turn, and log the interaction for the memory system."""
         subsystem = "chat"
-        if m := TODO_ADD.match(message):
+        skip_log = False
+        if (self._memory_path is not None and self._memory is not None
+                and FORGET_HINT.search(message)):
+            # The forget turn must not be logged — its own text names the topic
+            # and would re-seed what was just pruned.
+            sub, subsystem, skip_log = self._forget_chat(message), "chat", True
+        elif m := TODO_ADD.match(message):
             sub, subsystem = self._nl_add_chat(m.group(1).strip()), "todos"
         elif m := MARK_DONE.match(message):
             sub, subsystem = self._mark_done_chat(m.group(1)), "todos"
@@ -749,10 +762,55 @@ class Router:
             self._conv.add_message(conv_id, "assistant", "".join(acc), tools or None)
             if tools:                         # this thread is now tool-shaped for its follow-ups
                 self._conv.mark_tool_engaged(conv_id)
-        kind = "correction" if CORRECTION_HINT.search(message) else "query"
-        self._log(subsystem, kind, {"message": message[:300], "tools": tools or None})
-        if self._distill_trigger is not None:
-            self._distill_trigger()
+        if not skip_log:
+            kind = "correction" if CORRECTION_HINT.search(message) else "query"
+            self._log(subsystem, kind, {"message": message[:300], "tools": tools or None})
+            if self._distill_trigger is not None:
+                self._distill_trigger()
+
+    async def _forget_chat(self, message: str):
+        """Map the user's topic to matching memory lines, remove them from the
+        file and delete matching raw-log rows so a later distillation can't
+        re-learn it. Honest when nothing matched."""
+        blob = memory_mod.load(self._memory_path, self._memory_cap)
+        if not blob:
+            yield {"chunk": "There's nothing in my memory to forget yet."}
+            yield {"done": True}
+            return
+        system = ("The user wants you to forget something. Given their request "
+                  "and the current memory bullets, reply with ONLY the shortest "
+                  "keyword or phrase (verbatim from a bullet) identifying what to "
+                  "remove — no explanation. If nothing matches, reply NONE.")
+        user = f"Request: {message}\n\nMemory:\n{blob}"
+        topic = ""
+        try:
+            async for chunk in self._llm.chat(
+                    [{"role": "system", "content": system},
+                     {"role": "user", "content": user}]):
+                topic += chunk
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        topic = topic.strip().strip('"').strip()
+        removed = []
+        if topic and topic.upper() != "NONE":
+            parsed = memory_mod.parse(blob)
+            kept = {}
+            for head, bullets in parsed.items():
+                keep, drop = [], []
+                for b in bullets:
+                    (drop if topic.lower() in b.lower() else keep).append(b)
+                kept[head] = keep
+                removed.extend(drop)
+            if removed:
+                memory_mod.write(self._memory_path, memory_mod.render(kept))
+                self._memory.delete_matching(topic)
+        if removed:
+            listed = "\n".join(f"• {b[2:]}" for b in removed)
+            yield {"chunk": f"Forgotten:\n{listed}"}
+        else:
+            yield {"chunk": "I couldn't find anything matching that in my memory."}
+        yield {"done": True}
 
     async def _plain_chat(self, message: str, conv_id: int | None):
         messages = self._messages_for(message, conv_id)
