@@ -107,6 +107,14 @@ CREATE TRIGGER IF NOT EXISTS emails_au AFTER UPDATE ON emails BEGIN
     INSERT INTO emails_fts(rowid, subject, body, snippet, sender)
     VALUES (new.rowid, new.subject, new.body, new.snippet, new.sender);
 END;
+CREATE TABLE IF NOT EXISTS memory_log (   -- Phase 9 tier-1 raw interaction log
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,               -- ISO timestamp
+    subsystem TEXT NOT NULL,        -- calendar | email | todos | books | files | chat
+    kind TEXT NOT NULL,             -- 'query' | 'correction'
+    detail TEXT NOT NULL,           -- compact JSON: message, route, tools, outcome
+    folded INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
