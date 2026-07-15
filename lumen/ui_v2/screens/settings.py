@@ -230,7 +230,7 @@ class SettingsScreen(QWidget):
                          T.OK if esc else T.TEXT_MUTED),
             _config_line("context", str(m["num_ctx"]), T.INFO),
             _config_line("idle_timeout", str(m["idle_unload_minutes"]), T.INFO,
-                         "minutes — unloads when idle"),
+                         "min · idle-unload"),
         ):
             box.addWidget(line)
 
