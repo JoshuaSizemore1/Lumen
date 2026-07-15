@@ -3,7 +3,32 @@ from pathlib import Path
 
 import pytest
 
-from lumen.daemon.config import Config, default_db_path, default_socket_path, load_config
+from lumen.daemon.config import (Config, default_db_path,
+                                 default_memory_path, default_procedures_dir,
+                                 default_socket_path, load_config)
+
+
+def test_memory_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert default_memory_path() == tmp_path / "lumen" / "memory.md"
+    assert default_procedures_dir() == tmp_path / "lumen" / "procedures"
+    c = Config()
+    assert c.memory.blob_cap_chars == 4000
+    assert c.memory.max_active_procedures == 10
+
+
+def test_memory_config_overrides(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        "[memory]\n"
+        "blob_cap_chars = 3000\n"
+        "distill_min_entries = 8\n"
+        "max_active_procedures = 5\n"
+    )
+    c = load_config(p)
+    assert c.memory.blob_cap_chars == 3000
+    assert c.memory.distill_min_entries == 8
+    assert c.memory.max_active_procedures == 5
 
 
 def test_defaults_when_no_file(tmp_path):

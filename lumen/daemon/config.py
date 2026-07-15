@@ -37,6 +37,18 @@ def default_style_rules_path() -> Path:
     return root / "lumen" / "writing-style.md"
 
 
+def default_memory_path() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "memory.md"
+
+
+def default_procedures_dir() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "procedures"
+
+
 def default_google_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
@@ -73,6 +85,22 @@ class SchedulingConfig:
     # 8:00–20:00 local, weekends included).
     day_start: str = "08:00"
     day_end: str = "20:00"
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    # Two-tier personalization memory (Phase 9). Caps are hard limits, not
+    # targets — the distiller compresses/drops to stay under them.
+    blob_cap_chars: int = 4000          # memory.md — ~1k tokens, 4B budget
+    distill_min_entries: int = 20       # unfolded log rows that force a run
+    distill_soft_entries: int = 5       # fewer rows still run if the oldest is old
+    distill_soft_age_hours: int = 24
+    distill_cooldown_hours: int = 24    # min gap between runs
+    distill_delay_seconds: int = 120    # ride the warm model ~2 min after a chat
+    decay_days: int = 60                # bullets older than this are dropped
+    procedure_cap_chars: int = 1000
+    max_active_procedures: int = 10
+    procedure_retire_days: int = 90
 
 
 @dataclass(frozen=True)
@@ -119,6 +147,9 @@ class Config:
     scheduling: "SchedulingConfig" = field(default_factory=lambda: SchedulingConfig())
     notes: "NotesConfig" = field(default_factory=lambda: NotesConfig())
     manabi: "ManabiConfig" = field(default_factory=lambda: ManabiConfig())
+    memory: "MemoryConfig" = field(default_factory=lambda: MemoryConfig())
+    memory_path: Path = field(default_factory=default_memory_path)
+    procedures_dir: Path = field(default_factory=default_procedures_dir)
 
     @property
     def keep_alive(self) -> str:
@@ -241,6 +272,22 @@ def load_config(path: Path | None = None) -> Config:
         if start_t >= end_t:
             raise SystemExit("lumen: [scheduling] day_start must be before day_end")
         kwargs["scheduling"] = sched
+    mem_raw = data.get("memory")
+    if mem_raw is not None:
+        int_fields = ("blob_cap_chars", "distill_min_entries",
+                      "distill_soft_entries", "distill_soft_age_hours",
+                      "distill_cooldown_hours", "distill_delay_seconds",
+                      "decay_days", "procedure_cap_chars",
+                      "max_active_procedures", "procedure_retire_days")
+        m_kwargs = {k: int(mem_raw[k]) for k in int_fields if k in mem_raw}
+        mem_cfg = MemoryConfig(**m_kwargs)
+        if mem_cfg.blob_cap_chars <= 0 or mem_cfg.max_active_procedures <= 0:
+            raise SystemExit("lumen: [memory] caps must be positive")
+        kwargs["memory"] = mem_cfg
+    if "memory_path" in storage:
+        kwargs["memory_path"] = Path(storage["memory_path"]).expanduser()
+    if "procedures_dir" in storage:
+        kwargs["procedures_dir"] = Path(storage["procedures_dir"]).expanduser()
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:
         raise SystemExit(
