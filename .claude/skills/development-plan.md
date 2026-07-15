@@ -180,8 +180,10 @@ Morning briefing, commitment tracking, meeting prep, inbox triage digest, NL sch
 
 **Success**: each feature is testable independently; if one breaks, it shouldn't take others down with it (a sign the composition is too tangled).
 
-## Phase 9 — Memory system
+## Phase 9 — Memory system — DONE (2026-07-14)
 Raw log, background distillation, per-subsystem pattern memory, correction-weighting, decay.
+
+**Verified**: all five success criteria live over the real socket against real Ollama (`qwen3:4b-instruct`) on 2026-07-14. (1) Distillation ran on the warm-ride trigger and wrote `~/.local/share/lumen/memory.md` with specific, correctly-attributed bullets tied to the seeded todos; (2) a hand-added `## Books` line ("favorite novel is Piranesi…") drove a plain-chat answer, proving the file is injected and edits apply immediately; (3) "forget what you know about Zillow" removed the matching bullet from the file *and* the matching `memory_log` row, unrelated bullets surviving; (4) the distiller drafted a `procedures/proposed/` routine from the recurring todo-adds, it stayed inert while proposed (`match()` reads only `active/`), and `memory.approve_procedure` moved it to `active/`; (5) `ollama ps` showed a finite keep-alive countdown with no keep-warm loop — idle-unload intact. **Live verification found one bug**: the 4B emits placeholder dates (`(last seen 0000-00-00)`) instead of stamping today, so the date is now owned in code (`distill.restamp_bullets` — reuse an unchanged bullet's prior date so decay still fires, stamp today for new/reworded text), not trusted to the model. Spec `docs/superpowers/specs/2026-07-14-phase9-memory-system-design.md`, plan `docs/superpowers/plans/2026-07-14-phase9-memory-system.md`. Durable as-built decisions recorded in `memory-system.md` ("As built" section). Suite 717.
 
 **Read first**: `memory-system.md` — it is effectively the design spec for this phase (two-tier design, correction signal, per-subsystem scoping, decay, supervised procedures, and the fine-tuning rejection rationale). `daemon/llm/memory.py` is the stub.
 
