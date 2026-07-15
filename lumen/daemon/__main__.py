@@ -65,6 +65,7 @@ async def run() -> None:
                     memory_cap=cfg.memory.blob_cap_chars,
                     procedures=procedures,
                     distill_trigger=memory_worker.schedule,
+                    config=cfg,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

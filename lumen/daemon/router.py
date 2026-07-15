@@ -326,6 +326,7 @@ class Router:
                  suggestions=None, scheduling=None, notes=None, manabi=None,
                  memory=None, memory_path=None, memory_cap=4000,
                  procedures=None, distill_trigger=None,
+                 config=None,
                  max_iterations=4):
         self._llm = llm
         self._todos = todos
@@ -348,6 +349,7 @@ class Router:
         self._memory_cap = memory_cap
         self._procedures = procedures        # ProcedureStore
         self._distill_trigger = distill_trigger  # callable() scheduling a run
+        self._config = config    # loaded Config for the read-only settings.get
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -481,6 +483,13 @@ class Router:
             yield {"result": (self._manabi.status() if self._manabi is not None
                               else {"configured": False, "due": None,
                                     "last_review": None})}
+        elif type_ == "settings.get":
+            # Read-only snapshot of the loaded config for the Settings screen.
+            if self._config is None:
+                yield {"error": "settings unavailable"}
+            else:
+                from .settings_snapshot import build_settings_snapshot
+                yield {"result": build_settings_snapshot(self._config)}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}

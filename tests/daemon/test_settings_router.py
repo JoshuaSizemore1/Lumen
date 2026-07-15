@@ -1,0 +1,16 @@
+from lumen.daemon.config import Config
+from lumen.daemon.router import Router
+from tests.daemon.test_router import FakeLLM, FakeStore, collect
+
+
+async def test_settings_get_returns_snapshot():
+    r = Router(FakeLLM(), FakeStore(), config=Config(model="qwen3:4b-instruct"))
+    out = await collect(r, "settings.get", {})
+    assert out[0]["result"]["model"]["name"] == "qwen3:4b-instruct"
+    assert "accounts" in out[0]["result"] and "sync" in out[0]["result"]
+
+
+async def test_settings_get_without_config_errs():
+    r = Router(FakeLLM(), FakeStore())
+    out = await collect(r, "settings.get", {})
+    assert "error" in out[0]
