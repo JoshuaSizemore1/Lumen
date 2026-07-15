@@ -23,9 +23,7 @@ The meaningful gaps found:
    blank with only a "Message Lumen…" input at the bottom.
 3. **Empty/loading/error states are inconsistent.** Some screens have
    not-connected strings (Calendar, Mail), others show blank panes.
-4. **Accent choice is not persisted** — picking an accent is lost on restart
-   (the `accent_requested` signal is never written anywhere durable).
-5. **Keyboard nav** works (number-key tabs, Esc) but has never been audited for
+4. **Keyboard nav** works (number-key tabs, Esc) but has never been audited for
    consistency and is undocumented.
 
 ## Design decisions (locked with the user)
@@ -33,8 +31,8 @@ The meaningful gaps found:
 - **Scope:** fix the real gaps; do not chase pixels.
 - **Settings behavior:** live *display* of the real loaded config; you change
   things by **editing `config.toml`** (it already hot-reloads). Toggles are
-  reflect-only. The accent picker is the one interactive control, and it now
-  persists.
+  reflect-only. The accent picker is the one interactive control (it is already
+  live and already persists via `QSettings` — no change needed there).
 - **Chat empty state:** a centered Lumen identity block plus a few **clickable
   example prompts** (same content as the launcher's "TRY" list); clicking one
   starts the chat.
@@ -43,8 +41,7 @@ The meaningful gaps found:
 
 - No strict pixel-parity diffing / correcting every spacing deviation.
 - No new features, tools, or connectors.
-- No daemon business-logic changes beyond a read-only `settings.get` endpoint
-  and accent persistence.
+- No daemon business-logic changes beyond a read-only `settings.get` endpoint.
 - No in-app account connect/disconnect — connecting stays the `lumen-google-auth`
   command (edit-in-file model). Settings only *shows* connection state.
 
@@ -92,18 +89,23 @@ Shape:
       "config": "~/.config/lumen/config.toml",
       "db": "~/.local/share/lumen/lumen.db",
       "memory": "~/.local/share/lumen/memory.md"
-    },
-    "appearance": {"accent": "green"}
+    }
   }
 }
 ```
 
+Accent is intentionally **not** in this snapshot — it is a pure UI concern that
+already persists via `QSettings` (`main.py` saves on pick at line 224, restores
+at 253) and the Settings screen already shows the live accent from `T.ACCENT`.
+The daemon does not know or need it.
+
 Notes:
 - `accounts.*.connected` is derived from `google_auth.connected(cfg.google,
-  scopes)` — Gmail keyed on a gmail scope, Calendar on a calendar scope, so the
-  two report independently. Not-connected is a normal state, not an error.
+  scopes)` — Gmail keyed on `GMAIL_READ_SCOPES`, Calendar on `READ_SCOPES`, so
+  the two report independently. Not-connected is a normal state, not an error.
 - `num_ctx` is the constant the router already sends on every Ollama call
-  (8192). Show it read-only; it is real, it just isn't a `config.toml` knob yet.
+  (`llm/client.py:NUM_CTX` = 8192). Show it read-only; it is real, it just isn't
+  a `config.toml` knob yet.
 - **Fictional mockup knobs are dropped**, not faked: `on_wake` and a
   `confirm_writes` toggle have no real backing (writes are *always* confirmed —
   non-negotiable). We surface only knobs that exist and drive behavior.
@@ -127,29 +129,13 @@ Notes:
   an account is not connected, show a muted one-liner: `run: lumen-google-auth`.
 - `[model]` and `[sync]` config-line columns render the real snapshot values via
   the existing `_config_line` helper.
-- `[appearance]` accent picker unchanged in look; see 1c for persistence.
+- `[appearance]` accent picker unchanged — it is already live and already
+  persists via `QSettings`. Leave it exactly as-is.
 - `[memory]` section (procedures + "View what Lumen has learned") is already
   live — leave it.
 - Loading/error: before the snapshot arrives show a muted "loading settings…";
   on daemon error show a muted "daemon offline" placeholder in place of the
   sections (reuse the shared `empty_state()` helper from Workstream 3).
-
-### 1c. Accent persistence
-
-- On accent pick, in addition to the live re-theme it already does, write
-  `[appearance] accent = "<name>"` back to `config.toml`. This is the single
-  write-back and is consistent with "edit in the file" (it edits the same file).
-- Implementation: a small, surgical TOML writer that sets `appearance.accent`
-  without clobbering the rest of the file. `tomllib` is read-only in the stdlib,
-  so use a minimal targeted rewrite (regex/section-aware insert) rather than
-  adding a full TOML-writer dependency — the value is a single known key.
-  Chosen because it keeps the file hand-editable and comment-preserving; a
-  round-tripping library (`tomlkit`) is heavier than one key warrants.
-- On startup, `app.py` reads the accent from config and applies it before the
-  window builds (today `T.MODEL_NAME` is set from cfg there; add accent the same
-  way). `config.py` gains an `[appearance] accent` read into a new
-  `Config.accent: str` field (validated against `theme.ACCENT_OPTIONS`, falling
-  back to the current default on an unknown value).
 
 ## Workstream 2 — Chat empty state
 
@@ -208,13 +194,12 @@ Notes:
   scripts/screenshot.py lumen.ui_v2.main:build_window shots/ --size 1320x798`
   and eyeball each screen against its mockup.
 - **Live-verify (verify skill):** drive the real daemon over the socket —
-  `settings.get` returns the real model/sync/account values; the accent
-  round-trip persists to `config.toml` and survives a restart; Chat empty state
+  `settings.get` returns the real model/sync/account values; Chat empty state
   shows and a clicked prompt starts a real conversation.
 
 ## Success criteria (from development-plan.md Phase 10)
 
 Visual parity with the mockups, all screens reachable and navigable, dark/
 minimalist/keyboard-first feel intact — plus the specific gaps closed: Settings
-shows live config, accent persists, Chat has an empty state, and empty/loading/
+shows live config, Chat has an empty state, and empty/loading/
 error states are consistent across screens.
