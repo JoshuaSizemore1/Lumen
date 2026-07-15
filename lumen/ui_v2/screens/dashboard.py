@@ -222,6 +222,9 @@ class DashboardScreen(QWidget):
             self.todo_lay.addWidget(row)
             self.todo_lay.addWidget(hline(T.BORDER_FAINT))
         shown = [t for t in self.state.todos if not t["done"]][:4]
+        if not shown and not self.state.manabi_due:
+            self.todo_lay.addWidget(label("✓ nothing due today", 12, T.TEXT_DIM))
+            self.todo_lay.addWidget(hline(T.BORDER_FAINT))
         for t in shown:
             row = QWidget()
             rl = hbox(row, (2, 8, 2, 8), 10)
@@ -248,7 +251,11 @@ class DashboardScreen(QWidget):
         clear_layout(self.mail_lay)
         self.mail_lay.addWidget(_section_head("UNREAD · MAIL", f"{self.state.unread_count()} unread"))
         self.mail_lay.addSpacing(9)
-        for m in self.state.unread_mails():
+        unread = self.state.unread_mails()
+        if not unread:
+            self.mail_lay.addWidget(label("✓ inbox clear", 12, T.TEXT_DIM))
+            self.mail_lay.addWidget(hline(T.BORDER_FAINT))
+        for m in unread:
             row = ClickRow(lambda mid=m["id"]: self._open_mail(mid))
             rl = hbox(row, (2, 9, 2, 9), 9)
             rl.addWidget(Dot(7, T.ACCENT), 0, Qt.AlignmentFlag.AlignTop)

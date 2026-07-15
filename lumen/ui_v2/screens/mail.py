@@ -5,8 +5,8 @@ from PyQt6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    ClickRow, Dot, ElideLabel, button, clear_layout, font, hbox, label, qcolor,
-    scroll, vbox, vline,
+    ClickRow, Dot, ElideLabel, button, clear_layout, empty_state, font, hbox,
+    label, qcolor, scroll, vbox, vline,
 )
 
 
@@ -83,6 +83,16 @@ class MailScreen(QWidget):
         self.unread_lab.setText(f"{self.state.unread_count()} unread")
         self.status_lab.setText(self._status_text())
         clear_layout(self.rows_lay)
+        if not self.state.mails:
+            if not self.state.mail_connected:
+                self.rows_lay.addWidget(empty_state(
+                    "Gmail not connected", "run: lumen-google-auth"))
+            else:
+                self.rows_lay.addWidget(empty_state(
+                    "No messages", "your inbox is clear"))
+            self.rows_lay.addStretch(1)
+            self._populate_pane()
+            return
         for m in self.state.mails:
             selected = m["id"] == self.state.selected_mail
             row = ClickRow(lambda mid=m["id"]: self.state.select_mail(mid))

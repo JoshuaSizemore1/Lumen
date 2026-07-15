@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import QComboBox, QFrame, QLineEdit, QSizePolicy, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    ElideLabel, button, clear_layout, hbox, hline, label, scroll, vbox,
+    ElideLabel, button, clear_layout, empty_state, hbox, hline, label, scroll,
+    vbox,
 )
 
 
@@ -133,6 +134,10 @@ class BooksScreen(QWidget):
     def populate(self):
         self.count_lab.setText(f"{len(self.state.books)} books · your catalog")
         clear_layout(self.log_lay)
+        if not self.state.books:
+            self.log_lay.addWidget(empty_state("No books logged yet",
+                                               "log one above"))
+            return
         for b in self.state.books:
             item = QWidget()
             iv = vbox(item, (2, 12, 2, 12), 0)

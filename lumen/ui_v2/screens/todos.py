@@ -5,8 +5,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QSizePolicy, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    Chip, ClickLabel, TodoCheck, button, clear_layout, hbox, hline, label,
-    scroll, tag_chip, vbox,
+    Chip, ClickLabel, TodoCheck, button, clear_layout, empty_state, hbox,
+    hline, label, scroll, tag_chip, vbox,
 )
 
 
@@ -155,6 +155,9 @@ class TodosScreen(QWidget):
     def populate(self):
         self.count_lab.setText(f"{self.state.open_count()} open · edit directly, no assistant needed")
         clear_layout(self.groups_lay)
+        if not self.state.todos:
+            self.groups_lay.addWidget(empty_state("All clear", "no open todos"))
+            return
         sections = (("TODAY", T.ACCENT, "today"), ("UPCOMING", T.WARN, "upcoming"),
                     ("NO DATE", T.TEXT_DIM, "none"))
         for i, (name, color, key) in enumerate(sections):
