@@ -1,11 +1,13 @@
-"""Settings screen: config.toml-styled sections with toggle switches."""
+"""Settings screen: config.toml-styled sections rendered from the live daemon
+config (settings.get). Reflect-only — you change values by editing config.toml
+(it hot-reloads). The accent picker is the one interactive control."""
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QPainter, QPen
 from PyQt6.QtWidgets import QAbstractButton, QLabel, QSizePolicy, QWidget
 
 from .. import theme as T
-from ..widgets import (Switch, button, clear_layout, font, hbox, hline, label,
-                       qcolor, scroll, vbox)
+from ..widgets import (Dot, button, clear_layout, empty_state, font, hbox,
+                       hline, label, qcolor, scroll, vbox)
 from ..state import AppState
 
 
@@ -32,22 +34,6 @@ class AccentSwatch(QAbstractButton):
         p.drawRoundedRect(r, 5, 5)
 
 
-def _toggle_row(name: str, desc: str, desc_color: str, status: str | None,
-                checked: bool, on_toggle) -> QWidget:
-    row = QWidget()
-    rl = hbox(row, (12, 9, 12, 9), 12)
-    n = label(name, 12, T.TEXT_SECONDARY)
-    n.setFixedWidth(150)
-    rl.addWidget(n)
-    rl.addWidget(label(desc, 11, desc_color), 1)
-    if status:
-        rl.addWidget(label(status, 10, T.OK))
-    sw = Switch(checked)
-    sw.toggled.connect(on_toggle)
-    rl.addWidget(sw)
-    return row
-
-
 def _config_line(key: str, value: str, value_color: str, comment: str = "") -> QLabel:
     html = (f'<span style="color:{T.TEXT_DIM}">{key}</span> = '
             f'<span style="color:{value_color}">{value}</span>')
@@ -63,9 +49,6 @@ class SettingsScreen(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
-        # local stub state; TODO: read/write real config.toml through the daemon
-        self.accounts = {"gmail": True, "gcal": True}
-        self.mcp = {"search": True, "books": True, "weather": False}
 
         inner = QWidget()
         outer = hbox(inner, (26, 22, 26, 40), 0)
@@ -87,29 +70,20 @@ class SettingsScreen(QWidget):
                           11, T.TEXT_FAINT))
         v.addSpacing(18)
 
-        # [accounts]
+        # [accounts] — reflect-only status (edit config.toml / run auth to change)
         v.addWidget(label("[accounts]", 12, T.ACCENT))
         v.addSpacing(8)
-        v.addWidget(_toggle_row("gmail", "alex@gmail.com · read + send", T.TEXT_DIM,
-                                "connected", True, lambda on: self._set("accounts", "gmail", on)))
-        v.addWidget(hline(T.BORDER_FAINT))
-        v.addWidget(_toggle_row("google_calendar", "primary · read + write", T.TEXT_DIM,
-                                "connected", True, lambda on: self._set("accounts", "gcal", on)))
-        v.addWidget(hline(T.BORDER_FAINT))
+        self._accounts_box = QWidget()
+        vbox(self._accounts_box, (0, 0, 0, 0), 0)
+        v.addWidget(self._accounts_box)
         v.addSpacing(20)
 
         # [mcp_servers]
         v.addWidget(label("[mcp_servers]", 12, T.ACCENT))
         v.addSpacing(8)
-        v.addWidget(_toggle_row("search", "brave-search · stdio", T.TEXT_DIM, None,
-                                True, lambda on: self._set("mcp", "search", on)))
-        v.addWidget(hline(T.BORDER_FAINT))
-        v.addWidget(_toggle_row("books_lookup", "openlibrary · http :7431", T.TEXT_DIM, None,
-                                True, lambda on: self._set("mcp", "books", on)))
-        v.addWidget(hline(T.BORDER_FAINT))
-        v.addWidget(_toggle_row("weather", "not configured", T.TEXT_FAINT, None,
-                                False, lambda on: self._set("mcp", "weather", on)))
-        v.addWidget(hline(T.BORDER_FAINT))
+        self._mcp_box = QWidget()
+        vbox(self._mcp_box, (0, 0, 0, 0), 0)
+        v.addWidget(self._mcp_box)
         v.addSpacing(20)
 
         # [model] + [sync] as raw config columns
@@ -119,35 +93,26 @@ class SettingsScreen(QWidget):
         mv = vbox(model, (0, 0, 0, 0), 0)
         mv.addWidget(label("[model]", 12, T.ACCENT))
         mv.addSpacing(8)
-        for line in (
-            _config_line("runtime", '"ollama"', T.OK),
-            _config_line("name", '"llama3.1:8b"', T.OK),
-            _config_line("context", "8192", T.INFO),
-            _config_line("idle_timeout", "300", T.INFO, "unload after 5m"),
-        ):
-            lw = QWidget()
-            ll = vbox(lw, (0, 5, 0, 5), 0)
-            ll.addWidget(line)
-            mv.addWidget(lw)
+        self._model_box = QWidget()
+        vbox(self._model_box, (0, 0, 0, 0), 10)
+        mv.addWidget(self._model_box)
         cols.addWidget(model, 1)
         sync = QWidget()
         sync.setMinimumWidth(260)
         sv = vbox(sync, (0, 0, 0, 0), 0)
         sv.addWidget(label("[sync]", 12, T.ACCENT))
         sv.addSpacing(8)
-        for line in (
-            _config_line("interval", "15", T.INFO, "minutes"),
-            _config_line("on_wake", "true", T.WARN),
-            _config_line("confirm_writes", "true", T.WARN, "email/calendar"),
-            _config_line("catalog_path", '"~/books.db"', T.OK),
-        ):
-            lw = QWidget()
-            ll = vbox(lw, (0, 5, 0, 5), 0)
-            ll.addWidget(line)
-            sv.addWidget(lw)
+        self._sync_box = QWidget()
+        vbox(self._sync_box, (0, 0, 0, 0), 10)
+        sv.addWidget(self._sync_box)
         cols.addWidget(sync, 1)
         v.addLayout(cols)
         v.addSpacing(20)
+
+        # seed the dynamic sections until the first snapshot arrives
+        for box in (self._accounts_box, self._mcp_box, self._model_box,
+                    self._sync_box):
+            box.layout().addWidget(label("loading…", 11, T.TEXT_FAINT))
 
         # [appearance] — accent picker (blue/green/amber/purple/pink)
         v.addWidget(label("[appearance]", 12, T.ACCENT))
@@ -194,6 +159,92 @@ class SettingsScreen(QWidget):
     def showEvent(self, ev):
         super().showEvent(ev)
         self.state.refresh_procedures()
+        self.state.fetch_settings(self._on_settings)
+
+    # ---- live snapshot -----------------------------------------------------
+
+    def _status_row(self, name: str, detail: str, state_text: str,
+                    ok: bool, hint: str | None = None) -> QWidget:
+        row = QWidget()
+        rl = hbox(row, (12, 9, 12, 9), 12)
+        n = label(name, 12, T.TEXT_SECONDARY)
+        n.setFixedWidth(150)
+        rl.addWidget(n)
+        rl.addWidget(label(detail, 11, T.TEXT_DIM), 1)
+        if hint:
+            rl.addWidget(label(hint, 10, T.TEXT_FAINT))
+        rl.addWidget(Dot(7, T.OK if ok else T.TEXT_GHOST))
+        rl.addWidget(label(state_text, 10, T.OK if ok else T.TEXT_MUTED))
+        return row
+
+    def _on_settings(self, result: dict):
+        if not isinstance(result, dict) or "model" not in result:
+            for box, msg in ((self._accounts_box, "daemon offline"),
+                             (self._mcp_box, ""), (self._model_box, ""),
+                             (self._sync_box, "")):
+                clear_layout(box.layout())
+                if msg:
+                    box.layout().addWidget(empty_state(msg))
+            return
+        self._populate(result)
+
+    def _populate(self, snap: dict):
+        acc = snap["accounts"]
+        box = self._accounts_box.layout()
+        clear_layout(box)
+        gm, gc = acc["gmail"]["connected"], acc["google_calendar"]["connected"]
+        box.addWidget(self._status_row(
+            "gmail", "read + modify", "connected" if gm else "not connected", gm,
+            None if gm else "run: lumen-google-auth"))
+        box.addWidget(hline(T.BORDER_FAINT))
+        box.addWidget(self._status_row(
+            "google_calendar", "read + write",
+            "connected" if gc else "not connected", gc,
+            None if gc else "run: lumen-google-auth"))
+        box.addWidget(hline(T.BORDER_FAINT))
+
+        box = self._mcp_box.layout()
+        clear_layout(box)
+        servers = snap["mcp"]["servers"]
+        enabled = snap["mcp"]["enabled"]
+        if servers:
+            for s in servers:
+                box.addWidget(self._status_row(
+                    s["name"], s["detail"],
+                    "enabled" if s["enabled"] else "off", s["enabled"]))
+                box.addWidget(hline(T.BORDER_FAINT))
+            if not enabled:
+                box.addWidget(label("# mcp disabled — enable in config.toml",
+                                    10, T.TEXT_FAINT))
+        else:
+            box.addWidget(label("no MCP servers configured", 11, T.TEXT_FAINT))
+
+        m, sy = snap["model"], snap["sync"]
+        box = self._model_box.layout()
+        clear_layout(box)
+        esc = m["escalation_model"]
+        for line in (
+            _config_line("runtime", f'"{m["runtime"]}"', T.OK),
+            _config_line("name", f'"{m["name"]}"', T.OK),
+            _config_line("escalation", f'"{esc}"' if esc else "unset",
+                         T.OK if esc else T.TEXT_MUTED),
+            _config_line("context", str(m["num_ctx"]), T.INFO),
+            _config_line("idle_timeout", str(m["idle_unload_minutes"]), T.INFO,
+                         "minutes — unloads when idle"),
+        ):
+            box.addWidget(line)
+
+        box = self._sync_box.layout()
+        clear_layout(box)
+        for line in (
+            _config_line("gmail_poll", str(sy["gmail_poll_minutes"]), T.INFO, "min"),
+            _config_line("calendar_poll", str(sy["calendar_poll_minutes"]), T.INFO, "min"),
+            _config_line("gmail_window", str(sy["gmail_window_months"]), T.INFO, "months"),
+            _config_line("db", f'"{snap["paths"]["db"]}"', T.OK),
+        ):
+            box.addWidget(line)
+
+    # ---- supervised procedures (Phase 9) -----------------------------------
 
     def _proc_row(self, proc: dict, actions: list[tuple]) -> QWidget:
         row = QWidget()
@@ -229,7 +280,3 @@ class SettingsScreen(QWidget):
                      lambda _=False, s=slug: self.state.remove_procedure(s))]))
         if not proposed and not active:
             box.addWidget(label("No learned routines yet.", 11, T.TEXT_FAINT))
-
-    def _set(self, group: str, key: str, on: bool):
-        # TODO: persist to config.toml via the daemon
-        getattr(self, group)[key] = on

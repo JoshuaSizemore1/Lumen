@@ -332,6 +332,11 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("memory.procedures", {}, self._set_procedures)
 
+    def fetch_settings(self, cb) -> None:
+        """One-shot read of the live daemon config for the Settings screen."""
+        if self._data is not None:
+            self._data.request("settings.get", {}, cb)
+
     def approve_procedure(self, slug: str) -> None:
         if self._data is not None:
             self._data.request("memory.approve_procedure", {"slug": slug},
