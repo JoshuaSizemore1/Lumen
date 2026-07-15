@@ -4,6 +4,7 @@ the capped memory blob on the fast model, behind a mechanical validation gate
 runs inline with an interactive request. Corrections are weighted above routine
 queries; staleness decay is applied by code before the merge, not by the model."""
 
+import re
 from datetime import date
 
 from lumen.daemon.llm import memory as memory_mod
@@ -56,6 +57,37 @@ def decay_bullets(bullets: list[str], now: date, max_age_days: int) -> list[str]
     return kept
 
 
+def _bullet_text(bullet: str) -> str:
+    """A bullet's text with its leading '- ' and trailing date stripped."""
+    t = memory_mod.BULLET_DATE.sub("", bullet).strip()
+    return re.sub(r"^-\s*", "", t).strip()
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", s.lower()).strip()
+
+
+def restamp_bullets(new_bullets: list[str], current_bullets: list[str],
+                    today: date) -> list[str]:
+    """Code owns the last-seen date — the 4B model can't be trusted to stamp it
+    (observed '0000-00-00' live). Reuse a current bullet's date when the text is
+    unchanged (so decay still fires on genuinely stale items); stamp today for
+    anything new or reworded."""
+    today_s = today.isoformat()
+    prior = {}
+    for c in current_bullets:
+        m = memory_mod.BULLET_DATE.search(c)
+        if m:
+            prior[_norm(_bullet_text(c))] = m.group(1)
+    out = []
+    for b in new_bullets:
+        text = _bullet_text(b)
+        if not text:
+            continue
+        out.append(f"- {text} (last seen {prior.get(_norm(text), today_s)})")
+    return out
+
+
 def validate_section(text: str, header: str, cap: int) -> str | None:
     """Mechanical gate. Returns the section body (bullets joined by newlines,
     header stripped) if the model produced the right header with ≥1 dated
@@ -88,7 +120,10 @@ async def merge_section(llm, header: str, current_bullets: list[str],
             text += chunk
     except Exception:
         return None
-    body = validate_section(text, header, cap)
-    if body is None:
+    raw = memory_mod.parse(text).get(header) or []
+    bullets = restamp_bullets(raw, current_bullets, now)
+    if not bullets:
         return None
-    return [b for b in body.splitlines() if b.strip().startswith("- ")]
+    if len(f"## {header}\n" + "\n".join(bullets) + "\n") > cap:
+        return None
+    return bullets
