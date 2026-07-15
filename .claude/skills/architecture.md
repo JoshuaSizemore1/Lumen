@@ -15,6 +15,13 @@ Chat is multi-turn and daemon-owned. Every chat request carries a `conversation_
 - Daemon itself is cheap to keep running (it's just Python + sockets, no model loaded) — the LLM subprocess/server is the only thing that idle-unloads.
 - UI is a separate process; can be killed/restarted independently of the daemon without losing state (SQLite is the source of truth, not in-memory daemon state).
 
+## Keyboard map (Phase 10 — `ui_v2`)
+Audited 2026-07-15; the number keys match the muted hint chips rendered in each tab.
+- `1`–`6` — switch tabs: `1` Launcher, `2` Dashboard, `3` Calendar, `4` Todos, `5` Books, `6` Chat (wired in `main.py` from the same `kbd` map that draws the chips, so the badges are self-documenting).
+- **Mail** and **Settings** deliberately have no number key: Mail's badge slot shows the unread count instead, and Settings is the ⚙ gear. Both stay reachable — click the tab, the Dashboard "Open mail →" / gear, or `state.view_requested`.
+- `Esc` — dismiss the launcher overlay (also on focus loss), close the compose dialog, cancel the confirm dialog.
+- `Return`/`Enter` — submit the focused input (launcher query, chat message, todo add, compose revise) and accept the confirm dialog. Inputs are single-line `QLineEdit`s, so plain Return is the submit; there is no Ctrl+Return convention.
+
 ## Why split daemon vs UI
 - Keeps the LLM/connector logic testable without a GUI event loop in the way.
 - Lets you swap the frontend later (PyQt6 now, something else later) without touching the backend.
