@@ -151,6 +151,13 @@ MAIL_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# A follow-up in this shape is a correction (stronger memory signal than a
+# routine query): "no, I meant…", "not that", "actually…", "that's wrong".
+CORRECTION_HINT = re.compile(
+    r"^\s*(?:no[,.\s]|not that\b|actually[,.\s]|that'?s (?:wrong|not right|not what)"
+    r"|i meant\b|wrong\b)",
+    re.IGNORECASE)
+
 CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 
 # In-context conversation history is a fixed size, not unbounded: only the most
@@ -501,12 +508,16 @@ class Router:
             yield {"result": self._books.list_all()}
         elif type_ == "books.add":
             try:
-                yield {"result": self._books.add(
+                added = self._books.add(
                     payload.get("title", ""), payload.get("author"),
                     int(payload["rating"]) if payload.get("rating") else None,
-                    payload.get("notes"))}
+                    payload.get("notes"))
             except (TypeError, ValueError) as e:
                 yield {"error": str(e)}
+            else:
+                self._log("books", "query", {"action": "add",
+                                             "title": payload.get("title", "")})
+                yield {"result": added}
         elif type_ == "books.delete":
             try:
                 yield {"result": self._books.delete(int(payload["id"]))}
@@ -538,6 +549,8 @@ class Router:
             async for ev in self._gated_create(proposal):
                 if "_outcome" in ev:
                     created, text = ev["_outcome"]
+                    if created:
+                        self._log("calendar", "query", {"action": "create_event"})
                     yield {"result": {"created": created, "message": text}}
                 else:
                     yield ev
@@ -572,9 +585,13 @@ class Router:
             yield {"result": self._todos.list_all()}
         elif type_ == "todos.add":
             try:
-                yield {"result": self._todos.add(payload.get("text", ""))}
+                rows = self._todos.add(payload.get("text", ""))
             except ValueError as e:
                 yield {"error": str(e)}
+            else:
+                self._log("todos", "query", {"action": "add",
+                                             "text": payload.get("text", "")[:200]})
+                yield {"result": rows}
         elif type_ == "todos.toggle":
             try:
                 yield {"result": self._todos.toggle(int(payload["id"]),
@@ -625,6 +642,8 @@ class Router:
                 except (KeyError, TypeError, ValueError):
                     yield {"error": "todos.dismiss_suggestion needs {id}"}
                     return
+                self._log("email", "correction",
+                          {"action": "dismiss_suggestion", "id": payload.get("id")})
                 yield {"result": {"suggestions": self._suggestions.pending()}}
         elif type_.startswith("emails.") or type_ == "mail.refresh":
             if self._mail is None or self._mail_store is None:
@@ -680,42 +699,43 @@ class Router:
             yield {"error": f"unknown request type: {type_}"}
 
     async def _chat(self, message: str, conv_id: int | None):
-        """Pick the chat sub-path, stream it through, and write-through the
-        assistant turn (with any tool names) once it completes."""
+        """Pick the chat sub-path, stream it through, write-through the
+        assistant turn, and log the interaction for the memory system."""
+        subsystem = "chat"
         if m := TODO_ADD.match(message):
-            sub = self._nl_add_chat(m.group(1).strip())
+            sub, subsystem = self._nl_add_chat(m.group(1).strip()), "todos"
         elif m := MARK_DONE.match(message):
-            sub = self._mark_done_chat(m.group(1))
+            sub, subsystem = self._mark_done_chat(m.group(1)), "todos"
         elif self._calendar is not None and PREP_HINT.search(message):
-            sub = self._prep_chat(message)
+            sub, subsystem = self._prep_chat(message), "calendar"
         elif (self._suggestions is not None and self._mail_store is not None
                 and PROMISE_HINT.search(message)):
-            sub = self._commitments_chat()
+            sub, subsystem = self._commitments_chat(), "email"
         elif BRIEFING_HINT.search(message):
-            sub = self._briefing_chat()
+            sub, subsystem = self._briefing_chat(), "chat"
         elif (self._confirm is not None and self._mail is not None
                 and COMPOSE_HINT.search(message)):
-            sub = self._compose_email_chat(message)
+            sub, subsystem = self._compose_email_chat(message), "email"
         elif self._mail_store is not None and TRIAGE_HINT.search(message):
-            sub = self._triage_chat()
+            sub, subsystem = self._triage_chat(), "email"
         elif self._calendar is not None and SLOT_HINT.search(message):
-            sub = self._slots_chat(message)
+            sub, subsystem = self._slots_chat(message), "calendar"
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and BOOKING_HINT.search(message)
                 and (slot_ctx := self._slot_context(conv_id))):
-            sub = self._create_event_chat(message, context=slot_ctx)
+            sub, subsystem = self._create_event_chat(message, context=slot_ctx), "calendar"
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and EVENT_HINT.search(message)):
-            sub = self._create_event_chat(message)
+            sub, subsystem = self._create_event_chat(message), "calendar"
         elif self._notes is not None and NOTES_HINT.search(message):
-            sub = self._notes_chat(message)
+            sub, subsystem = self._notes_chat(message), "chat"
         elif (self._books is not None and self._bridge is not None
               and REC_HINT.search(message)):
-            sub = self._recommend_chat(message)
+            sub, subsystem = self._recommend_chat(message), "books"
         elif self._bridge is not None and self._tool_shaped(message, conv_id):
-            sub = self._chat_with_tools(message, conv_id)
+            sub, subsystem = self._chat_with_tools(message, conv_id), "files"
         else:
-            sub = self._plain_chat(message, conv_id)
+            sub, subsystem = self._plain_chat(message, conv_id), self._infer_subsystem(message)
 
         acc, tools = [], []
         async with aclosing(sub) as gen:
@@ -729,6 +749,10 @@ class Router:
             self._conv.add_message(conv_id, "assistant", "".join(acc), tools or None)
             if tools:                         # this thread is now tool-shaped for its follow-ups
                 self._conv.mark_tool_engaged(conv_id)
+        kind = "correction" if CORRECTION_HINT.search(message) else "query"
+        self._log(subsystem, kind, {"message": message[:300], "tools": tools or None})
+        if self._distill_trigger is not None:
+            self._distill_trigger()
 
     async def _plain_chat(self, message: str, conv_id: int | None):
         messages = self._messages_for(message, conv_id)
@@ -739,6 +763,24 @@ class Router:
             yield {"error": str(e)}
             return
         yield {"done": True}
+
+    def _log(self, subsystem: str, kind: str, detail: dict) -> None:
+        if self._memory is not None:
+            self._memory.log(subsystem, kind, detail)
+
+    @staticmethod
+    def _infer_subsystem(message: str) -> str:
+        """For the plain/fallback path, name the subsystem from the hint that
+        would have injected its context (the specialized routes name their own)."""
+        if TODO_HINT.search(message):
+            return "todos"
+        if CAL_HINT.search(message):
+            return "calendar"
+        if MAIL_HINT.search(message):
+            return "email"
+        if BOOK_HINT.search(message):
+            return "books"
+        return "chat"
 
     def _pick_model(self, message: str):
         return (self._model_router.pick_model(message, needs_tools=True)
@@ -1042,6 +1084,8 @@ class Router:
         yield {"confirm_request": confirm_payload(proposal),
                "confirm_id": confirm_id}
         if not await self._confirm.wait(confirm_id):
+            self._log("calendar", "correction",
+                      {"action": "declined_create", "title": proposal.get("title")})
             yield {"_outcome": (False, "Cancelled — nothing was created.")}
             return
         try:
@@ -1096,6 +1140,7 @@ class Router:
                    "rows": rows, "confirm_label": "Delete event"},
                "confirm_id": confirm_id}
         if not await self._confirm.wait(confirm_id):
+            self._log("calendar", "correction", {"action": "declined_delete"})
             yield {"result": {"deleted": False,
                               "message": "Cancelled — nothing was deleted."}}
             return
