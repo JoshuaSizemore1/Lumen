@@ -15,6 +15,7 @@ from lumen.daemon.connectors.gcal import CalendarSync, EventStore
 from lumen.daemon.connectors.manabi import ManabiStatus
 from lumen.daemon.connectors.memory_log import MemoryLog
 from lumen.daemon.connectors.notes import NotesStore
+from lumen.daemon.connectors.procedures import ProcedureStore
 from lumen.daemon.connectors.suggestions import SuggestionStore
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
@@ -41,7 +42,9 @@ async def run() -> None:
     emails = EmailStore(conn)
     mail = GmailSync(emails, cfg.google, cfg.sync)
     memory_log = MemoryLog(conn)
-    memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory)
+    procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
+    memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,
+                                 procedures=procedures)
     broker = ConfirmBroker()   # shared: router resolves, the write gate awaits
     write_gate = (WriteGate(GrantStore(cfg.mcp.grants_path), broker,
                             write_tools_map(cfg.mcp.servers))
@@ -60,6 +63,7 @@ async def run() -> None:
                     manabi=ManabiStatus(cfg.manabi.db_path),
                     memory=memory_log, memory_path=cfg.memory_path,
                     memory_cap=cfg.memory.blob_cap_chars,
+                    procedures=procedures,
                     distill_trigger=memory_worker.schedule,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)

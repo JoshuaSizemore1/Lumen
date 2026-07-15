@@ -1,7 +1,47 @@
 from lumen.daemon import db
+from lumen.daemon.config import MemoryConfig
 from lumen.daemon.connectors.memory_log import MemoryLog
+from lumen.daemon.connectors.procedures import ProcedureStore, write_procedure
 from lumen.daemon.router import Router
 from tests.daemon.test_router import FakeLLM, FakeStore, collect
+
+
+def proc_store(tmp_path):
+    root = tmp_path / "procedures"
+    (root / "active").mkdir(parents=True)
+    write_procedure(root / "active" / "morning.md", "Morning",
+                    ["morning routine"], ["Run the briefing", "List todos"],
+                    "2026-07-14")
+    return ProcedureStore(root, MemoryConfig())
+
+
+async def test_procedure_injected_on_trigger(tmp_path):
+    procs = proc_store(tmp_path)
+    r = Router(FakeLLM(), FakeStore(), procedures=procs)
+    msgs = r._build_messages("do my morning routine",
+                             [{"role": "user", "content": "do my morning routine"}])
+    assert "Run the briefing" in msgs[0]["content"]
+
+
+async def test_procedure_not_injected_without_trigger(tmp_path):
+    procs = proc_store(tmp_path)
+    r = Router(FakeLLM(), FakeStore(), procedures=procs)
+    msgs = r._build_messages("what's the weather",
+                             [{"role": "user", "content": "what's the weather"}])
+    assert "Run the briefing" not in msgs[0]["content"]
+
+
+async def test_procedures_one_shots(tmp_path):
+    root = tmp_path / "procedures"
+    (root / "proposed").mkdir(parents=True)
+    write_procedure(root / "proposed" / "m.md", "M", ["m"], ["x"], "2026-07-14")
+    procs = ProcedureStore(root, MemoryConfig())
+    r = Router(FakeLLM(), FakeStore(), procedures=procs)
+    out = await collect(r, "memory.procedures", {})
+    assert out[0]["result"]["proposed"][0]["slug"] == "m"
+    out = await collect(r, "memory.approve_procedure", {"slug": "m"})
+    assert out[0]["result"]["ok"] is True
+    assert procs.list_active()[0]["slug"] == "m"
 
 
 def test_memory_injected_after_identity(tmp_path):

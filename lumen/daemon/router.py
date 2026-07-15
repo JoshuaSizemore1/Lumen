@@ -368,6 +368,12 @@ class Router:
             mem = memory_mod.memory_context(self._memory_path, self._memory_cap)
             if mem:
                 context.append(mem)
+        if self._procedures is not None:
+            proc = self._procedures.match(message)
+            if proc:
+                context.append(
+                    "The user has a saved routine that matches this request. "
+                    "Follow its steps in order:\n" + proc["text"])
         if TODO_HINT.search(message):
             context.append(todo_context(self._todos.open_todos(), date.today()))
         if self._books is not None and BOOK_HINT.search(message):
@@ -702,6 +708,30 @@ class Router:
                 yield {"error": err} if revised is None else {"result": revised}
             else:
                 yield {"error": f"unknown request type: {type_}"}
+        elif type_ == "memory.procedures":
+            if self._procedures is None:
+                yield {"error": "procedures unavailable"}
+            else:
+                yield {"result": {"proposed": self._procedures.list_proposed(),
+                                  "active": self._procedures.list_active()}}
+        elif type_ in ("memory.approve_procedure", "memory.dismiss_procedure",
+                       "memory.remove_procedure"):
+            if self._procedures is None:
+                yield {"error": "procedures unavailable"}
+                return
+            slug = str(payload.get("slug") or "")
+            if not slug:
+                yield {"error": f"{type_} needs {{slug}}"}
+                return
+            if type_ == "memory.approve_procedure":
+                ok = self._procedures.approve(slug)
+            elif type_ == "memory.dismiss_procedure":
+                ok = self._procedures.dismiss(slug)
+            else:
+                ok = self._procedures.remove(slug)
+            yield {"result": {"ok": ok,
+                              "proposed": self._procedures.list_proposed(),
+                              "active": self._procedures.list_active()}}
         else:
             yield {"error": f"unknown request type: {type_}"}
 
