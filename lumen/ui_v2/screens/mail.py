@@ -5,8 +5,8 @@ from PyQt6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    ClickRow, Dot, ElideLabel, button, clear_layout, empty_state, font, hbox,
-    label, qcolor, scroll, vbox, vline,
+    Chip, ClickChip, ClickRow, Dot, ElideLabel, FlowLayout, button,
+    clear_layout, empty_state, font, hbox, label, qcolor, scroll, vbox, vline,
 )
 
 
@@ -38,6 +38,12 @@ class MailScreen(QWidget):
         refresh_btn.setToolTip("Refresh inbox")
         refresh_btn.clicked.connect(state.refresh_inbox)
         top_row.addWidget(refresh_btn)
+        self.suggest_btn = button("✨", "outline", px=13)
+        self.suggest_btn.setFixedSize(28, 26)
+        self.suggest_btn.setToolTip(
+            "Suggest labels for unlabeled mail (runs the local model once)")
+        self.suggest_btn.clicked.connect(self._suggest)
+        top_row.addWidget(self.suggest_btn)
         hv.addLayout(top_row)
 
         self.search_box = QLineEdit()
@@ -49,6 +55,11 @@ class MailScreen(QWidget):
 
         self.status_lab = label("", 11, T.TEXT_DIM)
         hv.addWidget(self.status_lab)
+
+        # filter chips: All · Unread · one per user label (scoped DB re-query)
+        chips_host = QWidget()
+        self.chips_lay = FlowLayout(chips_host)
+        hv.addWidget(chips_host)
 
         cv.addWidget(head)
         sep = QFrame()
@@ -76,12 +87,29 @@ class MailScreen(QWidget):
         self.search_box.textChanged.connect(
             lambda _t: self._search_timer.start())
 
+        # dwell auto-read: a message kept open ~1s is read — arrow-keying past
+        # mail never marks it (design 2026-07-15)
+        self._dwell = QTimer(self)
+        self._dwell.setSingleShot(True)
+        self._dwell.setInterval(1000)
+        self._dwell.timeout.connect(self._dwell_fired)
+        self._dwell_mid = None
+        self._last_sel = object()   # sentinel: first populate() always arms
+
         state.mails_changed.connect(self.populate)
         self.populate()
 
     def populate(self):
+        if self.state.selected_mail != self._last_sel:
+            self._last_sel = self.state.selected_mail
+            self._dwell.stop()
+            sel = self.state.sel_mail()
+            if sel is not None and sel["unread"]:
+                self._dwell_mid = sel["id"]
+                self._dwell.start()
         self.unread_lab.setText(f"{self.state.unread_count()} unread")
         self.status_lab.setText(self._status_text())
+        self._build_chips()
         clear_layout(self.rows_lay)
         if not self.state.mails:
             if not self.state.mail_connected:
@@ -111,6 +139,21 @@ class MailScreen(QWidget):
             body.addWidget(ElideLabel(m["subj"], 12, T.TEXT_SECONDARY))
             body.addSpacing(2)
             body.addWidget(ElideLabel(m["preview"], 11, T.TEXT_DIM, sans=True))
+            names = m.get("label_names") or []
+            sug = self.state.mail_suggestions.get(m["id"])
+            if names or sug:
+                pills = hbox(s=4)
+                for n in names[:3]:
+                    c = T.label_color(n)
+                    pills.addWidget(Chip(n, c, c, px=9, radius=7, hpad=6, vpad=1))
+                if sug:
+                    pills.addWidget(ClickChip(
+                        f"＋ {sug}", T.ACCENT, T.ACCENT, px=9,
+                        on_click=lambda mid=m["id"]: self.state.apply_suggestion(mid),
+                        tooltip="Suggested label — click to file it (leaves the inbox)"))
+                pills.addStretch(1)
+                body.addSpacing(3)
+                body.addLayout(pills)
             rl.addLayout(body, 1)
             self.rows_lay.addWidget(row)
             sep = QFrame()
@@ -119,6 +162,26 @@ class MailScreen(QWidget):
             self.rows_lay.addWidget(sep)
         self.rows_lay.addStretch(1)
         self._populate_pane()
+
+    def _build_chips(self):
+        clear_layout(self.chips_lay)
+        for name, scope in ([("All", "all"), ("Unread", "unread")]
+                            + [(l, l) for l in self.state.mail_labels]):
+            color = (T.TEXT_SECONDARY if scope in ("all", "unread")
+                     else T.label_color(name))
+            sel = self.state.mail_scope == scope
+            self.chips_lay.addWidget(ClickChip(
+                name, color, color, bg=(color + "1f" if sel else None),
+                on_click=lambda s=scope: self.state.set_mail_scope(s)))
+
+    def _dwell_fired(self):
+        if self._dwell_mid and self.state.selected_mail == self._dwell_mid:
+            self.state.auto_read(self._dwell_mid)
+
+    def _suggest(self):
+        self.suggest_btn.setEnabled(False)
+        self.state.suggest_labels(
+            lambda _r: self.suggest_btn.setEnabled(True))
 
     def _status_text(self) -> str:
         if not self.state.mail_connected:
@@ -172,11 +235,26 @@ class MailScreen(QWidget):
         self.read_btn.clicked.connect(
             lambda: self.state.set_mail_read(m["id"], m["unread"]))
         sl.addWidget(self.read_btn)
+        self.rule_btn = button("⚑ Rule", "outline", px=11)
+        self.rule_btn.setFixedHeight(29)
+        self.rule_btn.setToolTip("Always label mail like this…")
+        self.rule_btn.clicked.connect(lambda: self.state.open_rule_editor(
+            {"from_addrs": [m["from_addr"]] if m.get("from_addr") else []}))
+        sl.addWidget(self.rule_btn)
         self.pane_lay.addWidget(sender)
         sep = QFrame()
         sep.setFixedHeight(1)
         sep.setStyleSheet(f"background: {T.BORDER_SOFT};")
         self.pane_lay.addWidget(sep)
+
+        names = m.get("label_names") or []
+        if names:
+            pr = hbox(m=(0, 10, 0, 0), s=5)
+            for n in names:
+                c = T.label_color(n)
+                pr.addWidget(Chip(n, c, c, px=10, radius=7, hpad=7, vpad=2))
+            pr.addStretch(1)
+            self.pane_lay.addLayout(pr)
 
         attachments = m.get("attachments") or []
         if attachments:

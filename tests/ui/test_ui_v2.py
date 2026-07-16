@@ -867,6 +867,91 @@ def test_mail_empty_pane_shows_no_message_selected(qtbot):
     assert "No message selected" in _label_texts(screen)
 
 
+def test_mail_chip_row_and_pills_sample_mode(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import Chip
+    state = AppState()
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    chips = [screen.chips_lay.itemAt(i).widget().text()
+             for i in range(screen.chips_lay.count())]
+    assert chips == ["All", "Unread", "Health", "Newsletters"]
+    assert "Health" in [c.text() for c in screen.findChildren(Chip)]  # row pill
+
+
+def test_mail_chip_click_sets_scope(qtbot, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    scopes = []
+    monkeypatch.setattr(state, "set_mail_scope", scopes.append)
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    qtbot.mouseClick(screen.chips_lay.itemAt(2).widget(), Qt.MouseButton.LeftButton)
+    assert scopes == ["Health"]
+
+
+def test_mail_dwell_auto_reads_selected_unread(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    calls = []
+    monkeypatch.setattr(state, "auto_read", calls.append)
+    screen = MailScreen(state)      # m1 selected & unread → dwell armed
+    qtbot.addWidget(screen)
+    assert screen._dwell.isActive()
+    screen._dwell_fired()
+    assert calls == ["m1"]
+
+
+def test_mail_dwell_not_armed_for_read_mail(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    state.select_mail("m5")         # m5 is read → no dwell
+    assert not screen._dwell.isActive()
+
+
+def test_mail_suggest_button_busy_state(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    cbs = []
+    monkeypatch.setattr(state, "suggest_labels", lambda cb=None: cbs.append(cb))
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    screen.suggest_btn.click()
+    assert not screen.suggest_btn.isEnabled()
+    cbs[0]({})
+    assert screen.suggest_btn.isEnabled()
+
+
+def test_mail_suggestion_chip_applies_on_click(qtbot, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import ClickChip
+    state = AppState()
+    state.mail_suggestions = {"m1": "Health"}
+    applied = []
+    monkeypatch.setattr(state, "apply_suggestion", applied.append)
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    chip = next(c for c in screen.findChildren(ClickChip)
+                if c.text() == "＋ Health")
+    qtbot.mouseClick(chip, Qt.MouseButton.LeftButton)
+    assert applied == ["m1"]
+
+
+def test_mail_rule_button_prefills_sender(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    seen = []
+    monkeypatch.setattr(state, "open_rule_editor", seen.append)
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    screen.rule_btn.click()
+    assert seen == [{"from_addrs": []}]   # sample sender has no address
+
+
 def test_sample_window_builds_every_screen(qtbot):
     """Construct the full sample-mode window: every screen's layout builds."""
     from lumen.ui_v2.main import LumenWindow, TABS
