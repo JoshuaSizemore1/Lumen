@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from html import unescape
 
-from lumen.daemon.connectors import google_auth
+from lumen.daemon.connectors import google_auth, mail_rules
 
 log = logging.getLogger(__name__)
 
@@ -244,10 +244,12 @@ class GmailSync:
 
     PAGE_SIZE = 100
 
-    def __init__(self, store: EmailStore, google_cfg, sync_cfg, *, service_factory=None):
+    def __init__(self, store: EmailStore, google_cfg, sync_cfg, *,
+                 service_factory=None, rules=None):
         self._store = store
         self._google = google_cfg
         self._sync = sync_cfg
+        self._rules = rules         # RuleStore — deterministic, applied on sync
         self._injected = service_factory is not None
         self._service_factory = service_factory or self._build_service
         self._sync_lock = asyncio.Lock()
@@ -291,6 +293,7 @@ class GmailSync:
             return False
         if service is None:
             return False   # not connected yet — a normal state
+        await self.refresh_labels(service)   # name↔id map rides every sync
         if self._store.get_state(HISTORY_KEY) is None or self.syncing:
             return await self._bulk(service)
         return await self._incremental(service)
@@ -423,6 +426,7 @@ class GmailSync:
                     # this identical window on the next poll.
                     return False
                 self._store.upsert(msgs)
+                await self._apply_rules(msgs)   # new mail only — never the bulk pull
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -466,6 +470,74 @@ class GmailSync:
             return False
         self._store.update_labels(mid, add=[], remove=["INBOX"])
         return True
+
+    async def refresh_labels(self, service=None) -> bool:
+        """Cache the Gmail label name↔id map locally; failures never sink a
+        sync (labels just go stale until the next poll)."""
+        try:
+            service = service or self._service_factory()
+            if service is None:
+                return False
+            resp = await asyncio.to_thread(
+                lambda: service.users().labels().list(userId="me").execute())
+        except Exception:
+            log.exception("gmail labels.list failed")
+            return False
+        self._store.set_labels([{"id": l["id"], "name": l.get("name", ""),
+                                 "type": l.get("type", "user")}
+                                for l in resp.get("labels", [])])
+        return True
+
+    async def create_label(self, name: str) -> str | None:
+        try:
+            service = (self._service_factory() if self._injected
+                       else self._build_service(write=True))
+        except Exception:
+            log.exception("could not build gmail service")
+            return None
+        if service is None:
+            return None
+        try:
+            created = await asyncio.to_thread(
+                lambda: service.users().labels().create(
+                    userId="me", body={"name": name}).execute())
+        except Exception:
+            # 409 = the name already exists upstream (stale local map):
+            # re-pull the map and use the existing id.
+            await self.refresh_labels()
+            return self._store.label_id(name)
+        self._store.upsert_label(created["id"], name)
+        return created["id"]
+
+    async def apply_label(self, mid: str, label_name: str) -> bool:
+        """Label = move (design 2026-07-15): add the label, remove INBOX —
+        Gmail first, then the mirror. Creates the Gmail label if missing."""
+        label_id = self._store.label_id(label_name)
+        if label_id is None:
+            label_id = await self.create_label(label_name)
+        if label_id is None:
+            return False
+        if not await self._modify(mid, {"addLabelIds": [label_id],
+                                        "removeLabelIds": ["INBOX"]}):
+            return False
+        self._store.update_labels(mid, add=[label_id], remove=["INBOX"])
+        return True
+
+    async def _apply_rules(self, msgs: list[dict]) -> None:
+        """Deterministic pass over newly-arrived mail — no LLM, ever, here.
+        A failed apply just leaves the message in the inbox; never fails
+        the sync."""
+        rules = self._rules.enabled() if self._rules is not None else []
+        if not rules:
+            return
+        for m in msgs:
+            if "INBOX" not in m["labels"] or "SENT" in m["labels"]:
+                continue
+            for name in mail_rules.matching_labels(rules, m):
+                try:
+                    await self.apply_label(m["id"], name)
+                except Exception:
+                    log.exception("rule apply failed for %s", m["id"])
 
     async def mark_read(self, mid: str, read: bool) -> bool:
         body = ({"removeLabelIds": ["UNREAD"]} if read

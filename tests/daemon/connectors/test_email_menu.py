@@ -192,6 +192,7 @@ class FakeMessages:
     def __init__(self, pages, full):
         self._pages, self._full = pages, full   # pages: token -> response
         self.list_calls = []
+        self.modify_calls = []
 
     def list(self, userId, q=None, maxResults=None, pageToken=None,
              includeSpamTrash=False):
@@ -201,10 +202,29 @@ class FakeMessages:
     def get(self, userId, id, format):
         return FakeExec(self._full[id])
 
+    def modify(self, userId, id, body):
+        self.modify_calls.append((id, body))
+        return FakeExec({})
+
+
+class FakeLabelsApi:
+    def __init__(self, labels, created_id="Label_9"):
+        self._labels, self._created_id = labels, created_id
+        self.created = []
+
+    def list(self, userId):
+        return FakeExec({"labels": self._labels})
+
+    def create(self, userId, body):
+        self.created.append(body["name"])
+        return FakeExec({"id": self._created_id, "name": body["name"]})
+
 
 class FakeService:
-    def __init__(self, pages, full, profile_history="h100", history_pages=None):
+    def __init__(self, pages, full, profile_history="h100", history_pages=None,
+                 labels=None):
         self._messages = FakeMessages(pages, full)
+        self._labels_api = FakeLabelsApi(labels or [])
         self._profile = {"historyId": profile_history}
         self._history_pages = history_pages or {}
         self.history_calls = []
@@ -214,6 +234,9 @@ class FakeService:
 
     def messages(self):
         return self._messages
+
+    def labels(self):
+        return self._labels_api
 
     def getProfile(self, userId):
         return FakeExec(self._profile)
@@ -299,6 +322,62 @@ async def test_not_connected_is_normal(tmp_path):
                      service_factory=lambda: None)
     assert await sync.sync_once() is False
     assert store.get_state(HISTORY_KEY) is None
+
+
+# Label plumbing + rules in the sync path (2026-07-15)
+
+from lumen.daemon.connectors.email_menu import EmailStore
+from lumen.daemon.connectors.mail_rules import RuleStore
+
+
+async def test_refresh_labels_and_apply_label(tmp_path):
+    svc = FakeService({}, {}, labels=[
+        {"id": "INBOX", "name": "INBOX", "type": "system"},
+        {"id": "Label_7", "name": "Bills", "type": "user"}])
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+
+    assert await sync.refresh_labels() is True
+    assert store.label_id("Bills") == "Label_7"
+
+    assert await sync.apply_label("m1", "Bills") is True
+    assert svc._messages.modify_calls == [("m1", {"addLabelIds": ["Label_7"],
+                                                  "removeLabelIds": ["INBOX"]})]
+    got = store.get("m1")
+    assert "Label_7" in got["labels"] and "INBOX" not in got["labels"]
+
+    # unknown label -> created in Gmail first, then applied
+    assert await sync.apply_label("m1", "BSA") is True
+    assert svc._labels_api.created == ["BSA"]
+    assert store.label_id("BSA") == "Label_9"
+
+
+async def test_incremental_applies_rules_to_new_inbox_mail(tmp_path):
+    # A new INBOX message arriving via the History delta gets the matching
+    # rule's label and loses INBOX; SENT mail is untouched.
+    history = {None: {"history": [
+        {"messagesAdded": [{"message": {"id": "billmail"}},
+                           {"message": {"id": "sentmail"}}]},
+    ], "historyId": "h200"}}
+    full = {"billmail": raw_msg() | {"id": "billmail", "threadId": "t1"},
+            "sentmail": raw_msg(labels=("SENT", "INBOX"))
+                        | {"id": "sentmail", "threadId": "t2"}}
+    svc = FakeService({}, full, history_pages=history,
+                      labels=[{"id": "Label_7", "name": "Bills", "type": "user"}])
+    conn = db.connect(tmp_path / "e.db")
+    store, rules = EmailStore(conn), RuleStore(conn)
+    rules.add({"label": "Bills", "from_addrs": [], "domains": ["x.com"],
+               "subject_kw": [], "body_kw": []})
+    sync = GmailSync(store, GoogleConfig(), SyncConfig(),
+                     service_factory=lambda: svc, rules=rules)
+    store.set_state(HISTORY_KEY, "h100")
+
+    assert await sync.sync_once() is True
+    assert svc._messages.modify_calls == [
+        ("billmail", {"addLabelIds": ["Label_7"], "removeLabelIds": ["INBOX"]})]
+    got = store.get("billmail")
+    assert "Label_7" in got["labels"] and "INBOX" not in got["labels"]
+    assert "INBOX" in store.get("sentmail")["labels"]
 
 
 # Task 6: Incremental sync
