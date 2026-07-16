@@ -5,6 +5,7 @@ hotkey path) or starts one with the quick-launcher overlay shown.
 The window/screens live in `main`/`screens`; this module owns process lifecycle,
 the daemon client connections, the tray, and the hotkey overlay.
 """
+import os
 import sys
 
 from PyQt6.QtCore import Qt
@@ -80,6 +81,10 @@ def main() -> None:
     state.attach_compose_source(overlay_chat)
 
     win = main_mod.LumenWindow(state)
+    # Unified launcher (`lumen`): closing the window quits the app, which in
+    # turn shuts down the daemon the launcher started. Standalone `lumen-ui`
+    # keeps the tray-resident behavior (window close just hides).
+    win.quit_on_close = os.environ.get("LUMEN_UNIFIED") == "1"
     main_mod._active_window = win
     overlay = LauncherOverlay(state, overlay_chat)
 

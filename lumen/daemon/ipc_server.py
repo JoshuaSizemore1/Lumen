@@ -17,10 +17,16 @@ class IPCServer:
         self._tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.parent.chmod(0o700)
+        parent = self._path.parent
+        if not parent.exists():
+            parent.mkdir(parents=True)
+            parent.chmod(0o700)
+        # A pre-existing directory is never chmod'd: a custom socket_path under
+        # /tmp or $HOME must not have that shared directory's permissions
+        # rewritten. The socket file itself carries the access control below.
         self._path.unlink(missing_ok=True)  # stale socket from a previous run
         self._server = await asyncio.start_unix_server(self._handle, path=str(self._path))
+        self._path.chmod(0o600)
 
     async def stop(self) -> None:
         if self._server:

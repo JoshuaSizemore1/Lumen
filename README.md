@@ -69,9 +69,26 @@ config.example.toml      # copy to config.toml (non-secret settings)
 .env.example             # copy to .env (secrets, gitignored)
 ```
 
+## Running
+
+One command starts everything and one action stops everything:
+
+```
+lumen                     # starts the daemon (if needed) + the UI together
+```
+
+Closing the main window (or tray → Quit) shuts the daemon down too — nothing keeps
+running in the background. Lumen is also in the app menu as **Lumen**.
+`lumen --toggle-launcher` summons the quick-launcher overlay (hotkey binding).
+A daemon you started yourself (`uv run lumen-daemon`, systemd) is left alone on exit;
+the launcher only stops the daemon it started.
+
+For development, the pieces still run separately: `uv run lumen-daemon` and
+`uv run lumen-ui` (window close hides to tray in that mode).
+
 ## Status
 
-Directory scaffold and file stubs are in place (each file has a one-line comment describing its role; no logic yet). The architecture, scope, and per-subsystem design are fully specified in `.claude/skills/`. See `.claude/skills/development-plan.md` for the phased build order (LLM runtime → todos → MCP proof of concept → book catalog → calendar → email → writing style → cross-cutting features → memory → UI polish → power/thermal validation), each phase gated on the previous one actually working end-to-end.
+All planned phases are built and live-verified (LLM runtime → todos → MCP → book catalog → calendar → email menu/compose → writing style → daily features → memory → UI polish → power/thermal validation → inbox rules/labels). See `.claude/skills/development-plan.md` for the phase log.
 
 ## Design references
 

@@ -44,6 +44,20 @@ def test_dismiss_and_remove(tmp_path):
     assert s.remove("a") is True and s.list_active() == []
 
 
+def test_non_slug_names_rejected_never_path_joined(tmp_path):
+    # IPC-supplied slugs with path components must not escape the store.
+    s = store(tmp_path)
+    seed(s, "proposed", "p", "P", ["p"], ["x"])
+    outside = tmp_path / "outside.md"
+    outside.write_text("# not a procedure\n")
+    evil = "../../outside"
+    assert s.approve(evil) is False
+    assert s.dismiss(evil) is False
+    assert s.remove(evil) is False
+    assert outside.exists()
+    assert s.dismiss("") is False
+
+
 def test_match_bumps_last_used(tmp_path):
     s = store(tmp_path)
     seed(s, "active", "morning", "Morning", ["morning routine"], ["Brief"],

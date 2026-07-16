@@ -1210,3 +1210,27 @@ def test_manabi_sample_mode_never_nudges(qtbot):
     st = AppState()
     st.refresh_manabi()                     # no client — must be a no-op
     assert st.manabi_due is False
+
+
+def test_window_close_quits_only_in_unified_mode(qtbot, monkeypatch):
+    from lumen.ui_v2 import main as main_mod
+    quits = []
+
+    class FakeApp:
+        @staticmethod
+        def instance():
+            return FakeApp()
+
+        def quit(self):
+            quits.append(True)
+
+    win = main_mod.LumenWindow()
+    qtbot.addWidget(win)
+    monkeypatch.setattr(main_mod, "QApplication", FakeApp)
+    win.show()
+    win.close()
+    assert quits == []            # standalone lumen-ui: close hides to tray
+    win.quit_on_close = True      # unified launcher (`lumen`) sets this
+    win.show()
+    win.close()
+    assert quits == [True]        # close exits the app -> launcher stops daemon

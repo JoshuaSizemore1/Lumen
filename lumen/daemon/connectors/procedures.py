@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 _TRIGGERS = re.compile(r"^triggers:\s*(.*)$", re.IGNORECASE)
 _LAST_USED = re.compile(r"^last-used:\s*(.*)$", re.IGNORECASE)
 _SLUG = re.compile(r"[^a-z0-9]+")
+_SLUG_OK = re.compile(r"[a-z0-9-]+")   # slugify output shape; nothing else joins a path
 
 DRAFT_SYSTEM = (
     "You draft a short, named routine for a private assistant from evidence that "
@@ -81,9 +82,16 @@ class ProcedureStore:
     def list_active(self) -> list[dict]:
         return self._list("active")
 
+    def _file(self, state: str, slug: str) -> Path | None:
+        """UI-supplied slugs must resolve inside the store — anything not
+        slugify-shaped (dots, slashes, …) is rejected, never path-joined."""
+        if not _SLUG_OK.fullmatch(slug or ""):
+            return None
+        return self._dir(state) / f"{slug}.md"
+
     def approve(self, slug: str) -> bool:
-        src = self._dir("proposed") / f"{slug}.md"
-        if not src.exists():
+        src = self._file("proposed", slug)
+        if src is None or not src.exists():
             return False
         if len(self.list_active()) >= self._cfg.max_active_procedures:
             return False
@@ -93,10 +101,12 @@ class ProcedureStore:
         return True
 
     def dismiss(self, slug: str) -> bool:
-        return self._unlink(self._dir("proposed") / f"{slug}.md")
+        path = self._file("proposed", slug)
+        return path is not None and self._unlink(path)
 
     def remove(self, slug: str) -> bool:
-        return self._unlink(self._dir("active") / f"{slug}.md")
+        path = self._file("active", slug)
+        return path is not None and self._unlink(path)
 
     @staticmethod
     def _unlink(path: Path) -> bool:

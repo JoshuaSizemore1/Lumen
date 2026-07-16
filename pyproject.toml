@@ -14,6 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
+lumen = "lumen.launch:main"
 lumen-daemon = "lumen.daemon.__main__:main"
 lumen-ui = "lumen.ui_v2.app:main"
 lumen-google-auth = "lumen.daemon.connectors.google_auth:main"

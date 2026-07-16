@@ -109,6 +109,21 @@ async def test_socket_dir_mode_enforced(tmp_path):
         await srv.stop()
 
 
+async def test_preexisting_socket_dir_perms_untouched(tmp_path):
+    # A custom socket_path may point into a shared directory (/tmp, $HOME) —
+    # the daemon must never rewrite that directory's permissions.
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o755)
+    srv = IPCServer(shared / "d.sock", FakeRouter())
+    await srv.start()
+    try:
+        assert shared.stat().st_mode & 0o777 == 0o755
+        assert (shared / "d.sock").stat().st_mode & 0o777 == 0o600
+    finally:
+        await srv.stop()
+
+
 async def test_one_shot_result_line(server, tmp_path):
     reader, writer = await asyncio.open_unix_connection(str(tmp_path / "d.sock"))
     writer.write(json.dumps({"id": 9, "type": "todos.list", "payload": {}}).encode() + b"\n")

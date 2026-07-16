@@ -67,6 +67,8 @@ class TabButton(QPushButton):
 
 
 class LumenWindow(QWidget):
+    quit_on_close = False   # unified launcher mode: closing the window exits the app
+
     def __init__(self, state: AppState | None = None):
         super().__init__()
         self.setObjectName("root")
@@ -235,6 +237,8 @@ class LumenWindow(QWidget):
         QApplication.instance().setStyleSheet(build_qss())
         self.state.accent_requested.disconnect(self._change_accent)
         new = LumenWindow(self.state)
+        # the rebuild's close() must not read as "user closed the window"
+        new.quit_on_close, self.quit_on_close = self.quit_on_close, False
         new.setGeometry(self.geometry())
         new.switch_to(TABS[self.stack.currentIndex()])
         new.show()
@@ -249,6 +253,11 @@ class LumenWindow(QWidget):
             self.mail_badge.restyle(T.ACCENT_ON, T.ACCENT, T.ACCENT)
         else:
             self.mail_badge.restyle(T.TEXT_FAINT, T.BORDER_STRONG, None)
+
+    def closeEvent(self, ev):
+        super().closeEvent(ev)
+        if self.quit_on_close:
+            QApplication.instance().quit()
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
