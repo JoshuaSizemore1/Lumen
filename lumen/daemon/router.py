@@ -25,7 +25,7 @@ from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
 from lumen.daemon.llm import memory as memory_mod
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 from lumen.daemon.llm.model_router import FS_WRITE_HINT
-from lumen.daemon.llm.rule_author import validate_rule
+from lumen.daemon.llm.rule_author import propose_rule, validate_rule
 
 log = logging.getLogger(__name__)
 
@@ -115,6 +115,14 @@ BOOKING_HINT = re.compile(
     r"\b(?:one|that|first|second|third|slot|option|it)\b",
     re.IGNORECASE | re.DOTALL,
 )
+
+# Rule creation must outrank COMPOSE ("filter all emails relating to X" hits
+# COMPOSE's "email…to" alternation) — checked right before it in _chat.
+RULE_HINT = re.compile(
+    r"\b(?:create|add|make|set\s*up|new)\b.{0,40}\b(?:rule|filter)\b"
+    r"|\brule\b.{0,40}\b(?:label|filter|move|file)\b"
+    r"|\balways\s+(?:label|file|move|filter)\b",
+    re.IGNORECASE | re.DOTALL)
 
 # Compose-shaped requests jump to the draft → popup path before every other
 # chat route (EVENT_HINT would steal "draft an email to schedule a meeting").
@@ -898,6 +906,10 @@ class Router:
             sub, subsystem = self._commitments_chat(), "email"
         elif BRIEFING_HINT.search(message):
             sub, subsystem = self._briefing_chat(), "chat"
+        elif (self._rules is not None and self._mail is not None
+                and self._mail_store is not None and self._confirm is not None
+                and RULE_HINT.search(message)):
+            sub, subsystem = self._create_rule_chat(message), "email"
         elif (self._confirm is not None and self._mail is not None
                 and COMPOSE_HINT.search(message)):
             sub, subsystem = self._compose_email_chat(message), "email"
@@ -1403,6 +1415,34 @@ class Router:
             except Exception:
                 log.exception("post-delete sync failed")
         yield {"result": {"deleted": ok, "message": text}}
+
+    async def _create_rule_chat(self, message: str):
+        """NL → structured rule (local model) → confirm overlay → save/backfill.
+        The overlay's rows are the plain-language rendering of the parsed rule."""
+        labels = [l["name"] for l in self._mail_store.user_labels()]
+        try:
+            rule, err = await propose_rule(self._llm, message, labels)
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if rule is None:
+            yield {"chunk": err}     # honest failure is an answer, not an IPC error
+            yield {"done": True}
+            return
+        out = {}
+        async for ev in self._gated_rule_save(rule):
+            if "_saved" in ev:
+                out = ev
+            else:
+                yield ev
+        if out.get("_saved"):
+            extra = (f" I also labeled {out['_applied']} matching email(s) "
+                     "already in your inbox." if out.get("_applied") else "")
+            yield {"chunk": f"Done — new mail matching this gets “{rule['label']}” "
+                            f"and leaves your inbox.{extra}"}
+        else:
+            yield {"chunk": "Cancelled — no rule was saved."}
+        yield {"done": True}
 
     async def _compose_email_chat(self, message: str):
         """NL draft → editable compose popup → send/cancel. The popup is the

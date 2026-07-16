@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -2004,6 +2005,46 @@ async def test_rules_unavailable_without_store():
     router = Router(FakeLLM(), FakeStore())
     out = await collect(router, "rules.list", {})
     assert "error" in out[-1]
+
+
+async def test_create_rule_chat_routes_to_rule_path_not_compose(tmp_path):
+    # "filter all emails relating to X" hits COMPOSE_HINT's "email…to"
+    # alternation — RULE_HINT must outrank it and land on the confirm gate.
+    reply = json.dumps({"label": "BSA", "from_addrs": [],
+                        "domains": ["scouting.org"],
+                        "subject_kw": ["boy scout"], "body_kw": ["scouting"]})
+    broker = ConfirmBroker()
+    rules = RuleStore(db.connect(tmp_path / "rules.db"))
+    router = Router(FakeLLM(chunks=(reply,)), FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore(), confirm=broker, rules=rules)
+    events = []
+    async for ev in router.handle(
+            "chat", {"message": "create a rule to filter all emails relating "
+                                "to boy scouts as BSA"}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            assert ev["confirm_request"]["title"] == "Create mail rule"
+            broker.resolve(ev["confirm_id"], {"approved": True, "check": False})
+    assert not any("compose_request" in e for e in events)
+    assert len(rules.list_all()) == 1
+    chunks = "".join(e.get("chunk", "") for e in events)
+    assert "BSA" in chunks and events[-1] == {"done": True}
+
+
+async def test_create_rule_chat_cancel_saves_nothing(tmp_path):
+    reply = json.dumps({"label": "BSA", "domains": ["scouting.org"],
+                        "from_addrs": [], "subject_kw": [], "body_kw": []})
+    broker = ConfirmBroker()
+    rules = RuleStore(db.connect(tmp_path / "rules.db"))
+    router = Router(FakeLLM(chunks=(reply,)), FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore(), confirm=broker, rules=rules)
+    events = []
+    async for ev in router.handle("chat", {"message": "make a rule for scouts"}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], False)
+    assert rules.list_all() == []
+    assert "Cancelled" in "".join(e.get("chunk", "") for e in events)
 
 
 # ---- Task 10: chat grounding — MAIL_HINT + mail_context ----
