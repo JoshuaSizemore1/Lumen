@@ -38,7 +38,7 @@ def test_list_page_filters_and_order(tmp_path):
                   msg(3, labels=["INBOX"], is_read=True)])
     inbox = store.list_page("inbox")
     assert [m["id"] for m in inbox] == ["m3", "m1"]            # newest first
-    assert [m["id"] for m in store.list_page("unread")] == ["m2", "m1"]
+    assert [m["id"] for m in store.list_page("unread")] == ["m1"]  # inbox-scoped
     assert len(store.list_page("all")) == 3
     assert [m["id"] for m in store.list_page("all", limit=1, offset=1)] == ["m2"]
 
@@ -61,6 +61,42 @@ def test_update_labels_and_unread_and_counts(tmp_path):
     store.update_labels("m1", add=["UNREAD"], remove=[])
     assert store.get("m1")["is_read"] is False
     assert store.counts() == {"total": 1, "unread": 1}
+    assert store.unread() == []    # unread but no INBOX — left the inbox
+
+
+def test_labels_map_and_user_labels(tmp_path):
+    store = make_store(tmp_path)
+    assert store.labels_map() == {} and store.user_labels() == []
+    store.set_labels([{"id": "INBOX", "name": "INBOX", "type": "system"},
+                      {"id": "Label_7", "name": "Bills", "type": "user"},
+                      {"id": "Label_9", "name": "BSA", "type": "user"}])
+    assert store.labels_map()["Label_7"] == "Bills"
+    assert [l["name"] for l in store.user_labels()] == ["Bills", "BSA"]
+    assert store.label_id("Bills") == "Label_7"
+    assert store.label_id("bills") == "Label_7"          # casefold fallback
+    assert store.label_id("INBOX") is None               # system labels hidden
+    store.set_labels([{"id": "Label_9", "name": "BSA", "type": "user"}])
+    assert store.label_id("Bills") is None               # replace-all
+    store.upsert_label("Label_7", "Bills")
+    assert store.label_id("Bills") == "Label_7"
+
+
+def test_list_page_label_scope_and_present_ids(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1, labels=["INBOX", "UNREAD"]),
+                  msg(2, labels=["Label_7"]),
+                  msg(3, labels=["INBOX", "Label_7"])])
+    assert [m["id"] for m in store.list_page("label", label_id="Label_7")] \
+        == ["m3", "m2"]
+    assert store.present_label_ids() == {"INBOX", "UNREAD", "Label_7"}
+
+
+def test_unread_filter_is_inbox_scoped(tmp_path):
+    # Design 2026-07-15: labeled mail has left the inbox — "unread" means
+    # INBOX + UNREAD, so rule-filed newsletters stop nagging chat/briefing.
+    store = make_store(tmp_path)
+    store.upsert([msg(1), msg(2, labels=["UNREAD"])])    # m2 unread, archived
+    assert [m["id"] for m in store.list_page("unread")] == ["m1"]
     assert [m["id"] for m in store.unread()] == ["m1"]
 
 

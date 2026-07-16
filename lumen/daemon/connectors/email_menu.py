@@ -99,13 +99,19 @@ class EmailStore:
         row = self._conn.execute("SELECT * FROM emails WHERE id = ?", (mid,)).fetchone()
         return self._to_dict(row) if row else None
 
-    def list_page(self, filter: str = "inbox", limit: int = 50, offset: int = 0) -> list[dict]:
-        where = {"inbox": "WHERE (',' || labels || ',') LIKE '%,INBOX,%'",
-                 "unread": "WHERE is_read = 0",
-                 "all": ""}[filter]
+    def list_page(self, filter: str = "inbox", limit: int = 50, offset: int = 0,
+                  label_id: str | None = None) -> list[dict]:
+        # "unread" is inbox-scoped: labeled mail has left the inbox (2026-07-15).
+        where, params = {
+            "inbox": ("WHERE (',' || labels || ',') LIKE '%,INBOX,%'", ()),
+            "unread": ("WHERE is_read = 0 "
+                       "AND (',' || labels || ',') LIKE '%,INBOX,%'", ()),
+            "label": ("WHERE (',' || labels || ',') LIKE ?", (f"%,{label_id},%",)),
+            "all": ("", ()),
+        }[filter]
         rows = self._conn.execute(
             f"SELECT * FROM emails {where} ORDER BY received_at DESC, id "
-            f"LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+            f"LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         return [self._to_dict(r) for r in rows]
 
     def search(self, query: str, limit: int = 50) -> list[dict]:
@@ -157,6 +163,44 @@ class EmailStore:
             self._conn.execute(
                 "UPDATE emails SET labels = ?, is_read = ? WHERE id = ?",
                 (",".join(labels), int("UNREAD" not in labels), mid))
+
+    def set_labels(self, rows: list[dict]) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM gmail_labels")
+            self._conn.executemany(
+                "INSERT INTO gmail_labels (id, name, type) VALUES (?, ?, ?)",
+                [(r["id"], r["name"], r.get("type", "user")) for r in rows])
+
+    def upsert_label(self, lid: str, name: str, type_: str = "user") -> None:
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO gmail_labels (id, name, type) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+                (lid, name, type_))
+
+    def labels_map(self) -> dict[str, str]:
+        rows = self._conn.execute("SELECT id, name FROM gmail_labels").fetchall()
+        return {r["id"]: r["name"] for r in rows}
+
+    def user_labels(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, name FROM gmail_labels WHERE type = 'user' "
+            "ORDER BY name COLLATE NOCASE").fetchall()
+        return [{"id": r["id"], "name": r["name"]} for r in rows]
+
+    def label_id(self, name: str) -> str | None:
+        labels = self.user_labels()
+        for l in labels:
+            if l["name"] == name:
+                return l["id"]
+        want = name.casefold()
+        return next((l["id"] for l in labels
+                     if l["name"].casefold() == want), None)
+
+    def present_label_ids(self) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT labels FROM emails WHERE labels != ''").fetchall()
+        return {l for r in rows for l in (r["labels"] or "").split(",") if l}
 
     def prune_not_seen(self, run_id: str, since_iso: str) -> int:
         with self._conn:

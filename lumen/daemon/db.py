@@ -107,6 +107,21 @@ CREATE TRIGGER IF NOT EXISTS emails_au AFTER UPDATE ON emails BEGIN
     INSERT INTO emails_fts(rowid, subject, body, snippet, sender)
     VALUES (new.rowid, new.subject, new.body, new.snippet, new.sender);
 END;
+CREATE TABLE IF NOT EXISTS gmail_labels (   -- name↔id map cached from labels.list
+    id TEXT PRIMARY KEY,                    -- Gmail label id (Label_… for user labels)
+    name TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'user'       -- 'system' | 'user'
+);
+CREATE TABLE IF NOT EXISTS mail_rules (     -- deterministic inbox rules (no LLM at run time)
+    id INTEGER PRIMARY KEY,
+    label TEXT NOT NULL,                    -- target label NAME (created in Gmail if missing)
+    from_addrs TEXT NOT NULL DEFAULT '[]',  -- JSON arrays; a rule matches if ANY condition hits
+    domains TEXT NOT NULL DEFAULT '[]',
+    subject_kw TEXT NOT NULL DEFAULT '[]',
+    body_kw TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS memory_log (   -- Phase 9 tier-1 raw interaction log
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,               -- ISO timestamp
