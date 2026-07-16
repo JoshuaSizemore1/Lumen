@@ -178,16 +178,14 @@ HISTORY_TURNS = 8
 # passes the tool schemas, so a hand-written catalog would only drift out of sync.
 IDENTITY = (
     "You are Lumen, a private assistant running entirely on the user's own "
-    "laptop. You help with their email, todos, calendar, books, and files. "
+    "laptop, helping with their email, todos, calendar, books, and files. "
     "Email and calendar sync to a local mirror automatically in the background "
-    "— there is nothing the user needs to trigger manually. You have tools "
-    "available — use them to look "
-    "things up instead of guessing or apologizing, and never tell the user you "
-    "can't access something you have a tool for. Never pretend to check or look "
-    "something up: if this conversation gives you no tool or data for it, say so "
-    "plainly instead of inventing a result. When the user asks you to write, "
-    "send, or reply to an email, a compose window opens with your draft for "
-    "them to review and send — so never claim you can't send email. Prefer "
+    "— nothing for the user to trigger. Use your tools to look things up rather "
+    "than guessing; never tell the user you can't access something you have a "
+    "tool for. Never pretend to check or look something up: if this conversation "
+    "gives you no tool or data for it, say so plainly instead of inventing a "
+    "result. To write, send, or reply to an email, a compose window opens with "
+    "your draft to review and send — so never claim you can't send email. Prefer "
     "specific, concise answers."
 )
 
@@ -282,13 +280,24 @@ def calendar_context(events: list[dict], now: datetime, window_end: date) -> str
 
 
 def mail_context(unread: list[dict], counts: dict, connected: bool,
-                 syncing: bool = False) -> str:
+                 syncing: bool = False, brief: bool = False) -> str:
     """System-message context: unread summary from the local mirror, explicit
     empty/not-connected/still-syncing markers, and a pointer at search_email
-    for the rest."""
+    for the rest. `brief` drops the enumerated unread rows and keeps only the
+    counts + search_email pointer — used when mail context rides along on a
+    (non-mail-shaped) tool loop purely as grounding, so a file request doesn't
+    drag the whole unread list into the prompt."""
     if not connected:
         return ("Gmail is not connected yet — the user needs to run the one-time "
                 "Google setup. Say so if asked about email; do not invent messages.")
+    if brief:
+        head = (f"The user's mailbox mirror holds {counts['total']} messages, "
+                f"{counts['unread']} unread — use the search_email tool to read "
+                "any of them.")
+        return (head if not syncing else
+                "The first mailbox sync has not finished — the mirror is "
+                "incomplete; missing messages are not absent, just not pulled "
+                "yet.\n" + head)
     lines = [f"The user's mailbox mirror holds {counts['total']} messages, "
              f"{counts['unread']} unread. Unread messages (only these are shown — "
              "use the search_email tool for anything else):"]
@@ -401,11 +410,16 @@ class Router:
             context.append(calendar_context(
                 self._calendar.list_range(now.date().isoformat(), end.isoformat()),
                 now, end))
-        if self._mail_store is not None and (tool_loop or MAIL_HINT.search(message)):
+        mail_shaped = bool(MAIL_HINT.search(message))
+        if self._mail_store is not None and (tool_loop or mail_shaped):
+            # On a non-mail-shaped tool loop, mail context is grounding only
+            # (so the model knows search_email exists) — keep it to the counts,
+            # not the full unread list, so a file request stays lean.
             context.append(mail_context(
                 self._mail_store.unread(limit=10), self._mail_store.counts(),
                 self._mail.connected if self._mail is not None else False,
-                syncing=self._mail.syncing if self._mail is not None else False))
+                syncing=self._mail.syncing if self._mail is not None else False,
+                brief=not mail_shaped))
         if self._bridge is not None and (tool_loop or TOOL_HINT.search(message)
                                          or FS_WRITE_HINT.search(message)):
             context.append(fs_context(Path.home()))
