@@ -6,8 +6,9 @@ from PyQt6.QtGui import QPainter, QPen
 from PyQt6.QtWidgets import QAbstractButton, QLabel, QSizePolicy, QWidget
 
 from .. import theme as T
-from ..widgets import (Dot, button, clear_layout, empty_state, font, hbox,
-                       hline, label, qcolor, scroll, vbox)
+from ..widgets import (Chip, ClickLabel, Dot, Switch, button, clear_layout,
+                       empty_state, font, hbox, hline, label, qcolor, scroll,
+                       vbox)
 from ..state import AppState
 
 
@@ -132,6 +133,24 @@ class SettingsScreen(QWidget):
         v.addWidget(hline(T.BORDER_FAINT))
         v.addSpacing(20)
 
+        # [mail_rules] — deterministic inbox rules (2026-07-15)
+        v.addWidget(label("[mail_rules]", 12, T.ACCENT))
+        v.addSpacing(8)
+        v.addWidget(label("New mail matching a rule is labeled and leaves the "
+                          "inbox — automatic, no model involved.", 11, T.TEXT_DIM))
+        v.addSpacing(8)
+        new_rule = button("＋ New rule", "ghost", 12, 30)
+        new_rule.clicked.connect(lambda: self.state.open_rule_editor())
+        nr = hbox(s=8)
+        nr.addWidget(new_rule)
+        nr.addStretch(1)
+        v.addLayout(nr)
+        v.addSpacing(12)
+        self._rules_box = QWidget()
+        vbox(self._rules_box, (0, 0, 0, 0), 6)
+        v.addWidget(self._rules_box)
+        v.addSpacing(20)
+
         # [memory] — what Lumen has learned + supervised procedures (Phase 9)
         v.addWidget(label("[memory]", 12, T.ACCENT))
         v.addSpacing(8)
@@ -160,6 +179,7 @@ class SettingsScreen(QWidget):
         super().showEvent(ev)
         self.state.refresh_procedures()
         self.state.fetch_settings(self._on_settings)
+        self.state.list_rules(self._on_rules)
 
     # ---- live snapshot -----------------------------------------------------
 
@@ -243,6 +263,48 @@ class SettingsScreen(QWidget):
             _config_line("db", f'"{snap["paths"]["db"]}"', T.OK),
         ):
             box.addWidget(line)
+
+    # ---- mail rules (2026-07-15) --------------------------------------------
+
+    def _on_rules(self, result: dict):
+        box = self._rules_box.layout()
+        clear_layout(box)
+        rules = (result or {}).get("rules", [])
+        if not rules:
+            box.addWidget(label("No rules yet — say “create a rule…” in chat, "
+                                "or use ＋ New rule.", 11, T.TEXT_FAINT))
+            return
+        for r in rules:
+            box.addWidget(self._rule_row(r))
+
+    @staticmethod
+    def _rule_summary(r: dict) -> str:
+        parts = []
+        for key, name in (("from_addrs", "from"), ("domains", "domain"),
+                          ("subject_kw", "subject"), ("body_kw", "body")):
+            if r[key]:
+                parts.append(f"{name}: {', '.join(r[key][:3])}")
+        return " · ".join(parts)
+
+    def _rule_row(self, r: dict) -> QWidget:
+        row = QWidget()
+        rl = hbox(row, (12, 8, 12, 8), 10)
+        c = T.label_color(r["label"])
+        rl.addWidget(Chip(r["label"], c, c, px=10, radius=7, hpad=7, vpad=2))
+        rl.addWidget(label(self._rule_summary(r), 11, T.TEXT_DIM), 1)
+        sw = Switch(r["enabled"])
+        sw.clicked.connect(lambda _=False, rid=r["id"], s=sw:
+                           self.state.toggle_rule(rid, s.isChecked()))
+        rl.addWidget(sw)
+        edit = button("Edit", "ghost", 11, 26)
+        edit.clicked.connect(lambda _=False, rr=r: self.state.open_rule_editor(rr))
+        rl.addWidget(edit)
+        rl.addWidget(ClickLabel(
+            "✕", 12, T.TEXT_FAINT,
+            on_click=lambda rid=r["id"]: self.state.delete_rule(
+                rid, lambda _r: self.state.list_rules(self._on_rules)),
+            tooltip="Delete rule"))
+        return row
 
     # ---- supervised procedures (Phase 9) -----------------------------------
 

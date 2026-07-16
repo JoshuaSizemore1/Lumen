@@ -952,6 +952,65 @@ def test_mail_rule_button_prefills_sender(qtbot, monkeypatch):
     assert seen == [{"from_addrs": []}]   # sample sender has no address
 
 
+def test_rule_dialog_prefills_and_saves(qtbot, monkeypatch):
+    from PyQt6.QtWidgets import QWidget
+    from lumen.ui_v2.rule_dialog import RuleDialog
+    parent = QWidget()
+    parent.resize(800, 600)
+    qtbot.addWidget(parent)
+    st = AppState()
+    created, updated = [], []
+    monkeypatch.setattr(st, "create_rule", lambda r, cb=None: created.append(r))
+    monkeypatch.setattr(st, "update_rule", lambda i, r, cb=None: updated.append((i, r)))
+    dlg = RuleDialog(parent, st)
+    dlg.open({"from_addrs": ["a@x.com"]})
+    assert dlg.from_edit.text() == "a@x.com"
+    dlg.label_edit.setText("Bills")
+    dlg.subj_edit.setText("invoice, statement")
+    dlg._save()
+    assert created == [{"label": "Bills", "from_addrs": ["a@x.com"],
+                        "domains": [], "subject_kw": ["invoice", "statement"],
+                        "body_kw": []}]
+    # edit mode routes to update_rule
+    dlg.open({"id": 3, "label": "BSA", "domains": ["scouting.org"]})
+    dlg._save()
+    assert updated and updated[0][0] == 3 and updated[0][1]["label"] == "BSA"
+
+
+def test_rule_dialog_rejects_unusable_rule(qtbot, monkeypatch):
+    from PyQt6.QtWidgets import QWidget
+    from lumen.ui_v2.rule_dialog import RuleDialog
+    parent = QWidget()
+    parent.resize(800, 600)
+    qtbot.addWidget(parent)
+    st = AppState()
+    created = []
+    monkeypatch.setattr(st, "create_rule", lambda r, cb=None: created.append(r))
+    dlg = RuleDialog(parent, st)
+    dlg.open()
+    dlg.label_edit.setText("Bills")     # label but no condition
+    dlg._save()
+    assert created == [] and dlg.hint.text()
+
+
+def test_settings_rules_section(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.settings import SettingsScreen
+    st = AppState()
+    sc = SettingsScreen(st)
+    qtbot.addWidget(sc)
+    sc._on_rules({"rules": [], "labels": []})
+    assert "No rules yet" in _label_texts(sc)
+    toggled, opened = [], []
+    monkeypatch.setattr(st, "toggle_rule", lambda i, e, cb=None: toggled.append((i, e)))
+    monkeypatch.setattr(st, "open_rule_editor", lambda p=None: opened.append(p))
+    sc._on_rules({"rules": [{"id": 1, "label": "Bills", "enabled": True,
+                             "from_addrs": [], "domains": ["duke.com"],
+                             "subject_kw": [], "body_kw": [],
+                             "created_at": "2026-07-15"}], "labels": ["Bills"]})
+    t = _label_texts(sc)
+    assert "Bills" in t and "domain: duke.com" in t
+
+
 def test_sample_window_builds_every_screen(qtbot):
     """Construct the full sample-mode window: every screen's layout builds."""
     from lumen.ui_v2.main import LumenWindow, TABS
