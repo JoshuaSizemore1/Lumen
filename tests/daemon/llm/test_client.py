@@ -40,6 +40,39 @@ async def test_chat_streams_chunks_and_sends_keep_alive():
     await client.aclose()
 
 
+async def test_warm_empty_preloads_weights_only():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, content=ndjson({"done": True}))
+
+    client = make_client(handler)
+    await client.warm()
+    assert seen["messages"] == []                 # weights only, no prefix
+    assert seen["keep_alive"] == "10m"
+    assert "num_predict" not in seen["options"]
+    await client.aclose()
+
+
+async def test_warm_with_prime_caches_prefix_via_one_token_gen():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, content=ndjson({"done": True}))
+
+    client = make_client(handler)
+    prime = [{"role": "system", "content": "You are Lumen."},
+             {"role": "user", "content": "hi"}]
+    await client.warm(prime)
+    assert seen["messages"] == prime              # prefix is evaluated + cached
+    assert seen["options"]["num_predict"] == 1    # generate one token, no more
+    assert seen["options"]["num_ctx"] == 8192     # same ctx as real chat, no reload
+    assert seen["keep_alive"] == "10m"
+    await client.aclose()
+
+
 async def test_unload_sends_zero_keep_alive_and_empty_messages():
     seen = {}
 

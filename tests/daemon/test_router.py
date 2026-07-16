@@ -30,8 +30,9 @@ class FakeLLM:
     async def unload(self):
         self.unloaded = True
 
-    async def warm(self):
+    async def warm(self, prime=None):
         self.warmed = True
+        self.warm_prime = prime
 
 
 class FakeStore:
@@ -133,6 +134,16 @@ async def test_warm_preloads_and_is_silent():
     llm = FakeLLM()
     out = await collect(Router(llm, FakeStore()), "warm", {})
     assert llm.warmed is True and out == []   # fire-and-forget: no response
+
+
+async def test_warm_primes_the_identity_prefix():
+    # warm must carry the stable identity prefix so Ollama caches its KV and the
+    # first real query skips the CPU-bound prompt-eval (Phase 11 cold-start fix).
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore()), "warm", {})
+    assert llm.warm_prime is not None
+    assert llm.warm_prime[0]["role"] == "system"
+    assert "Lumen" in llm.warm_prime[0]["content"]
 
 
 async def test_identity_prompt_prepended_on_plain_chat():

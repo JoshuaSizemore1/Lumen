@@ -357,6 +357,21 @@ class Router:
         if self._confirm is not None:
             self._confirm.deny_all()
 
+    def _warm_prefix(self) -> list[dict]:
+        """The always-present prefix (identity + memory blob) plus a trivial
+        turn, for `warm()` to prime. Every real request's system message starts
+        with these exact tokens, so caching them here lets the first query skip
+        the CPU-bound prompt-eval that dominates cold start (Phase 11). Per-query
+        context (todo/calendar/fs/mail) is keyword-gated and varies, so it isn't
+        primed — only the constant head is worth caching."""
+        context = [IDENTITY]
+        if self._memory_path is not None:
+            mem = memory_mod.memory_context(self._memory_path, self._memory_cap)
+            if mem:
+                context.append(mem)
+        return [{"role": "system", "content": "\n\n".join(context)},
+                {"role": "user", "content": "hi"}]
+
     def _build_messages(self, message: str, history: list[dict],
                         tool_loop: bool = False) -> list[dict]:
         """A constant identity block + keyword-gated per-query context as the
@@ -495,8 +510,10 @@ class Router:
             yield {"done": True}
         elif type_ == "warm":
             # Fire-and-forget preload (launcher summon) so the next query isn't
-            # a cold start. No response — the UI doesn't wait on it.
-            await self._llm.warm()
+            # a cold start. Prime the stable identity/memory prefix so the first
+            # real query reuses its KV cache instead of re-evaluating it on CPU
+            # (Phase 11). No response — the UI doesn't wait on it.
+            await self._llm.warm(self._warm_prefix())
         elif type_ == "confirm.response":
             # Silent ack: the answer unblocks whichever handler is awaiting it.
             if self._confirm is not None:

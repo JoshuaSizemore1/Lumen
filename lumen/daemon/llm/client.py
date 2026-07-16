@@ -146,18 +146,30 @@ class OllamaClient:
                 "service running? (systemctl --user status ollama)"
             ) from e
 
-    async def warm(self) -> None:
+    async def warm(self, prime: list[dict] | None = None) -> None:
         """Preload the model into RAM (the inverse of unload) so the next real
         request skips the cold load. Fire-and-forget: if Ollama is down or busy,
-        the real request will surface the error."""
+        the real request will surface the error.
+
+        With `prime` (the stable identity/memory prefix), run a 1-token
+        generation so Ollama caches that prefix's KV. An empty preload only
+        loads the weights; the first real chat then still pays the CPU-bound
+        prompt-eval of the identity prompt (~8s on the iGPU-only box, Phase 11
+        finding). Priming the prefix moves that cost into the summon window so
+        the first query reuses the cache instead."""
         try:
             # Same num_ctx as real requests — a mismatch would make Ollama
             # reload the model on the first real chat, undoing the preload.
-            await self._http.post(
-                "/api/chat",
-                json={"model": self.model, "messages": [], "keep_alive": self.keep_alive,
-                      "options": {"num_ctx": NUM_CTX}},
-            )
+            body: dict = {"model": self.model, "keep_alive": self.keep_alive,
+                          "options": {"num_ctx": NUM_CTX}}
+            if prime:
+                body["messages"] = prime
+                body["think"] = self.think
+                body["stream"] = False
+                body["options"]["num_predict"] = 1
+            else:
+                body["messages"] = []
+            await self._http.post("/api/chat", json=body)
         except httpx.HTTPError:
             pass
 
