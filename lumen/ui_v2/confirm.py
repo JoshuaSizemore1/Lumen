@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import QFrame, QLabel, QWidget
 
 from . import theme as T
 from .widgets import (
-    CompositeButton, clear_layout, font, hbox, hline, label, qcolor, vbox,
+    ClickLabel, CompositeButton, TodoCheck, clear_layout, font, hbox, hline,
+    label, qcolor, vbox,
 )
 
 
@@ -17,6 +18,7 @@ class ConfirmOverlay(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._payload: dict = {}
         self._on_done = None
+        self._check = None
 
         lay = hbox(self, (20, 20, 20, 20), 0)
         lay.addStretch(1)
@@ -83,6 +85,17 @@ class ConfirmOverlay(QWidget):
         bl.addWidget(inset)
         self.card_lay.addWidget(body)
 
+        # optional checkbox riding the approval (e.g. rule-create backfill)
+        self._check = None
+        if c.get("check"):
+            self._check = TodoCheck(bool(c["check"].get("checked", True)))
+            crow = QWidget()
+            cl = hbox(crow, (18, 0, 18, 12), 8)
+            cl.addWidget(self._check)
+            cl.addWidget(ClickLabel(c["check"]["label"], 11, T.TEXT_SECONDARY,
+                                    on_click=self._check.click), 1)
+            self.card_lay.addWidget(crow)
+
         foot = QWidget()
         fl = hbox(foot, (18, 12, 18, 16), 10)
         cancel = CompositeButton("cancel", [label("Cancel", 13, T.TEXT_SECONDARY),
@@ -100,6 +113,8 @@ class ConfirmOverlay(QWidget):
             self.hide()
             return
         cb, payload = self._on_done, self._payload
+        if self._check is not None:
+            payload = {**payload, "check_state": self._check.isChecked()}
         self._on_done = None          # fire once: guard esc-after-click etc.
         self.hide()
         cb(approved, payload)

@@ -530,10 +530,14 @@ class Router:
             await self._llm.warm(self._warm_prefix())
         elif type_ == "confirm.response":
             # Silent ack: the answer unblocks whichever handler is awaiting it.
+            # An approval may carry extras (rule-create checkbox) — those travel
+            # as a truthy dict so bool-only waiters keep working.
             if self._confirm is not None:
                 try:
-                    self._confirm.resolve(int(payload["confirm_id"]),
-                                          bool(payload["approved"]))
+                    answer: bool | dict = bool(payload["approved"])
+                    if answer and "check" in payload:
+                        answer = {"approved": True, "check": bool(payload["check"])}
+                    self._confirm.resolve(int(payload["confirm_id"]), answer)
                 except (KeyError, TypeError, ValueError):
                     log.warning("malformed confirm.response payload: %r", payload)
         elif type_ == "compose.response":

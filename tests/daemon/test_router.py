@@ -1127,6 +1127,27 @@ async def test_confirm_response_resolves_pending_confirm():
     assert await waiter is True
 
 
+async def test_confirm_response_carries_check():
+    # An approval with a checkbox travels as a truthy dict (rule-create
+    # backfill); plain approvals stay booleans so bool-only waiters work.
+    import asyncio
+    broker = ConfirmBroker()
+    router = Router(FakeLLM(), FakeStore(), confirm=broker)
+    cid = broker.begin()
+    waiter = asyncio.ensure_future(broker.wait(cid))
+    await asyncio.sleep(0)
+    await collect(router, "confirm.response",
+                  {"confirm_id": cid, "approved": True, "check": True})
+    assert await waiter == {"approved": True, "check": True}
+    # a deny with a checkbox is still a plain False
+    cid = broker.begin()
+    waiter = asyncio.ensure_future(broker.wait(cid))
+    await asyncio.sleep(0)
+    await collect(router, "confirm.response",
+                  {"confirm_id": cid, "approved": False, "check": True})
+    assert await waiter is False
+
+
 async def test_confirm_response_malformed_or_unbrokered_is_harmless():
     broker = ConfirmBroker()
     assert await collect(Router(FakeLLM(), FakeStore(), confirm=broker),

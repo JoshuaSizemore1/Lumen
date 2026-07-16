@@ -33,8 +33,10 @@ class FakeClient(QObject):
     def sleep_model(self):
         self.sent.append(("sleep", {}))
 
-    def respond_confirm(self, confirm_id, approved):
-        self.confirm_responses.append((confirm_id, approved))
+    def respond_confirm(self, confirm_id, approved, check=None):
+        self.confirm_responses.append(
+            (confirm_id, approved) if check is None
+            else (confirm_id, approved, check))
 
     def cb_for(self, type_):
         return next(cb for t, _p, cb in self.requests if t == type_)
@@ -296,6 +298,31 @@ def test_confirm_overlay_fires_once_with_payload(qtbot):
     ov._finish(True)
     ov._finish(False)  # second answer must be swallowed (esc-after-click, etc.)
     assert got == [(True, {"confirm_id": 9})]
+
+
+def test_confirm_overlay_checkbox_rides_the_approval(qtbot):
+    from PyQt6.QtWidgets import QWidget
+    from lumen.ui_v2.confirm import ConfirmOverlay
+    parent = QWidget()
+    parent.resize(800, 600)
+    qtbot.addWidget(parent)
+    ov = ConfirmOverlay(parent)
+    got = []
+    ov.open({"icon": "⚑", "title": "Create mail rule", "intro": "i",
+             "rows": [("Label", "Bills")], "confirm_label": "Save rule",
+             "check": {"label": "Also apply to 3 emails", "checked": True}},
+            lambda approved, payload: got.append((approved, payload)))
+    assert ov._check is not None and ov._check.isChecked()
+    ov._check.setChecked(False)
+    ov._confirm()
+    assert got[0][0] is True and got[0][1]["check_state"] is False
+    # no check payload -> no check_state key
+    got.clear()
+    ov.open({"icon": "✉", "title": "Archive email", "intro": "i", "rows": [],
+             "confirm_label": "Archive"},
+            lambda approved, payload: got.append((approved, payload)))
+    ov._confirm()
+    assert "check_state" not in got[0][1]
 
 
 def test_window_confirm_result_answers_daemon(qtbot):

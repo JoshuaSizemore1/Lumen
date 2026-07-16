@@ -54,11 +54,16 @@ class DaemonClient(QObject):
     def sleep_model(self) -> None:
         self.send("sleep", {})
 
-    def respond_confirm(self, confirm_id: int, approved: bool) -> None:
+    def respond_confirm(self, confirm_id: int, approved: bool,
+                        check: bool | None = None) -> None:
         """Answer a daemon confirm_request. Must be sent on a client whose
         connection is NOT the one paused awaiting this answer — the shell keeps
-        a dedicated client for it."""
-        self.send("confirm.response", {"confirm_id": confirm_id, "approved": approved})
+        a dedicated client for it. `check` rides along only when the dialog
+        showed a checkbox (rule-create backfill)."""
+        payload = {"confirm_id": confirm_id, "approved": approved}
+        if check is not None:
+            payload["check"] = check
+        self.send("confirm.response", payload)
 
     def _on_error(self, _err) -> None:
         self._pending.clear()  # a send that failed is dead — never burst stale messages later

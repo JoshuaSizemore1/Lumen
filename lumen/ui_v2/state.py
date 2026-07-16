@@ -180,9 +180,10 @@ class AppState(QObject):
         confirm overlay the mock uses; the answer travels back via `respond_confirm`."""
         client.confirm_requested.connect(self.confirm_requested.emit)
 
-    def respond_confirm(self, confirm_id: int, approved: bool) -> None:
+    def respond_confirm(self, confirm_id: int, approved: bool,
+                        check: bool | None = None) -> None:
         if self._confirm is not None:
-            self._confirm.respond_confirm(confirm_id, approved)
+            self._confirm.respond_confirm(confirm_id, approved, check=check)
 
     # ---- compose popup (Phase 7) ----
     def attach_compose_source(self, client) -> None:

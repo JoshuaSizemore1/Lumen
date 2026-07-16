@@ -209,7 +209,8 @@ class LumenWindow(QWidget):
     def _on_confirm_result(self, approved: bool, payload: dict):
         confirm_id = payload.get("confirm_id")
         if confirm_id is not None:          # daemon confirm-over-IPC: always answer
-            self.state.respond_confirm(confirm_id, approved)
+            self.state.respond_confirm(confirm_id, approved,
+                                       check=payload.get("check_state"))
         if approved and payload.get("toast"):
             self.toast.pop(payload["toast"])
 
