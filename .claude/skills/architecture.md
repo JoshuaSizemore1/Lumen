@@ -15,6 +15,9 @@ Chat is multi-turn and daemon-owned. Every chat request carries a `conversation_
 - Daemon itself is cheap to keep running (it's just Python + sockets, no model loaded) — the LLM subprocess/server is the only thing that idle-unloads.
 - UI is a separate process; can be killed/restarted independently of the daemon without losing state (SQLite is the source of truth, not in-memory daemon state).
 
+## Settings is a live, read-only view of config (Phase 10)
+The Settings screen renders a snapshot from the daemon, it does not store or write config. `settings.get` returns `daemon/settings_snapshot.py::build_settings_snapshot(cfg)` — a pure derivation (model/sync/accounts/mcp/paths) with live Google connection status from `google_auth.connected`; it touches nothing else (no Ollama, no writes), so it never loads the model. You change settings by editing `config.toml` (hot-reloaded); account/MCP rows are reflect-only status, not toggles. Fictional mockup knobs with no real backing were deliberately dropped, not faked. Accent is the one live control and persists via `QSettings` (`ui_v2/main.py`), not `config.toml` — it is intentionally absent from the snapshot. Empty/loading/error panes across screens go through `ui_v2/widgets.py::empty_state(text, sub)` — one helper so wording/styling stay consistent; the Chat empty state (`screens/chat.py`) centers with a *leading* stretch so the "turns pack to top" trailing-stretch invariant survives.
+
 ## Keyboard map (Phase 10 — `ui_v2`)
 Audited 2026-07-15; the number keys match the muted hint chips rendered in each tab.
 - `1`–`6` — switch tabs: `1` Launcher, `2` Dashboard, `3` Calendar, `4` Todos, `5` Books, `6` Chat (wired in `main.py` from the same `kbd` map that draws the chips, so the badges are self-documenting).
