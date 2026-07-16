@@ -38,7 +38,12 @@ Use SQLite FTS5 (or an equivalent full-text index) over `subject`/`body`/`snippe
   (`compose_request` over IPC; the turn awaits `compose.response`), the Mail
   screen's Compose/Reply buttons open it locally and send via `emails.send`.
   Sending needed no new scope — `gmail.modify` already authorizes it.
-- Read/archive/label actions are also writes — confirm before executing, same as send (even though these feel low-stakes, consistency matters more than shaving a click).
+- Write actions are tiered (revised 2026-07-15): **archive** still confirms
+  before executing; **read-state** changes (mark read/unread, dwell auto-read)
+  are ungated — reversible, low-stakes, and the dwell timer would make a
+  confirm dialog absurd; **labeling** is pre-authorized either at rule-creation
+  time (the confirm covers all future applications) or by the explicit tap on
+  a suggestion chip.
 
 ## Privacy note
 This table is a much fuller mirror of your inbox than the metadata-only cache used for dashboard summaries — worth encrypting at rest or at minimum locking down file permissions on the SQLite file, given the LLM (and anything else on the machine) can read it directly.
@@ -58,7 +63,41 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
 - **The mail MCP server (`lumen/mcp_servers/mail.py`) is read-only by design** — `search_email`/`get_email` only, over a read-only SQLite URI handle (`mode=ro`) on the mirror. Archive/mark-read are UI-confirmed one-shots through the router, never model-initiated tool calls.
 - **`emails_fts` is keyed to the implicit rowid of `emails`** (TEXT primary key); `VACUUM` renumbers implicit rowids and silently desyncs the index — if the DB is ever vacuumed, run `INSERT INTO emails_fts(emails_fts) VALUES('rebuild');` afterward.
 
-## Decided gates (2026-07-12)
+## Decided gates (2026-07-12, revised 2026-07-15)
 - Bulk sync window: 6 months, configurable via `config.toml`'s `gmail_window_months` (default 6).
-- Browsing the mail menu never changes read state — opening/viewing a message does not implicitly mark it read; only the explicit mark-read action does.
-- v1 manage actions are archive and mark read/unread only. Label management and delete are out of scope for this phase.
+- ~~Browsing the mail menu never changes read state~~ **Reversed 2026-07-15**
+  (user decision, `new-features.md`): a message kept open ~1s is marked read —
+  locally at once, propagated to Gmail via a silent idempotent
+  `emails.auto_read` one-shot. Arrow-keying past mail never marks it (the
+  dwell timer re-arms on every selection change). Explicit mark read/unread is
+  also ungated now — consistency with the silent path.
+- Archive still confirms. Delete is still out of scope.
+- **Labeling = moving** (Gmail semantics the user chose): applying a label
+  also removes `INBOX`, locally and upstream. There is no keep-in-inbox+label
+  variant.
+
+## Labels & rules (built 2026-07-15)
+- **`gmail_labels`** table mirrors the Gmail label list (id↔name, type);
+  refreshed at the top of every sync pass (failures non-fatal). Rows store
+  label **ids** in `emails.labels`; the UI receives resolved `label_names`
+  (user labels only).
+- **`mail_rules`** table: label + any-of matchers (`from_addrs`, `domains`,
+  `subject_kw`, `body_kw` as JSON lists). Deterministic matching only
+  (`daemon/connectors/mail_rules.py`) — exact sender, domain suffix,
+  casefolded substring on subject/body.
+- **Rules run in the incremental sync path only** — applied to newly arrived
+  INBOX mail after upsert, never during bulk/re-baseline pulls, and the poller
+  NEVER wakes the LLM (power/thermal constraint). Rule application is
+  pre-authorized at creation: the confirm dialog (⚑ "Create mail rule") is the
+  one gate, with an optional checkbox to backfill the N existing matches.
+- **Three creation paths, one confirm**: chat (`RULE_HINT` → 4B model drafts
+  via `daemon/llm/rule_author.py`, validated then gated), the ⚑ Rule button on
+  a message (prefills sender), and Settings → `[mail_rules]` → ＋ New rule.
+  Edits/toggles/deletes of existing rules are ungated.
+- **Suggest labels (✨)** runs the local model once per unlabeled message
+  (per-message verdicts, not batched — the 2026-07-13 triage lesson), writes
+  NOTHING; each suggestion is a chip the user taps to apply.
+- **Unread is inbox-scoped everywhere** — labeled mail has left the inbox, so
+  it no longer counts as unread anywhere the UI shows a count.
+- Default list view = `INBOX` label only; filter chips (All · Unread · one per
+  user label) re-query the local DB scoped by label id.

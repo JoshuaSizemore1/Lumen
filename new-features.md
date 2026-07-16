@@ -33,10 +33,13 @@ What's missing is everything below.
 ---
 
 ### A. Refresh button — verify pass (no new feature)
+**Verified 2026-07-15.** ↻ → `refresh_inbox` → `mail.refresh` (now
+scope-preserving) → sync; covered by daemon + UI tests.
 Confirm the ↻ button drives an end-to-end sync and the status line
 ("syncing… / synced <time>") reflects it. Fix if broken. No build.
 
 ### B. Auto-mark-read on open → Gmail
+**Built 2026-07-15.**
 When a message is selected and stays open **~1s** (dwell timer, so
 arrow-keying past mail doesn't mark everything), mark it read locally **and**
 call Gmail to remove `UNREAD`. Already-read messages are a no-op. Reuses the
@@ -47,6 +50,7 @@ existing `mark_read` path — genuinely two-way.
 - Removes `UNREAD` only. Does **not** touch `INBOX` (that's labeling, § D).
 
 ### C. Label sorting UI — filter chips + tags
+**Built 2026-07-15.**
 - **Chip row** under the "Inbox" header: **All · Unread · <one chip per label>**.
   - **All** (default, nothing selected) → local DB query scoped to `INBOX`.
   - **Unread** → `INBOX` + `UNREAD`.
@@ -63,6 +67,8 @@ existing `mark_read` path — genuinely two-way.
   user-facing chip row — only user labels show.
 
 ### D. Rules engine (instant, no LLM)
+**Built 2026-07-15** (incl. D.1 label plumbing, D.2 three creation paths,
+D.3 rule-authoring prompt).
 Deterministic rules that run in the daemon on each sync for **new** mail —
 zero model cost.
 
@@ -128,6 +134,9 @@ It teaches the small local model to turn a fuzzy request into a concrete rule:
   consistent with the power/thermal budget.
 
 ### E. "Suggest labels" — LLM, on request only
+**Built 2026-07-15** — with one deviation: per-message model verdicts instead
+of one batched call (4B model loses track of large batches; the 2026-07-13
+triage lesson). Still one button press → one model load → unload.
 - A button that classifies the **unlabeled** inbox mail in **one batched**
   local-model call against the user's existing Gmail label names, then shows a
   suggested label as a **one-tap chip** per email.

@@ -224,6 +224,14 @@ Real benchmarking on the actual Zenbook Duo (Core Ultra 9 285H, 32GB shared, iGP
 
 **Success**: you can state a concrete number for cold-start time and confirm the fan/thermal behavior at idle is acceptable — not just "it feels fine."
 
+## Phase 12 — Inbox sorting, syncing & rules — DONE (2026-07-16)
+User-requested batch, design of record in `new-features.md` (§§ A–E, decisions locked with the user 2026-07-15); plan `docs/superpowers/plans/2026-07-15-inbox-sorting-rules.md`. Full write-up of the as-built behavior lives in `email-menu.md` ("Labels & rules").
+
+**Shipped**: (A) ↻ refresh verified end-to-end (now scope-preserving). (B) **Dwell auto-read** — a message kept open ~1s marks read locally + silently propagates to Gmail (`emails.auto_read`, idempotent, ungated); reverses the 2026-07-12 "browsing never changes read state" gate by user decision. (C) **Filter chips + label tags** — All · Unread · per-user-label chips re-query the local DB by scope (labeled mail has left INBOX); stable crc32 label colors; pills on rows and reading pane. (D) **Deterministic rules engine** — `mail_rules` table (label + any-of matchers: sender, domain suffix, subject/body keywords), applied in the **incremental sync path only**, poller never wakes the LLM; labeling = moving (apply label + remove INBOX, locally and upstream via new `refresh_labels`/`create_label`/`apply_label` plumbing + `gmail_labels` id↔name map). Rules are pre-authorized at creation via one confirm dialog (with an optional backfill-existing-matches checkbox — the confirm protocol gained a checkbox field, backward compatible); three creation paths converge on it: chat (`RULE_HINT` → 4B `rule_author` prompt with BSA few-shot, validated), ⚑ Rule button on a message (prefills sender), Settings `[mail_rules]` editor. (E) **✨ Suggest labels** — on-press-only local-model classification of unlabeled inbox mail into existing labels; per-message verdicts (2026-07-13 triage lesson, deviation from the spec's single batched call); nothing written until the user taps a suggestion chip.
+
+**Verified**: TDD throughout (daemon 544→577, UI 163→181 tests); § A path asserted UI-side and daemon-side; live verify over the real socket + offscreen screenshots at close-out.
+
+**Success**: new mail files itself by rules with zero model cost; the model runs only on explicit request (rule authoring, suggestions) and unloads after; nothing is written to Gmail without a prior explicit authorization.
 
 ## Josh's personal notes (source for Phase 5.5 — kept verbatim)
 These are the raw notes that Phase 5.5 above was distilled from. Notes 3 and 4 were already partly fixed in the working tree at the time these were written (`fs_context`/tool timeout, and `warm()`), which is why Phase 5.5 finishes rather than rebuilds them.
