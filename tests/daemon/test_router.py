@@ -67,9 +67,21 @@ class FakeMailStore:
                       "snippet": "s", "body": "b", "labels": ["INBOX", "UNREAD"],
                       "received_at": "2026-07-10T10:00:00+00:00", "is_read": False,
                       "attachments": [], "thread_id": "t1", "recipients": "me"}]
+        self.labels = [{"id": "Label_7", "name": "Bills"}]
 
-    def list_page(self, filter="inbox", limit=50, offset=0):
+    def list_page(self, filter="inbox", limit=50, offset=0, label_id=None):
+        if filter == "label":
+            return [r for r in self.rows if label_id in r["labels"]]
         return self.rows
+
+    def user_labels(self):
+        return self.labels
+
+    def label_id(self, name):
+        return next((l["id"] for l in self.labels if l["name"] == name), None)
+
+    def present_label_ids(self):
+        return {l for r in self.rows for l in r["labels"]}
 
     def search(self, query, limit=50):
         return self.rows if "engine" in query.lower() else []
@@ -89,6 +101,11 @@ class FakeMailSync:
 
     def __init__(self):
         self.archived, self.marked, self.synced = [], [], 0
+        self.labeled = []
+
+    async def apply_label(self, mid, label_name):
+        self.labeled.append((mid, label_name))
+        return True
 
     def last_sync(self):
         return "2026-07-12T13:00:00"
@@ -1832,17 +1849,61 @@ async def test_emails_archive_confirm_approve_and_decline():
     assert events[-1]["result"]["ok"] is False and sync.archived == []
 
 
-async def test_emails_mark_read_confirmed():
+async def test_emails_mark_read_no_longer_confirms():
+    # Read-state writes stopped confirming 2026-07-15: opening a message
+    # auto-marks it read, so the explicit button can't rank a dialog above
+    # the same silent write. No broker needed at all.
     store, sync = FakeMailStore(), FakeMailSync()
-    broker = ConfirmBroker()
-    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store,
-                    confirm=broker)
-    events = []
-    async for ev in router.handle("emails.mark_read", {"id": "m1", "read": True}):
-        events.append(ev)
-        if "confirm_request" in ev:
-            broker.resolve(ev["confirm_id"], True)
-    assert events[-1]["result"]["ok"] is True and sync.marked == [("m1", True)]
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.mark_read", {"id": "m1", "read": True})
+    assert not any("confirm_request" in e for e in out)
+    assert out[-1]["result"]["ok"] is True and sync.marked == [("m1", True)]
+    out = await collect(router, "emails.mark_read", {"id": "nope"})
+    assert "error" in out[-1]
+
+
+async def test_emails_list_carries_label_names_and_label_scope():
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.rows[0]["labels"] = ["INBOX", "UNREAD", "Label_7"]
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.list", {})
+    res = out[-1]["result"]
+    assert res["emails"][0]["label_names"] == ["Bills"]
+    assert res["labels"] == ["Bills"]
+    out = await collect(router, "emails.list", {"filter": "label", "label": "Bills"})
+    assert [m["id"] for m in out[-1]["result"]["emails"]] == ["m1"]
+    out = await collect(router, "emails.list", {"filter": "label", "label": "Nope"})
+    assert "error" in out[-1]
+
+
+async def test_mail_refresh_keeps_scope():
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.rows[0]["labels"] = ["INBOX", "Label_7"]
+    store.rows.append({**store.rows[0], "id": "m2", "labels": ["INBOX"]})
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "mail.refresh", {"filter": "label", "label": "Bills"})
+    assert sync.synced == 1
+    assert [m["id"] for m in out[-1]["result"]["emails"]] == ["m1"]
+
+
+async def test_emails_auto_read_is_silent_and_idempotent():
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.auto_read", {"id": "m1"})
+    assert out == [{"result": {"ok": True}}] and sync.marked == [("m1", True)]
+    store.rows[0]["is_read"] = True
+    out = await collect(router, "emails.auto_read", {"id": "m1"})
+    assert out == [{"result": {"ok": True}}]
+    assert sync.marked == [("m1", True)]    # already read: no second Gmail call
+
+
+async def test_emails_apply_label_op():
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.apply_label", {"id": "m1", "label": "Bills"})
+    assert out[-1]["result"]["ok"] is True and sync.labeled == [("m1", "Bills")]
+    out = await collect(router, "emails.apply_label", {"id": "m1"})
+    assert "error" in out[-1]
 
 
 async def test_emails_unavailable_without_mail():

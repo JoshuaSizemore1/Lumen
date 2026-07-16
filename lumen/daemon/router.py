@@ -713,20 +713,32 @@ class Router:
                 # channel for the whole sync's duration.
                 if not (self._mail.busy or self._mail.syncing):
                     await self._mail.sync_once()
-                type_, payload = "emails.list", {}
+                # keep the caller's scope so a label view reloads as itself
+                type_, payload = "emails.list", {
+                    k: payload[k] for k in ("filter", "label", "limit", "offset")
+                    if k in payload}
             if type_ == "emails.list":
+                filt = payload.get("filter", "inbox")
+                label_id = None
+                if filt == "label":
+                    label_id = self._mail_store.label_id(
+                        str(payload.get("label", "")))
+                    if label_id is None:
+                        yield {"error": "unknown label"}
+                        return
                 yield {"result": {
-                    "emails": self._mail_store.list_page(
-                        payload.get("filter", "inbox"),
-                        int(payload.get("limit", 50)),
-                        int(payload.get("offset", 0))),
+                    "emails": self._with_label_names(self._mail_store.list_page(
+                        filt, int(payload.get("limit", 50)),
+                        int(payload.get("offset", 0)), label_id=label_id)),
+                    "labels": self._present_user_labels(),
                     "connected": self._mail.connected,
                     "syncing": self._mail.syncing,
                     "last_sync": self._mail.last_sync(),
                     "counts": self._mail_store.counts()}}
             elif type_ == "emails.search":
-                yield {"result": {"emails": self._mail_store.search(
-                    payload.get("query", ""), int(payload.get("limit", 50)))}}
+                yield {"result": {"emails": self._with_label_names(
+                    self._mail_store.search(payload.get("query", ""),
+                                            int(payload.get("limit", 50))))}}
             elif type_ == "emails.get":
                 row = self._mail_store.get(str(payload.get("id", "")))
                 yield {"error": "email not found"} if row is None else {"result": row}
@@ -734,9 +746,38 @@ class Router:
                 yield {"result": {
                     "emails": self._mail_store.unread(int(payload.get("limit", 10))),
                     "connected": self._mail.connected}}
-            elif type_ in ("emails.archive", "emails.mark_read"):
+            elif type_ == "emails.archive":
                 async for ev in self._gated_mail_action(type_, payload):
                     yield ev
+            elif type_ == "emails.mark_read":
+                # Read-state writes stopped confirming 2026-07-15 — opening a
+                # message auto-marks it read, so the explicit button can't
+                # rank a dialog above the same silent write.
+                row = self._mail_store.get(str(payload.get("id", "")))
+                if row is None:
+                    yield {"error": "email not found"}
+                    return
+                ok = await self._mail.mark_read(row["id"],
+                                                bool(payload.get("read", True)))
+                yield {"result": {"ok": ok, "message": "Updated." if ok else
+                                  "Couldn't reach Gmail — nothing was changed."}}
+            elif type_ == "emails.auto_read":
+                # Dwell-timer read receipt: silent and idempotent.
+                row = self._mail_store.get(str(payload.get("id", "")))
+                if row is not None and not row["is_read"]:
+                    await self._mail.mark_read(row["id"], True)
+                yield {"result": {"ok": True}}
+            elif type_ == "emails.apply_label":
+                # One-tap accept (suggestions): the tap IS the confirmation.
+                mid = str(payload.get("id", ""))
+                name = str(payload.get("label", "")).strip()
+                if not name or self._mail_store.get(mid) is None:
+                    yield {"error": "emails.apply_label needs {id, label}"}
+                    return
+                ok = await self._mail.apply_label(mid, name)
+                yield {"result": {"ok": ok, "message":
+                       f"Labeled {name} — moved out of inbox." if ok else
+                       "Couldn't reach Gmail — nothing was changed."}}
             elif type_ == "emails.send":
                 ok, text = await self._send_email(payload)
                 yield {"result": {"ok": ok, "message": text}}
@@ -1376,9 +1417,24 @@ class Router:
         return ((True, "Sent.") if ok
                 else (False, "Couldn't reach Gmail — nothing was sent."))
 
+    def _with_label_names(self, rows: list[dict]) -> list[dict]:
+        """Rows carry Gmail label IDs; the UI shows user-label NAMES."""
+        m = {l["id"]: l["name"] for l in self._mail_store.user_labels()}
+        for r in rows:
+            r["label_names"] = [m[i] for i in r.get("labels", []) if i in m]
+        return rows
+
+    def _present_user_labels(self) -> list[str]:
+        """User-label names present on at least one mirrored message —
+        the chip row's vocabulary."""
+        m = {l["id"]: l["name"] for l in self._mail_store.user_labels()}
+        present = self._mail_store.present_label_ids()
+        return sorted((m[i] for i in present if i in m), key=str.casefold)
+
     async def _gated_mail_action(self, type_: str, payload: dict):
-        """Confirm-over-IPC then execute an archive / mark-read against Gmail.
-        Low-stakes-feeling writes still confirm — consistency over a click."""
+        """Confirm-over-IPC then execute an archive against Gmail. Read-state
+        writes stopped confirming 2026-07-15 (dwell auto-read design), so
+        archive is the last mail action behind this gate."""
         if self._confirm is None:
             yield {"error": "email actions unavailable"}
             return
@@ -1386,31 +1442,19 @@ class Router:
         if row is None:
             yield {"error": "email not found"}
             return
-        read = bool(payload.get("read", True))
-        if type_ == "emails.archive":
-            title, verb = "Archive email", "Archive"
-            intro = "Lumen will archive this message in your Gmail account."
-        else:
-            title = "Mark email as read" if read else "Mark email as unread"
-            verb = "Mark read" if read else "Mark unread"
-            intro = "Lumen will update this message's read state in your Gmail account."
         confirm_id = self._confirm.begin()
         yield {"confirm_request": {
-                   "icon": "✉", "title": title, "intro": intro,
+                   "icon": "✉", "title": "Archive email",
+                   "intro": "Lumen will archive this message in your Gmail account.",
                    "rows": [("From", row["sender"]), ("Subject", row["subject"])],
-                   "confirm_label": verb},
+                   "confirm_label": "Archive"},
                "confirm_id": confirm_id}
         if not await self._confirm.wait(confirm_id):
             yield {"result": {"ok": False, "message": "Cancelled — nothing was changed."}}
             return
-        if type_ == "emails.archive":
-            ok = await self._mail.archive(row["id"])
-            done = "Archived." if ok else "Couldn't reach Gmail — nothing was changed."
-        else:
-            ok = await self._mail.mark_read(row["id"], read)
-            done = ("Updated." if ok
-                    else "Couldn't reach Gmail — nothing was changed.")
-        yield {"result": {"ok": ok, "message": done}}
+        ok = await self._mail.archive(row["id"])
+        yield {"result": {"ok": ok, "message": "Archived." if ok else
+                          "Couldn't reach Gmail — nothing was changed."}}
 
     async def _chat_with_tools(self, message: str, conv_id: int | None = None):
         try:
