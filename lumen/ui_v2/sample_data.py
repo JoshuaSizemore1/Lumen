@@ -41,7 +41,7 @@ MAILS = [
              "stay quiet, short enough that the tray never goes stale. Can we expose it under [sync] "
              "so power users can drop it to 5?\n\n— Priya"},
     {"id": "m3", "from": "Dr. Okafor’s office", "subj": "Appointment reminder — Jul 9", "time": "Tue",
-     "date": "Tue · 14:02", "unread": True,
+     "date": "Tue · 14:02", "unread": True, "label_names": ["Health"],
      "preview": "Reminder: dental cleaning, Wed Jul 9 at 10:00.",
      "body": "This is a reminder of your upcoming appointment:\n\nDental cleaning — Wednesday, July 9 "
              "at 10:00 AM.\n\nReply CONFIRM to keep this slot, or call the office to reschedule."},
@@ -51,7 +51,7 @@ MAILS = [
      "body": "We’re choosing the next book-club read. You’ve clearly been on a Le Guin run "
              "lately — want to lead a session on The Dispossessed? Everyone’s keen.\n\nSarah"},
     {"id": "m5", "from": "Linux Weekly", "subj": "Wayland color management lands", "time": "Wed",
-     "date": "Wed · 06:00", "unread": False,
+     "date": "Wed · 06:00", "unread": False, "label_names": ["Newsletters"],
      "preview": "The long-awaited color-management protocol merged.",
      "body": "This week in Linux: the color-management protocol finally merged into wlroots, HDR test "
              "builds land for Hyprland, and a roundup of tiling-WM dotfiles."},

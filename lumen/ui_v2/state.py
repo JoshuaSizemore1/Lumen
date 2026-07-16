@@ -80,7 +80,8 @@ def _norm_mail(r: dict) -> dict:
             "subj": r.get("subject") or "(no subject)",
             "preview": r.get("snippet", ""), "time": time_s, "date": date_s,
             "unread": not r.get("is_read", True), "body": r.get("body", ""),
-            "labels": r.get("labels", []), "attachments": r.get("attachments", [])}
+            "labels": r.get("labels", []), "label_names": r.get("label_names", []),
+            "attachments": r.get("attachments", [])}
 
 
 def _norm_rec(rec: dict) -> dict:
@@ -132,6 +133,7 @@ class AppState(QObject):
     open_chat_requested = pyqtSignal(int)  # hand a conversation off to the full Chat screen
     confirm_requested = pyqtSignal(dict)  # confirm-dialog payload (may carry confirm_id)
     compose_requested = pyqtSignal(dict)  # compose-popup payload (may carry compose_id)
+    rule_edit_requested = pyqtSignal(dict)  # open the rule editor (prefill payload)
     toast_requested = pyqtSignal(str)
     accent_requested = pyqtSignal(str)    # accent hex from the settings picker
     status_requested = pyqtSignal(str)    # transient status line (daemon offline/errors)
@@ -147,6 +149,9 @@ class AppState(QObject):
         self.mail_syncing = False
         self.mail_last_sync = None
         self.selected_mail = "m1"
+        self.mail_scope = "all"        # "all" | "unread" | a label name
+        self.mail_labels: list[str] = []
+        self.mail_suggestions: dict[str, str] = {}
 
         self.suggestions: list[dict] = []
         self.proposed_procedures: list[dict] = []
@@ -173,6 +178,8 @@ class AppState(QObject):
             self.recs = [_norm_rec(r) for r in S.RECS]
             self.mails = copy.deepcopy(S.MAILS)
             self.mail_total = len(self.mails)
+            self.mail_labels = sorted(
+                {n for m in self.mails for n in m.get("label_names", [])})
 
     # ---- confirm-over-IPC routing ----
     def attach_confirm_source(self, client) -> None:
@@ -387,6 +394,10 @@ class AppState(QObject):
         self.mail_connected = result.get("connected", self.mail_connected)
         self.mail_syncing = result.get("syncing", self.mail_syncing)
         self.mail_last_sync = result.get("last_sync", self.mail_last_sync)
+        self.mail_labels = result.get("labels", self.mail_labels)
+        if (self.mail_scope not in ("all", "unread")
+                and self.mail_scope not in self.mail_labels):
+            self.mail_scope = "all"   # scope label vanished upstream
         counts = result.get("counts")
         if counts:
             self.mail_total = counts.get("total", self.mail_total)
@@ -394,14 +405,34 @@ class AppState(QObject):
             self.selected_mail = self.mails[0]["id"] if self.mails else None
         self.mails_changed.emit()
 
+    def set_mail_scope(self, scope: str) -> None:
+        if scope == self.mail_scope:
+            return
+        self.mail_scope = scope
+        self.mail_suggestions.clear()
+        if self.live:
+            self.refresh_mails()
+        else:
+            self.mails_changed.emit()   # sample mode: chips reflect selection only
+
+    def _scope_payload(self) -> dict:
+        if self.mail_scope == "unread":
+            return {"filter": "unread"}
+        if self.mail_scope == "all":
+            return {"filter": "inbox"}
+        return {"filter": "label", "label": self.mail_scope}
+
     def refresh_mails(self) -> None:
         if self._data is not None:
-            self._data.request("emails.list", {}, self._set_mails)
+            self._data.request("emails.list", self._scope_payload(),
+                               self._set_mails)
 
     def refresh_inbox(self) -> None:
-        """Manual refresh: delta-sync against Gmail, then reload the page."""
+        """Manual refresh: delta-sync against Gmail, then reload the current
+        scope (a label view reloads as itself)."""
         if self._data is not None:
-            self._data.request("mail.refresh", {}, self._set_mails)
+            self._data.request("mail.refresh", self._scope_payload(),
+                               self._set_mails)
 
     def search_mails(self, query: str) -> None:
         query = query.strip()
@@ -425,6 +456,74 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("emails.mark_read", {"id": mid, "read": read},
                                self._mail_action_done)
+
+    def auto_read(self, mid: str) -> None:
+        """Dwell-timer read receipt: silent, ungated, flips the row locally
+        so the dot clears immediately (design 2026-07-15)."""
+        m = next((x for x in self.mails if x["id"] == mid), None)
+        if m is None or not m["unread"]:
+            return
+        m["unread"] = False
+        self.mails_changed.emit()
+        if self._data is not None:
+            self._data.request("emails.auto_read", {"id": mid}, lambda _r: None)
+
+    def suggest_labels(self, cb=None) -> None:
+        """One explicit press → classify unlabeled inbox mail; results stay
+        chips until tapped — nothing is written until accept."""
+        if self._data is None:
+            if cb:
+                cb({})
+            return
+
+        def handle(result):
+            self.mail_suggestions = dict((result or {}).get("suggestions", {}))
+            self.mails_changed.emit()
+            if cb:
+                cb(result)
+        self._data.request("mail.suggest_labels", {}, handle)
+
+    def apply_suggestion(self, mid: str) -> None:
+        name = self.mail_suggestions.pop(mid, None)
+        if name is None:
+            return
+        if self._data is not None:
+            self._data.request("emails.apply_label", {"id": mid, "label": name},
+                               self._mail_action_done)
+        else:
+            self.mails_changed.emit()
+
+    # ---- mail rules (2026-07-15) ----
+    def open_rule_editor(self, prefill: dict | None = None) -> None:
+        self.rule_edit_requested.emit(prefill or {})
+
+    def list_rules(self, cb) -> None:
+        if self._data is not None:
+            self._data.request("rules.list", {}, cb)
+        else:
+            cb({"rules": [], "labels": []})
+
+    def create_rule(self, rule: dict, cb=None) -> None:
+        """Daemon gates creation behind the confirm overlay (summary + the
+        apply-to-existing checkbox); Save pre-authorizes future auto-applies."""
+        if self._data is not None:
+            self._data.request("rules.create", {"rule": rule},
+                               cb or (lambda _r: None))
+
+    def update_rule(self, rid: int, rule: dict, cb=None) -> None:
+        if self._data is not None:
+            self._data.request("rules.update", {"id": rid, "rule": rule},
+                               cb or (lambda _r: None))
+
+    def delete_rule(self, rid: int, cb=None) -> None:
+        if self._data is not None:
+            self._data.request("rules.delete", {"id": rid},
+                               cb or (lambda _r: None))
+
+    def toggle_rule(self, rid: int, enabled: bool, cb=None) -> None:
+        if self._data is not None:
+            self._data.request("rules.toggle", {"id": rid, "enabled": enabled},
+                               cb or (lambda _r: None))
 
     # ---- books ----
     def _set_books(self, rows: list[dict]) -> None:

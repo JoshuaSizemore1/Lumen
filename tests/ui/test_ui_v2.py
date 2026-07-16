@@ -284,6 +284,99 @@ def test_launcher_palette_shows_error(qtbot):
     assert "offline" in pal.resp_text.text()
 
 
+# ---- mail labels, scopes, suggestions (2026-07-15) ------------------------
+
+def test_label_color_stable_and_from_palette():
+    from lumen.ui_v2 import theme as T
+    assert T.label_color("Bills") == T.label_color("bills")   # casefold-stable
+    assert T.label_color("Bills") in T.LABEL_PALETTE
+
+
+def test_norm_mail_carries_label_names():
+    m = _norm_mail({"id": "x", "sender": "A <a@x.com>", "received_at": "",
+                    "label_names": ["Bills"]})
+    assert m["label_names"] == ["Bills"]
+    assert _norm_mail({"id": "y", "sender": "B", "received_at": ""})["label_names"] == []
+
+
+def test_sample_mode_scope_and_labels(qtbot):
+    st = AppState()
+    assert st.mail_scope == "all"
+    assert st.mail_labels        # derived from sample rows' label_names
+    seen = []
+    st.mails_changed.connect(lambda: seen.append(1))
+    st.set_mail_scope(st.mail_labels[0])
+    assert st.mail_scope == st.mail_labels[0] and seen
+
+
+def test_live_scope_queries_by_label(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    data.requests.clear()
+    st.set_mail_scope("Bills")
+    assert data.requests[0][0] == "emails.list"
+    assert data.requests[0][1] == {"filter": "label", "label": "Bills"}
+    st.mail_labels = ["Bills"]
+    data.requests.clear()
+    st.refresh_inbox()
+    assert data.requests[0][0] == "mail.refresh"
+    assert data.requests[0][1] == {"filter": "label", "label": "Bills"}
+
+
+def test_scope_resets_when_label_vanishes(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mail_scope = "Bills"
+    st._set_mails({"emails": [], "labels": []})
+    assert st.mail_scope == "all"
+
+
+def test_auto_read_flips_locally_and_hits_daemon(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mails = [_norm_mail({"id": "m1", "sender": "A <a@x.com>",
+                            "received_at": "", "is_read": False})]
+    data.requests.clear()
+    st.auto_read("m1")
+    assert st.mails[0]["unread"] is False
+    assert data.requests[0][0] == "emails.auto_read"
+    st.auto_read("m1")                       # already read: no second request
+    assert len(data.requests) == 1
+
+
+def test_suggestions_flow(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    data.requests.clear()
+    st.suggest_labels()
+    data.cb_for("mail.suggest_labels")({"suggestions": {"m1": "Bills"}})
+    assert st.mail_suggestions == {"m1": "Bills"}
+    st.apply_suggestion("m1")
+    assert st.mail_suggestions == {}
+    assert ("emails.apply_label", {"id": "m1", "label": "Bills"}) in [
+        (t, p) for t, p, _cb in data.requests]
+
+
+def test_rule_state_methods(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    data.requests.clear()
+    seen = []
+    st.rule_edit_requested.connect(lambda p: seen.append(p))
+    st.open_rule_editor({"from_addrs": ["a@x.com"]})
+    assert seen == [{"from_addrs": ["a@x.com"]}]
+    rule = {"label": "Bills", "from_addrs": [], "domains": ["x.com"],
+            "subject_kw": [], "body_kw": []}
+    st.create_rule(rule)
+    st.update_rule(3, rule)
+    st.delete_rule(3)
+    st.toggle_rule(3, False)
+    st.list_rules(lambda _r: None)
+    types = [t for t, _p, _cb in data.requests]
+    assert types == ["rules.create", "rules.update", "rules.delete",
+                     "rules.toggle", "rules.list"]
+
+
 # ---- confirm overlay + window handler ------------------------------------
 
 def test_confirm_overlay_fires_once_with_payload(qtbot):

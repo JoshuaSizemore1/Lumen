@@ -3,6 +3,7 @@
 All values are literal hex + px from the mockup CSS. Accent is themeable:
 everything accent-tinted derives from ACCENT at import time.
 """
+import zlib
 
 # ---- Surfaces ----------------------------------------------------------
 BG_APP = "#0d0e14"        # backdrop behind the window (mock page bg)
@@ -88,6 +89,16 @@ TAG_COLORS = {
     "tinker": "#7dcfff",
     "new": "#ff9e64",
 }
+
+# Mail label pills: stable color per label name (crc32 — Python's hash() is
+# salted per process and would reshuffle colors every launch).
+LABEL_PALETTE = ("#7aa2f7", "#bb9af7", "#9ece6a", "#e0af68",
+                 "#7dcfff", "#f7768e", "#ff9e64", "#73daca")
+
+
+def label_color(name: str) -> str:
+    return LABEL_PALETTE[zlib.crc32(name.casefold().encode()) % len(LABEL_PALETTE)]
+
 
 # Calendar category colors
 CAL_COLORS = {

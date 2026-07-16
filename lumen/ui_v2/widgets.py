@@ -1,9 +1,9 @@
 """Shared building blocks: text helpers, chips, dots, switches, rows."""
-from PyQt6.QtCore import Qt, QSize, QRectF
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QRectF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen
 from PyQt6.QtWidgets import (
-    QAbstractButton, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractButton, QFrame, QHBoxLayout, QLabel, QLayout, QPushButton,
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from . import theme as T
@@ -224,6 +224,77 @@ class Chip(QLabel):
 
 def tag_chip(tag: str) -> Chip:
     return Chip(tag, T.TAG_COLORS.get(tag, T.TEXT_DIM), T.BORDER_STRONG)
+
+
+class ClickChip(Chip):
+    """Chip that emits a callback on click (mail filter chips, suggestions)."""
+
+    def __init__(self, text: str, fg: str, border: str, bg: str | None = None,
+                 px: int = 10, on_click=None, tooltip: str = ""):
+        super().__init__(text, fg, border, bg, px=px, radius=8, hpad=8, vpad=3)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            self.setToolTip(tooltip)
+        self._on_click = on_click
+
+    def mousePressEvent(self, ev):
+        if self._on_click and ev.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+
+
+class FlowLayout(QLayout):
+    """Left-aligned wrapping layout (label chip rows in a fixed-width column)."""
+
+    def __init__(self, parent=None, hgap: int = 6, vgap: int = 6):
+        super().__init__(parent)
+        self._items, self._h, self._v = [], hgap, vgap
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._arrange(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        return s
+
+    def _arrange(self, rect, test_only: bool) -> int:
+        x, y, line_h = rect.x(), rect.y(), 0
+        for it in self._items:
+            w, h = it.sizeHint().width(), it.sizeHint().height()
+            if x + w > rect.right() + 1 and line_h > 0:
+                x, y, line_h = rect.x(), y + line_h + self._v, 0
+            if not test_only:
+                it.setGeometry(QRect(QPoint(x, y), it.sizeHint()))
+            x += w + self._h
+            line_h = max(line_h, h)
+        return y + line_h - rect.y()
 
 
 class Switch(QAbstractButton):
