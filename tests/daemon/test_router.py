@@ -1912,6 +1912,100 @@ async def test_emails_unavailable_without_mail():
     assert out[-1] == {"error": "email unavailable"}
 
 
+# ---- rules.* one-shots (2026-07-15) ----
+
+from lumen.daemon.connectors.mail_rules import RuleStore
+
+
+def rules_router(tmp_path, store=None, sync=None, broker=None):
+    rules = RuleStore(db.connect(tmp_path / "rules.db"))
+    store = store or FakeMailStore()
+    sync = sync or FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store,
+                    confirm=broker or ConfirmBroker(), rules=rules)
+    return router, rules, store, sync
+
+
+async def test_rules_list_carries_labels_vocab(tmp_path):
+    router, rules, _store, _sync = rules_router(tmp_path)
+    out = await collect(router, "rules.list", {})
+    assert out[-1]["result"] == {"rules": [], "labels": ["Bills"]}
+
+
+async def test_rules_create_confirms_saves_and_backfills(tmp_path):
+    broker = ConfirmBroker()
+    router, rules, store, sync = rules_router(tmp_path, broker=broker)
+    payload = {"rule": {"label": "Bills", "from_addrs": [],
+                        "domains": ["x.com"], "subject_kw": [], "body_kw": []}}
+
+    events = []
+    async for ev in router.handle("rules.create", payload):
+        events.append(ev)
+        if "confirm_request" in ev:
+            req = ev["confirm_request"]
+            assert req["title"] == "Create mail rule"
+            assert ("Label", "Bills") in [tuple(r) for r in req["rows"]]
+            assert "1 matching" in req["check"]["label"]   # m1 is from a@x.com
+            broker.resolve(ev["confirm_id"], {"approved": True, "check": True})
+    assert events[-1]["result"]["ok"] is True
+    assert len(events[-1]["result"]["rules"]) == 1
+    assert sync.labeled == [("m1", "Bills")]               # backfill applied
+
+    # decline: nothing saved, nothing applied
+    sync.labeled.clear()
+    events = []
+    async for ev in router.handle("rules.create", payload):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], False)
+    assert events[-1]["result"]["ok"] is False
+    assert len(rules.list_all()) == 1 and sync.labeled == []
+
+
+async def test_rules_create_approve_without_check_skips_backfill(tmp_path):
+    broker = ConfirmBroker()
+    router, rules, _store, sync = rules_router(tmp_path, broker=broker)
+    events = []
+    async for ev in router.handle(
+            "rules.create",
+            {"rule": {"label": "Bills", "domains": ["x.com"],
+                      "from_addrs": [], "subject_kw": [], "body_kw": []}}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], {"approved": True, "check": False})
+    assert events[-1]["result"]["ok"] is True and sync.labeled == []
+
+
+async def test_rules_create_rejects_unusable_rule(tmp_path):
+    router, *_ = rules_router(tmp_path)
+    out = await collect(router, "rules.create", {"rule": {"label": "X"}})
+    assert "error" in out[-1]
+
+
+async def test_rules_update_toggle_delete(tmp_path):
+    router, rules, _store, _sync = rules_router(tmp_path)
+    r = rules.add({"label": "Bills", "from_addrs": [], "domains": ["x.com"],
+                   "subject_kw": [], "body_kw": []})
+    out = await collect(router, "rules.update",
+                        {"id": r["id"], "rule": {"label": "Utilities",
+                                                 "domains": ["duke.com"]}})
+    assert out[-1]["result"]["rules"][0]["label"] == "Utilities"
+    out = await collect(router, "rules.toggle", {"id": r["id"], "enabled": False})
+    assert out[-1]["result"]["rules"][0]["enabled"] is False
+    out = await collect(router, "rules.delete", {"id": r["id"]})
+    assert out[-1]["result"]["rules"] == []
+    out = await collect(router, "rules.update", {"id": 999,
+                                                 "rule": {"label": "L",
+                                                          "domains": ["d.com"]}})
+    assert "error" in out[-1]
+
+
+async def test_rules_unavailable_without_store():
+    router = Router(FakeLLM(), FakeStore())
+    out = await collect(router, "rules.list", {})
+    assert "error" in out[-1]
+
+
 # ---- Task 10: chat grounding — MAIL_HINT + mail_context ----
 
 from lumen.daemon.router import MAIL_HINT, mail_context

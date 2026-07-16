@@ -11,6 +11,7 @@ from lumen.daemon.confirm import ConfirmBroker
 from lumen.daemon.connectors.books import BookStore
 from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
+from lumen.daemon.connectors.mail_rules import RuleStore
 from lumen.daemon.connectors.gcal import CalendarSync, EventStore
 from lumen.daemon.connectors.manabi import ManabiStatus
 from lumen.daemon.connectors.memory_log import MemoryLog
@@ -40,7 +41,8 @@ async def run() -> None:
     events = EventStore(conn)
     calendar = CalendarSync(events, cfg.google, cfg.sync)
     emails = EmailStore(conn)
-    mail = GmailSync(emails, cfg.google, cfg.sync)
+    rules = RuleStore(conn)
+    mail = GmailSync(emails, cfg.google, cfg.sync, rules=rules)
     memory_log = MemoryLog(conn)
     procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
     memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,
@@ -65,7 +67,7 @@ async def run() -> None:
                     memory_cap=cfg.memory.blob_cap_chars,
                     procedures=procedures,
                     distill_trigger=memory_worker.schedule,
-                    config=cfg,
+                    config=cfg, rules=rules,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

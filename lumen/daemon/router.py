@@ -12,7 +12,7 @@ from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from lumen.daemon.connectors import free_slots
+from lumen.daemon.connectors import free_slots, mail_rules
 from lumen.daemon.connectors.capture import classify
 from lumen.daemon.llm import commitments, meeting_prep, notes_qa, triage
 from lumen.daemon.llm.book_recs import recommend
@@ -25,6 +25,7 @@ from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
 from lumen.daemon.llm import memory as memory_mod
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 from lumen.daemon.llm.model_router import FS_WRITE_HINT
+from lumen.daemon.llm.rule_author import validate_rule
 
 log = logging.getLogger(__name__)
 
@@ -166,6 +167,9 @@ CORRECTION_HINT = re.compile(
     re.IGNORECASE)
 
 CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
+
+# How much of the inbox a new rule scans for the "apply to existing" offer.
+RULE_SCAN_LIMIT = 500
 
 # In-context conversation history is a fixed size, not unbounded: only the most
 # recent N turns ride in the prompt (older turns stay on disk). A turn count is
@@ -335,7 +339,7 @@ class Router:
                  suggestions=None, scheduling=None, notes=None, manabi=None,
                  memory=None, memory_path=None, memory_cap=4000,
                  procedures=None, distill_trigger=None,
-                 config=None,
+                 config=None, rules=None,
                  max_iterations=4):
         self._llm = llm
         self._todos = todos
@@ -359,6 +363,7 @@ class Router:
         self._procedures = procedures        # ProcedureStore
         self._distill_trigger = distill_trigger  # callable() scheduling a run
         self._config = config    # loaded Config for the read-only settings.get
+        self._rules = rules      # RuleStore — deterministic inbox rules
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -791,6 +796,58 @@ class Router:
                     yield {"error": str(e)}
                     return
                 yield {"error": err} if revised is None else {"result": revised}
+            else:
+                yield {"error": f"unknown request type: {type_}"}
+        elif type_.startswith("rules."):
+            if (self._rules is None or self._mail is None
+                    or self._mail_store is None or self._confirm is None):
+                yield {"error": "mail rules unavailable"}
+                return
+            if type_ == "rules.list":
+                yield {"result": {"rules": self._rules.list_all(),
+                                  "labels": [l["name"] for l in
+                                             self._mail_store.user_labels()]}}
+            elif type_ == "rules.create":
+                rule = validate_rule(payload.get("rule") or {})
+                if rule is None:
+                    yield {"error": "a rule needs a label and at least one condition"}
+                    return
+                out = {}
+                async for ev in self._gated_rule_save(rule):
+                    if "_saved" in ev:
+                        out = ev
+                    else:
+                        yield ev
+                msg = (f"Rule saved — {out.get('_applied', 0)} existing "
+                       "email(s) labeled." if out.get("_saved")
+                       else "Cancelled — nothing was saved.")
+                yield {"result": {"ok": bool(out.get("_saved")), "message": msg,
+                                  "rules": self._rules.list_all()}}
+            elif type_ == "rules.update":
+                rule = validate_rule(payload.get("rule") or {})
+                try:
+                    rid = int(payload["id"])
+                except (KeyError, TypeError, ValueError):
+                    rid, rule = 0, None
+                if rule is None or self._rules.update(rid, rule) is None:
+                    yield {"error": "rules.update needs {id, rule}"}
+                    return
+                yield {"result": {"ok": True, "rules": self._rules.list_all()}}
+            elif type_ == "rules.toggle":
+                try:
+                    self._rules.set_enabled(int(payload["id"]),
+                                            bool(payload["enabled"]))
+                except (KeyError, TypeError, ValueError):
+                    yield {"error": "rules.toggle needs {id, enabled}"}
+                    return
+                yield {"result": {"ok": True, "rules": self._rules.list_all()}}
+            elif type_ == "rules.delete":
+                try:
+                    self._rules.delete(int(payload["id"]))
+                except (KeyError, TypeError, ValueError):
+                    yield {"error": "rules.delete needs {id}"}
+                    return
+                yield {"result": {"ok": True, "rules": self._rules.list_all()}}
             else:
                 yield {"error": f"unknown request type: {type_}"}
         elif type_ == "memory.procedures":
@@ -1416,6 +1473,44 @@ class Router:
                                    reply_to=fields.get("reply_to") or None)
         return ((True, "Sent.") if ok
                 else (False, "Couldn't reach Gmail — nothing was sent."))
+
+    async def _gated_rule_save(self, rule: dict):
+        """Confirm-over-IPC for a new rule: the summary rows are the plain-
+        language rendering, the checkbox offers the backfill, and the user's
+        Save is the pre-authorization for every future auto-apply. Yields UI
+        events, then a final {"_saved", "_applied", "_matched"}."""
+        inbox = self._mail_store.list_page("inbox", limit=RULE_SCAN_LIMIT)
+        matches = [m["id"] for m in inbox if mail_rules.rule_matches(rule, m)]
+        rows = [("Label", rule["label"])]
+        for key, name in (("from_addrs", "From"), ("domains", "Domains"),
+                          ("subject_kw", "Subject"), ("body_kw", "Body")):
+            if rule[key]:
+                rows.append((name, ", ".join(rule[key])))
+        rows.append(("Existing", f"{len(matches)} matching in your inbox"))
+        confirm_id = self._confirm.begin()
+        req = {"icon": "⚑", "title": "Create mail rule",
+               "intro": "New mail matching this rule is labeled and moved out "
+                        "of your inbox automatically — in Gmail too. Saving "
+                        "pre-approves those moves.",
+               "rows": rows, "confirm_label": "Save rule"}
+        if matches:
+            req["check"] = {"label": f"Also label the {len(matches)} matching "
+                                     "email(s) already in your inbox",
+                            "checked": True}
+        yield {"confirm_request": req, "confirm_id": confirm_id}
+        answer = await self._confirm.wait(confirm_id)
+        if not answer:
+            yield {"_saved": False, "_applied": 0, "_matched": len(matches)}
+            return
+        self._rules.add(rule)
+        self._log("email", "query", {"action": "create_rule",
+                                     "label": rule["label"]})
+        applied = 0
+        if isinstance(answer, dict) and answer.get("check"):
+            for mid in matches:
+                if await self._mail.apply_label(mid, rule["label"]):
+                    applied += 1
+        yield {"_saved": True, "_applied": applied, "_matched": len(matches)}
 
     def _with_label_names(self, rows: list[dict]) -> list[dict]:
         """Rows carry Gmail label IDs; the UI shows user-label NAMES."""
