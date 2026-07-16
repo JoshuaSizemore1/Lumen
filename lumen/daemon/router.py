@@ -14,7 +14,8 @@ from pathlib import Path
 
 from lumen.daemon.connectors import free_slots, mail_rules
 from lumen.daemon.connectors.capture import classify
-from lumen.daemon.llm import commitments, meeting_prep, notes_qa, triage
+from lumen.daemon.llm import (commitments, label_suggest, meeting_prep,
+                              notes_qa, triage)
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -178,6 +179,12 @@ CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 
 # How much of the inbox a new rule scans for the "apply to existing" offer.
 RULE_SCAN_LIMIT = 500
+
+# Suggest-labels bounds: 15 sequential warm-model verdicts ≈ tens of seconds
+# worst case on the serial data channel — the UI disables the button while
+# waiting; a bigger cap would stall other one-shots behind it.
+SUGGEST_SCAN_LIMIT = 200
+SUGGEST_LIMIT = 15
 
 # In-context conversation history is a fixed size, not unbounded: only the most
 # recent N turns ride in the prompt (older turns stay on disk). A turn count is
@@ -715,7 +722,8 @@ class Router:
                 self._log("email", "correction",
                           {"action": "dismiss_suggestion", "id": payload.get("id")})
                 yield {"result": {"suggestions": self._suggestions.pending()}}
-        elif type_.startswith("emails.") or type_ == "mail.refresh":
+        elif (type_.startswith("emails.")
+              or type_ in ("mail.refresh", "mail.suggest_labels")):
             if self._mail is None or self._mail_store is None:
                 yield {"error": "email unavailable"}
                 return
@@ -780,6 +788,30 @@ class Router:
                 if row is not None and not row["is_read"]:
                     await self._mail.mark_read(row["id"], True)
                 yield {"result": {"ok": True}}
+            elif type_ == "mail.suggest_labels":
+                # Explicit press only: per-message verdicts (triage lesson —
+                # the 4B loses a 20-message batch), one load/unload cycle.
+                user = self._mail_store.user_labels()
+                if not user:
+                    yield {"error": "no Gmail labels yet — create a rule or "
+                                    "a label first"}
+                    return
+                names = [l["name"] for l in user]
+                ids = {l["id"] for l in user}
+                rows = [r for r in self._mail_store.list_page(
+                            "inbox", limit=SUGGEST_SCAN_LIMIT)
+                        if not ids.intersection(r["labels"])][:SUGGEST_LIMIT]
+                suggestions = {}
+                try:
+                    for r in rows:
+                        name = await label_suggest.suggest(self._llm, r, names)
+                        if name:
+                            suggestions[r["id"]] = name
+                except LLMUnavailable as e:
+                    yield {"error": str(e)}
+                    return
+                yield {"result": {"suggestions": suggestions,
+                                  "scanned": len(rows)}}
             elif type_ == "emails.apply_label":
                 # One-tap accept (suggestions): the tap IS the confirmation.
                 mid = str(payload.get("id", ""))

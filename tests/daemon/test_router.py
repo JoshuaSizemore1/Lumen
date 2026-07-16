@@ -73,6 +73,8 @@ class FakeMailStore:
     def list_page(self, filter="inbox", limit=50, offset=0, label_id=None):
         if filter == "label":
             return [r for r in self.rows if label_id in r["labels"]]
+        if filter == "inbox":
+            return [r for r in self.rows if "INBOX" in r["labels"]]
         return self.rows
 
     def user_labels(self):
@@ -2004,6 +2006,26 @@ async def test_rules_update_toggle_delete(tmp_path):
 async def test_rules_unavailable_without_store():
     router = Router(FakeLLM(), FakeStore())
     out = await collect(router, "rules.list", {})
+    assert "error" in out[-1]
+
+
+async def test_mail_suggest_labels_classifies_unlabeled_inbox_only():
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.rows.append({**store.rows[0], "id": "m2",
+                       "labels": ["INBOX", "Label_7"]})   # already labeled: skip
+    store.rows.append({**store.rows[0], "id": "m3", "labels": ["SENT"]})
+    router = Router(FakeLLM(chunks=('{"label": "Bills"}',)), FakeStore(),
+                    mail=sync, mail_store=store)
+    out = await collect(router, "mail.suggest_labels", {})
+    res = out[-1]["result"]
+    assert res["suggestions"] == {"m1": "Bills"} and res["scanned"] == 1
+
+
+async def test_mail_suggest_labels_needs_labels():
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.labels = []
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "mail.suggest_labels", {})
     assert "error" in out[-1]
 
 
