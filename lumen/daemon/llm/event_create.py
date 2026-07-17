@@ -7,6 +7,8 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
+from lumen.daemon.connectors.todo_parse import resolve_relative_phrase
+
 MAX_DURATION_H = 12
 DEFAULT_DURATION_MIN = 30
 PAST_GRACE = timedelta(minutes=5)
@@ -121,6 +123,30 @@ def validate_proposal(p: dict, *, now: datetime, user_message: str,
             "attendees": attendees, "recurrence": recurrence}, None
 
 
+def apply_resolved_date(raw: dict, target: date) -> dict:
+    """Move the model's proposal onto `target`'s date, keeping its times and
+    duration — code, not the small model, owns relative-date arithmetic
+    (todo-fixes #8). Unparseable values pass through for the gate to reject."""
+    try:
+        delta = target - date.fromisoformat(str(raw.get("start") or "")[:10])
+    except ValueError:
+        return raw
+    if not delta:
+        return raw
+    out = dict(raw)
+    for key in ("start", "end"):
+        v = str(raw.get(key) or "")
+        try:
+            if len(v) == 10:
+                out[key] = (date.fromisoformat(v) + delta).isoformat()
+            elif v:
+                out[key] = (datetime.fromisoformat(v) + delta).isoformat(
+                    timespec="minutes")
+        except ValueError:
+            pass
+    return out
+
+
 def _when(p: dict) -> str:
     if p["all_day"]:
         s, e = date.fromisoformat(p["start"]), date.fromisoformat(p["end"])
@@ -168,6 +194,14 @@ async def propose_event(llm, message: str, *, now: datetime, model=None,
     system = (f"{SYSTEM_PROMPT}\nNow: {now.strftime('%Y-%m-%d %H:%M')} "
               f"({now.strftime('%A')}), timezone "
               f"UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}.")
+    # A booking follow-up's `context` carries exact slot dates — never
+    # second-guess those; otherwise resolve the relative date in code and
+    # hand the model the concrete answer (todo-fixes #8).
+    resolved = None if context else resolve_relative_phrase(message, now.date())
+    if resolved is not None:
+        system += (f'\nIn this request, "{resolved[1]}" means '
+                   f"{resolved[0].isoformat()} "
+                   f"({resolved[0].strftime('%A')}) — use exactly this date.")
     if context:
         system += ("\nYou just proposed these times to the user; they are "
                    f"choosing one of them:\n{context}\n"
@@ -181,5 +215,7 @@ async def propose_event(llm, message: str, *, now: datetime, model=None,
     if raw is None:
         return None, ("I couldn't turn that into an event — try including a "
                       "day and a time, like 'call with Sam Friday 2pm'.")
+    if resolved is not None:
+        raw = apply_resolved_date(raw, resolved[0])
     return validate_proposal(raw, now=now, user_message=message,
                              context=context or "")

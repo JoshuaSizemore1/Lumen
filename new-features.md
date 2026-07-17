@@ -1,8 +1,9 @@
-# Lumen — Inbox feature ideas
+# Lumen — new feature ideas
 
-Living backlog + design of record for the Mail screen. First section is the
-committed design for the current batch; the parking lot at the bottom holds
-ideas we've named but are **not** building yet.
+Living backlog + design of record. First section is the committed design for
+the mail batch; after it comes the general feature backlog (pulled from the
+in-app todo list); the parking lot at the bottom holds ideas we've named but
+are **not** building yet.
 
 ---
 
@@ -168,6 +169,76 @@ triage lesson). Still one button press → one model load → unload.
 - Deleting mail; managing Gmail's own label hierarchy/nesting.
 - Two-way "keep in inbox but also label" (Lumen's model is label = move).
 - Push notifications / real-time sync (polling stays).
+
+---
+
+## Feature backlog — pulled from Lumen's in-app todos (2026-07-16)
+
+Each entry cites its source todo id (the originals are still in the app's
+todo list). Bug-sized items went to `todo-fixes` instead. Items 6–7 push
+Lumen toward a local file workbench — worth a deliberate scope check against
+`project-scope.md` before committing to them.
+
+### 1. Chat-first main window; launcher goes hotkey-only (todo #3)
+When the full app is open, the Launcher tab duplicates what the chat screen
+does. Remove Launcher as a tab — the quick launcher stays, but purely as the
+global-hotkey palette. Chat becomes the first tab, styled like Claude's site:
+a prominent **New chat** button, a list of past chats to reopen, and a clean
+empty-state prompt box for a fresh chat.
+**Depends on:** the chat-session fixes (`todo-fixes` entries 5–6) — new-chat
+UX is meaningless until sessions actually isolate context.
+
+### 2. File writing — Lumen can create and edit .md / text files (todo #4)
+New capability: "write me a markdown file summarizing X" produces a real
+file. Treat file writes like email sends — a write action behind explicit
+confirmation (path + content preview) via the existing write-gate. Default
+writes go to a configurable notes directory (e.g. `~/Documents/Lumen`);
+anything outside it needs a stronger confirmation. New router intent + prompt
+asset in `daemon/llm/`. Also resolves the markdown→calendar misroute
+(`todo-fixes` entry 3).
+
+### 3. Web lookup (todo #5)
+Lumen can search online when local knowledge isn't enough. Via a search MCP
+server (stack convention — no hand-rolled scraper). Triggers: the user
+explicitly says "look up / search online", or the router decides the question
+needs fresh facts. Answers summarize results **with source links** so the
+user can tell looked-up from remembered. Power budget: one search + one
+summarize turn, then unload.
+
+### 4. Suggest-labels v2 — clearer UI + smarter picks (todo #12)
+Two halves:
+- **UI:** the current suggestion chips are unclear. Move to an explicit
+  review pass: each suggested message shows its proposed label with
+  accept / reject, plus "accept all for this label". Nothing writes until
+  accepted (unchanged).
+- **Accuracy:** observed misses — a Troop 148 email labeled TODO instead of
+  BSA, and a Lumen test email labeled BSA. Give the model a one-line
+  description per label (derived from mail already under that label), rank
+  specific user labels above generic buckets like TODO when both fit, and
+  add a confidence floor — below it, suggest nothing rather than guess.
+
+### 5. Auto-refresh mail on open + while open (todo #13)
+Three triggers: app launch → immediate `mail.refresh`; opening the Mail tab
+→ refresh; every 5 minutes while the app is open. The daemon's 5-minute
+background poll should already cover the last one — verify rather than
+rebuild; the new work is the two open-triggered refreshes, a visible
+"synced <time>" status, and a debounce (min ~60s between syncs) so
+tab-flipping doesn't hammer Gmail.
+
+### 6. File browser screen with context-aware prompting (todo #16)
+A new screen for browsing local directories, with a prompt box on the same
+screen. Asking a question there auto-loads the current directory as context
+(file names/types/sizes; contents of small text files on request) so Lumen
+answers with real knowledge of what's in front of you. Read-only in v1 —
+browsing and asking, no file operations. Stepping stone to item 7.
+
+### 7. Built-in text/code editor with Lumen assist (todo #17)
+Open text, markdown, and code files (py, cpp, html, …) in an editor tab for
+manual editing, with a prompt panel that auto-includes the open file + its
+directory as context — summarize this file, make this change, write a
+section. LLM-proposed edits appear as a preview/diff and apply only on
+accept (write-gate, same as item 2). Largest item in this backlog — stage it:
+browse (item 6) → ask-about-file → manual editing → assisted edits.
 
 ---
 

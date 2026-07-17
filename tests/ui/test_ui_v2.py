@@ -648,7 +648,7 @@ def test_chat_screen_loads_past_conversation(qtbot):
     getcb({"conversation": {"id": 3}, "messages": [
         {"role": "user", "content": "what's on tuesday"},
         {"role": "assistant", "content": "two meetings"}]})
-    assert sc._conv_id == 3
+    assert sc.state.active_conv_id == 3
     texts = _label_texts(sc.thread)
     assert "what's on tuesday" in texts and "two meetings" in texts
 
@@ -696,11 +696,11 @@ def test_chat_screen_new_chat_resets(qtbot):
     from lumen.ui_v2.screens.chat import ChatScreen
     sc = ChatScreen(AppState(data=FakeClient()), chat_client=FakeClient())
     qtbot.addWidget(sc)
-    sc._conv_id = 9
+    sc.state.active_conv_id = 9
     sc.input.setText("hi")
     sc._submit()
     sc.new_chat()
-    assert sc._conv_id is None and sc.resp_text is None
+    assert sc.state.active_conv_id is None and sc.resp_text is None
 
 
 def test_chat_sidebar_rows_have_delete_affordance(qtbot):
@@ -744,7 +744,7 @@ def test_chat_delete_open_thread_resets_and_reloads(qtbot):
     t, p, cb = data.requests[0]
     assert (t, p) == ("conversations.delete", {"id": 3})
     cb({"ok": True})
-    assert sc._conv_id is None     # the open thread is gone -> blank pane
+    assert sc.state.active_conv_id is None   # the open thread is gone -> blank pane
     assert any(t == "conversations.list" for t, _p, _cb in data.requests)
 
 
@@ -753,10 +753,10 @@ def test_chat_delete_other_thread_keeps_current(qtbot):
     data = FakeClient()
     sc = ChatScreen(AppState(data=data), chat_client=FakeClient())
     qtbot.addWidget(sc)
-    sc._conv_id = 9
+    sc.state.active_conv_id = 9
     sc.delete_conversation(3)
     data.cb_for("conversations.delete")({"ok": True})
-    assert sc._conv_id == 9
+    assert sc.state.active_conv_id == 9
 
 
 def test_window_registers_chat_and_open_chat_loads(qtbot):
@@ -767,7 +767,7 @@ def test_window_registers_chat_and_open_chat_loads(qtbot):
     assert "chat" in TABS and "chat" in win.screens
     win._open_chat(11)
     assert win.stack.currentWidget() is win.screens["chat"]
-    assert win.screens["chat"]._conv_id == 11
+    assert win.state.active_conv_id == 11
 
 
 # ---- mail (live) -----------------------------------------------------------
@@ -927,7 +927,7 @@ def test_mail_chip_row_and_pills_sample_mode(qtbot):
     qtbot.addWidget(screen)
     chips = [screen.chips_lay.itemAt(i).widget().text()
              for i in range(screen.chips_lay.count())]
-    assert chips == ["Inbox", "Unread", "Health", "Newsletters"]
+    assert chips == ["Inbox", "Unread", "Sent", "Health", "Newsletters"]
     assert "Health" in [c.text() for c in screen.findChildren(Chip)]  # row pill
 
 
@@ -939,7 +939,7 @@ def test_mail_chip_click_sets_scope(qtbot, monkeypatch):
     monkeypatch.setattr(state, "set_mail_scope", scopes.append)
     screen = MailScreen(state)
     qtbot.addWidget(screen)
-    qtbot.mouseClick(screen.chips_lay.itemAt(2).widget(), Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(screen.chips_lay.itemAt(3).widget(), Qt.MouseButton.LeftButton)
     assert scopes == ["Health"]
 
 
@@ -1292,3 +1292,121 @@ def test_window_close_quits_only_in_unified_mode(qtbot, monkeypatch):
     win.show()
     win.close()
     assert quits == [True]        # close exits the app -> launcher stops daemon
+
+
+# ---- one active chat across surfaces (todo-fixes #5/#6) --------------------
+
+def test_active_chat_is_shared_between_launcher_and_chat_screen(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    data, chat, overlay_chat = FakeClient(), FakeClient(), FakeClient()
+    st = AppState(data=data)
+    pal = LauncherPalette(st, overlay_chat)
+    sc = ChatScreen(st, chat_client=chat)
+    qtbot.addWidget(pal)
+    qtbot.addWidget(sc)
+    pal.input.setText("first from launcher")
+    pal._submit()
+    overlay_chat.conversation.emit(7)
+    overlay_chat.chunk.emit("hi")
+    overlay_chat.done.emit()
+    assert st.active_conv_id == 7
+    sc.input.setText("follow-up from chat tab")
+    sc._submit()
+    assert chat.sent[0] == ("chat", {"message": "follow-up from chat tab",
+                                     "conversation_id": 7})
+
+
+def test_new_chat_resets_active_id_for_every_surface(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    data, chat, overlay_chat = FakeClient(), FakeClient(), FakeClient()
+    st = AppState(data=data)
+    sc = ChatScreen(st, chat_client=chat)
+    pal = LauncherPalette(st, overlay_chat)
+    qtbot.addWidget(sc)
+    qtbot.addWidget(pal)
+    st.active_conv_id = 7
+    sc.new_chat()
+    assert st.active_conv_id is None
+    pal.input.setText("fresh question")
+    pal._submit()
+    # fresh thread: no conversation_id; first-turn capture is offered again
+    assert overlay_chat.sent[0] == ("chat", {"message": "fresh question",
+                                             "capture_ok": True})
+
+
+def test_launcher_resets_rendered_thread_when_active_changed(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    chat = FakeClient()
+    st = AppState()
+    pal = LauncherPalette(st, chat)
+    qtbot.addWidget(pal)
+    pal.input.setText("one")
+    pal._submit()
+    chat.conversation.emit(4)
+    chat.chunk.emit("a")
+    chat.done.emit()
+    st.active_conv_id = None          # "New chat" clicked elsewhere
+    pal.input.setText("two")
+    pal._submit()
+    assert chat.sent[1] == ("chat", {"message": "two", "capture_ok": True})
+
+
+def test_chat_screen_resyncs_to_active_thread_on_show(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = ChatScreen(st, chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    st.active_conv_id = 5             # launcher opened thread 5 meanwhile
+    data.requests.clear()
+    sc.show()
+    kinds = [(t, p) for t, p, _cb in data.requests]
+    assert ("conversations.get", {"id": 5}) in kinds
+
+
+# ---- Sent scope + prominent mail header actions (todo-fixes #9) ------------
+
+def test_mail_scope_sent_requests_sent_filter(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    data.requests.clear()
+    st.set_mail_scope("sent")
+    t, p, _cb = data.requests[0]
+    assert (t, p) == ("emails.list", {"filter": "sent"})
+
+
+def test_mail_screen_has_sent_chip_and_labeled_refresh(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import ClickChip
+    st = AppState()          # sample mode
+    sc = MailScreen(st)
+    qtbot.addWidget(sc)
+    chip_texts = [c.text() for c in sc.findChildren(ClickChip)]
+    assert any("Sent" in t for t in chip_texts)
+    assert "Refresh" in sc.refresh_btn.text()
+    assert "Compose" in sc.compose_btn.text()
+
+
+def test_mail_header_title_follows_scope(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    st = AppState()
+    sc = MailScreen(st)
+    qtbot.addWidget(sc)
+    assert sc.title_lab.text() == "Inbox"
+    st.set_mail_scope("sent")
+    assert sc.title_lab.text() == "Sent"
+
+
+def test_mail_screen_requeries_mirror_on_show(qtbot):
+    # todo-fixes #10d: entering the Mail tab re-reads the local mirror so
+    # labels created meanwhile (rule backfill, chat) appear without ↻.
+    from lumen.ui_v2.screens.mail import MailScreen
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = MailScreen(st)
+    qtbot.addWidget(sc)
+    data.requests.clear()
+    sc.show()
+    assert any(t == "emails.list" for t, _p, _cb in data.requests)

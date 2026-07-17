@@ -147,6 +147,12 @@ class AppState(QObject):
         self._confirm = confirm  # dedicated confirm.response channel
         self.live = data is not None
 
+        # THE active chat thread (todo-fixes #5/#6): every chat surface
+        # (launcher palette, hotkey overlay, Chat screen) appends to this one
+        # conversation. None = next prompt starts a fresh thread; only an
+        # explicit "New chat" (or first-ever prompt) resets it.
+        self.active_conv_id: int | None = None
+
         self.mail_connected = True
         self.mail_syncing = False
         self.mail_last_sync = None
@@ -362,6 +368,14 @@ class AppState(QObject):
             self._data.request("memory.remove_procedure", {"slug": slug},
                                self._set_procedures)
 
+    def fetch_learned(self, cb) -> None:
+        """cb({text, updated_at, path}) — the distilled memory file verbatim,
+        for the Settings 'what Lumen has learned' view."""
+        if self._data is not None:
+            self._data.request("memory.learned", {}, cb)
+        else:
+            cb({"text": "", "updated_at": None, "path": ""})
+
     def open_memory_file(self) -> None:
         """Open the hand-editable memory.md in the user's default editor."""
         from PyQt6.QtCore import QUrl
@@ -416,7 +430,7 @@ class AppState(QObject):
         self.mail_syncing = result.get("syncing", self.mail_syncing)
         self.mail_last_sync = result.get("last_sync", self.mail_last_sync)
         self.mail_labels = result.get("labels", self.mail_labels)
-        if (self.mail_scope not in ("inbox", "unread")
+        if (self.mail_scope not in ("inbox", "unread", "sent")
                 and self.mail_scope not in self.mail_labels):
             self.mail_scope = "inbox"   # scope label vanished upstream
         counts = result.get("counts")
@@ -439,7 +453,7 @@ class AppState(QObject):
             self.mails_changed.emit()   # sample mode: chips reflect selection only
 
     def _scope_payload(self) -> dict:
-        if self.mail_scope in ("inbox", "unread"):
+        if self.mail_scope in ("inbox", "unread", "sent"):
             return {"filter": self.mail_scope}
         return {"filter": "label", "label": self.mail_scope}
 

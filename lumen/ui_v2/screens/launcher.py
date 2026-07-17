@@ -36,7 +36,11 @@ class LauncherPalette(QFrame):
         self.chat = chat_client
         self._busy = False
         self._acc = ""
-        self._conv_id = None       # set once the daemon opens the thread
+        # The thread id is app-wide state (state.active_conv_id) so every chat
+        # surface continues the same conversation; this only tracks which
+        # thread the shell currently RENDERS, to reset stale turns when the
+        # active chat changed elsewhere (New chat / sidebar click).
+        self._rendered_conv = None
         self.resp_text = None      # current assistant bubble (None until first turn)
 
         self.setProperty("cls", "palette")
@@ -190,28 +194,33 @@ class LauncherPalette(QFrame):
         if self.chat is None or not msg or self._busy:
             return
         self._busy = True
-        if self.resp_text is None:      # first turn: build the thread shell
+        active = self.state.active_conv_id
+        if self.resp_text is None or self._rendered_conv != active:
+            # first turn, or the active chat changed elsewhere (New chat /
+            # sidebar click): rebuild the shell so threads never mix visually
             self._show_conversation()
+        self._rendered_conv = active
         self._add_user_turn(msg)
         self._begin_assistant_turn()
         self.input.clear()
         self._wake.start()
         payload = {"message": msg}
-        if self._conv_id is not None:   # continue the same thread on follow-ups
-            payload["conversation_id"] = self._conv_id
+        if active is not None:          # continue the one active thread
+            payload["conversation_id"] = active
         else:
-            # first turn only: note-shaped text may become a todo (quick
-            # capture); once a conversation is going, you're chatting
+            # fresh thread's first turn only: note-shaped text may become a
+            # todo (quick capture); once a conversation is going, you're chatting
             payload["capture_ok"] = True
         self.chat.send("chat", payload)
 
     def _open_in_chat(self):
-        if self._conv_id is not None:
-            self.state.open_chat_requested.emit(self._conv_id)
+        if self.state.active_conv_id is not None:
+            self.state.open_chat_requested.emit(self.state.active_conv_id)
 
     def _on_conversation(self, cid: int):
         if self._busy:                  # only claim the id for the turn we launched
-            self._conv_id = cid
+            self.state.active_conv_id = cid
+            self._rendered_conv = cid
 
     def _on_captured(self, todo: dict):
         """Quick capture landed: the turn's answer is a toast, not prose."""
@@ -254,7 +263,7 @@ class LauncherPalette(QFrame):
         if not self._acc:
             self.resp_text.setText("(no answer)")
         self.resp_foot.setText(f"answered on-device · {T.MODEL_NAME}")
-        if self._conv_id is not None:
+        if self.state.active_conv_id is not None:
             self.open_chat_link.show()
 
     def _on_error(self, msg: str):

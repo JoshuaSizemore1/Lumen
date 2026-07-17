@@ -24,7 +24,8 @@ def test_validate_draft_keeps_only_addresses_the_user_wrote():
 
 def test_validate_draft_missing_keys_yield_editable_empties():
     d = validate_draft({}, user_message="whatever")
-    assert d == {"to": [], "cc": [], "subject": "", "body": "", "reply_hint": None}
+    assert d == {"to": [], "cc": [], "subject": "", "body": "",
+                 "reply_hint": None, "to_hint": None}
 
 
 async def test_propose_email_parses_json_reply():

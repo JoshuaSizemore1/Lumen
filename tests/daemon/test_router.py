@@ -734,13 +734,22 @@ async def test_write_shaped_message_enters_tool_loop():
     assert out[-1] == {"done": True}
 
 
-async def test_event_hint_still_precedes_write_hint():
-    # "create a meeting …" must go to event creation, not the fs tool loop
+async def test_file_shaped_event_message_prefers_fs_loop():
+    # todo-fixes #3 (flips the pre-2026-07-16 precedence): "create a meeting
+    # note FILE" is a file request that merely mentions a meeting — it must
+    # reach the fs tool loop (write_file behind the write gate), never open
+    # a calendar-event confirm dialog.
+    from lumen.daemon.confirm import ConfirmBroker
     from lumen.daemon.router import EVENT_HINT
     from lumen.daemon.llm.model_router import FS_WRITE_HINT
     msg = "create a meeting note file for Friday's call"
     assert EVENT_HINT.search(msg) and FS_WRITE_HINT.search(msg)
-    # Router order: EVENT_HINT is checked first (needs confirm+bridge+calendar)
+    bridge = FakeBridge()
+    router = Router(ToolLLM(), FakeStore(), bridge=bridge, calendar=FakeCal(),
+                    confirm=ConfirmBroker(), model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": msg})
+    assert bridge.started is True
+    assert not any("confirm_request" in e for e in out)
 
 
 class GateLLM:
@@ -2657,3 +2666,258 @@ async def test_briefing_no_nudge_when_done():
     router = Router(llm, FakeStore(), manabi=FakeManabi(due=False))
     await collect(router, "chat", {"message": "brief me"})
     assert "Japanese reviews" not in llm.messages[-1]["content"]
+
+
+# ---- todo-fixes 2026-07-16: router/intent misfires (backlog items 1-4) -----
+
+
+def test_compose_hint_never_matches_read_shaped_mail_requests():
+    # todo-fixes #1: "email" as a NOUN after a read verb must not open compose.
+    from lumen.daemon.router import COMPOSE_HINT
+    reads = ["look through my email for chris's address",
+             "look through my email to find the invoice",
+             "check my email to see if sarah wrote back",
+             "did Sam email me back about the trip",
+             "search my email for the flight confirmation",
+             "read my latest email from Priya",
+             "find the email from Chris about the invoice"]
+    assert not any(COMPOSE_HINT.search(m) for m in reads), \
+        [m for m in reads if COMPOSE_HINT.search(m)]
+
+
+def test_compose_hint_still_matches_explicit_write_verbs():
+    from lumen.daemon.router import COMPOSE_HINT
+    hits = ["send an email to sam@x.com about friday",
+            "email Sarah about rescheduling",
+            "can you email chris asking about dinner",
+            "then email bob to confirm",
+            "write an email telling the team we shipped",
+            "reply to Ada's email saying thanks"]
+    assert all(COMPOSE_HINT.search(h) for h in hits), \
+        [h for h in hits if not COMPOSE_HINT.search(h)]
+
+
+def test_mail_read_hint_shapes():
+    from lumen.daemon.router import MAIL_READ_HINT
+    hits = ["look through my email for chris's address",
+            "check my email to see if sarah wrote back",
+            "search my inbox for the invoice",
+            "read my latest email from Priya"]
+    misses = ["send an email to sam@x.com", "what's the weather like",
+              "search my notes for the recipe"]
+    assert all(MAIL_READ_HINT.search(h) for h in hits), \
+        [h for h in hits if not MAIL_READ_HINT.search(h)]
+    assert not any(MAIL_READ_HINT.search(m) for m in misses), \
+        [m for m in misses if MAIL_READ_HINT.search(m)]
+
+
+async def test_read_shaped_mail_request_enters_tool_loop_not_compose():
+    # todo-fixes #1 routing half: the read shape lands in the tool loop
+    # (search_email lives there), and no compose popup opens.
+    from lumen.daemon.confirm import ConfirmBroker
+    bridge = FakeBridge(tools=(("search_email", {}),))
+    router = Router(ToolLLM(), FakeStore(), bridge=bridge,
+                    mail=FakeMailSync(), mail_store=FakeMailStore(),
+                    confirm=ConfirmBroker(), model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "look through my email for the invoice "
+                                    "from Duke Energy"})
+    assert bridge.started is True
+    assert not any("compose_request" in e for e in out)
+    assert out[-1] == {"done": True}
+
+
+FIND_SEND_JSON = ('{"to": [], "cc": [], "subject": "Dinner", '
+                  '"body": "Dinner is at 7 on Saturday.", "reply_hint": null, '
+                  '"to_hint": "Chris Sizemore"}')
+
+
+class ChrisMailStore(FakeMailStore):
+    """Mirror with a second, newer message from Chris Sizemore."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows.append(
+            {"id": "m2", "sender": "Chris Sizemore <chris@szmr.com>",
+             "subject": "Re: weekend", "snippet": "s", "body": "b",
+             "labels": ["INBOX"], "received_at": "2026-07-15T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "t2",
+             "recipients": "me"})
+        self.rows.append(   # older mail from the same person — must lose
+            {"id": "m3", "sender": "Chris Sizemore <old@former.org>",
+             "subject": "old", "snippet": "s", "body": "b",
+             "labels": [], "received_at": "2025-01-01T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "t3",
+             "recipients": "me"})
+
+    def search(self, query, limit=50):
+        q = query.lower()
+        return [r for r in self.rows if q in r["sender"].lower()]
+
+
+async def test_find_then_send_prefills_recipient_from_mirror():
+    # todo-fixes #2 acceptance shape: search -> extract recipient -> compose
+    # opens PREFILLED (to from the newest matching mail; body from the draft),
+    # still behind the Send confirmation.
+    router = compose_router(FakeLLM((FIND_SEND_JSON,)), store=ChrisMailStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "find Chris Sizemore's address from his most recent email, then send "
+        "him an email with body 'Dinner is at 7 on Saturday.'",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen["to"] == ["chris@szmr.com"]
+    assert seen["body"] == "Dinner is at 7 on Saturday."
+    assert any("compose_request" in e for e in out)
+
+
+async def test_find_then_send_unknown_person_leaves_to_empty():
+    # No mirror match -> the popup still opens, recipient left for the user.
+    unknown = FIND_SEND_JSON.replace("Chris Sizemore", "Zed Nobody")
+    router = compose_router(FakeLLM((unknown,)), store=ChrisMailStore())
+    seen = {}
+    await _drive_compose(
+        router,
+        "find Zed Nobody's address from his email and send him an email "
+        "saying hi",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen["to"] == []
+
+
+class PlainThenToolLLM:
+    """Fake LLM serving a plain first turn, then a tool-loop second turn."""
+    model = None
+
+    def __init__(self):
+        self.tool_turns = 0
+
+    async def chat(self, messages):
+        yield "hi there"
+
+    async def chat_with_tools(self, messages, tools, executor, *,
+                              model=None, max_iterations=4):
+        self.tool_turns += 1
+        yield {"tool_call": {"name": "list_directory", "arguments": {"path": "/n"}}}
+        text = await executor("list_directory", {"path": "/n"})
+        yield {"content": f"Files: {text}"}
+
+
+async def test_tool_route_is_per_turn_not_sticky(tmp_path):
+    # todo-fixes #4: a plain no-tool first turn must not pin the thread to
+    # the plain path — a later tool-shaped turn in the SAME conversation
+    # still enters the tool loop.
+    conv = conv_store(tmp_path)
+    llm = PlainThenToolLLM()
+    bridge = FakeBridge()
+    router = Router(llm, FakeStore(), bridge=bridge, calendar=FakeCal(),
+                    conversations=conv, model_router=FakeModelRouter())
+    out1 = await collect(router, "chat", {"message": "hello"})
+    cid = next(e["conversation_id"] for e in out1 if "conversation_id" in e)
+    assert llm.tool_turns == 0          # first turn stayed plain
+    out2 = await collect(router, "chat",
+                         {"message": "what's on my calendar tomorrow",
+                          "conversation_id": cid})
+    assert llm.tool_turns == 1          # second turn loaded tools
+    assert bridge.started is True
+    assert out2[-1] == {"done": True}
+
+
+async def test_tool_route_per_turn_file_question(tmp_path):
+    conv = conv_store(tmp_path)
+    llm = PlainThenToolLLM()
+    bridge = FakeBridge()
+    router = Router(llm, FakeStore(), bridge=bridge, conversations=conv,
+                    model_router=FakeModelRouter())
+    out1 = await collect(router, "chat", {"message": "good morning"})
+    cid = next(e["conversation_id"] for e in out1 if "conversation_id" in e)
+    out2 = await collect(router, "chat",
+                         {"message": "list the files in my Projects folder",
+                          "conversation_id": cid})
+    assert llm.tool_turns == 1
+    assert out2[-1] == {"done": True}
+
+
+# ---- todo-fixes #6: per-chat context isolation, both directions ------------
+
+
+async def test_history_keyed_by_conversation_both_directions(tmp_path):
+    conv = conv_store(tmp_path)
+    llm = FakeLLM()
+    router = Router(llm, FakeStore(), conversations=conv)
+
+    out1 = await collect(router, "chat", {"message": "my cat is named Miso"})
+    cid = next(e["conversation_id"] for e in out1 if "conversation_id" in e)
+
+    # continuing the chat keeps its context …
+    await collect(router, "chat", {"message": "what did I just tell you?",
+                                   "conversation_id": cid})
+    assert any("Miso" in m["content"] for m in llm.messages
+               if m["role"] == "user")
+
+    # … and a new chat knows nothing from the previous one
+    out3 = await collect(router, "chat", {"message": "hello again"})
+    cid2 = next(e["conversation_id"] for e in out3 if "conversation_id" in e)
+    assert cid2 != cid
+    assert not any("Miso" in m["content"] for m in llm.messages)
+
+
+# ---- todo-fixes #10: settings surfacing ------------------------------------
+
+
+async def test_memory_learned_returns_text_and_stamp(tmp_path):
+    mem = tmp_path / "memory.md"
+    mem.write_text("## Email\n- prefers short replies\n")
+    router = Router(FakeLLM(), FakeStore(), memory_path=mem)
+    out = await collect(router, "memory.learned", {})
+    res = out[0]["result"]
+    assert "prefers short replies" in res["text"]
+    assert res["updated_at"] and res["path"] == str(mem)
+
+
+async def test_memory_learned_missing_file_is_empty_not_error(tmp_path):
+    router = Router(FakeLLM(), FakeStore(),
+                    memory_path=tmp_path / "missing.md")
+    out = await collect(router, "memory.learned", {})
+    assert out[0]["result"]["text"] == ""
+    assert out[0]["result"]["updated_at"] is None
+
+
+async def test_always_label_chat_rule_lands_in_rules_list(tmp_path):
+    # todo-fixes #10c: the chat path ("always label…") writes the SAME rules
+    # table the Settings editor lists.
+    from lumen.daemon.confirm import ConfirmBroker
+    from lumen.daemon.connectors.mail_rules import RuleStore
+    rules = RuleStore(db.connect(tmp_path / "r.db"))
+    rule_json = ('{"label": "Bills", "from_addrs": [], '
+                 '"domains": ["duke-energy.com"], "subject_kw": [], "body_kw": []}')
+    router = Router(FakeLLM((rule_json,)), FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore(), confirm=ConfirmBroker(),
+                    rules=rules)
+    out = []
+    async for ev in router.handle(
+            "chat", {"message": "always label duke-energy.com emails as Bills"}):
+        out.append(ev)
+        if "confirm_request" in ev:
+            router._confirm.resolve(ev["confirm_id"], True)
+    listed = await collect(router, "rules.list", {})
+    got = listed[0]["result"]["rules"]
+    assert len(got) == 1 and got[0]["label"] == "Bills"
+
+
+async def test_find_then_send_fallback_when_model_omits_to_hint():
+    # Live 2026-07-17: the 4B returned to_hint null for the acceptance prompt.
+    # The possessive "<Name>'s address" in the message itself must resolve
+    # the recipient deterministically.
+    no_hint = FIND_SEND_JSON.replace('"to_hint": "Chris Sizemore"',
+                                     '"to_hint": null')
+    router = compose_router(FakeLLM((no_hint,)), store=ChrisMailStore())
+    seen = {}
+    await _drive_compose(
+        router,
+        "find Chris Sizemore's address from his most recent email, then send "
+        "him an email with body 'Dinner is at 7 on Saturday.'",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen["to"] == ["chris@szmr.com"]

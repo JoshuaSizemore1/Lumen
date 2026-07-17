@@ -24,7 +24,8 @@ class MailScreen(QWidget):
         head = QWidget()
         hv = vbox(head, (16, 16, 16, 10), 8)
         top_row = hbox(s=9)
-        top_row.addWidget(label("Inbox", 15, T.TEXT_PRIMARY, 600))
+        self.title_lab = label("Inbox", 15, T.TEXT_PRIMARY, 600)
+        top_row.addWidget(self.title_lab)
         self.unread_lab = label("", 11, T.TEXT_DIM)
         top_row.addWidget(self.unread_lab)
         top_row.addStretch(1)
@@ -33,25 +34,29 @@ class MailScreen(QWidget):
         self.compose_btn.setToolTip("Write a new email")
         self.compose_btn.clicked.connect(lambda: state.open_compose())
         top_row.addWidget(self.compose_btn)
-        refresh_btn = button("↻", "outline", px=13)
-        refresh_btn.setFixedSize(28, 26)
-        refresh_btn.setToolTip("Refresh inbox")
-        refresh_btn.clicked.connect(state.refresh_inbox)
-        top_row.addWidget(refresh_btn)
-        self.suggest_btn = button("✨", "outline", px=13)
-        self.suggest_btn.setFixedSize(28, 26)
-        self.suggest_btn.setToolTip(
-            "Suggest labels for unlabeled mail (runs the local model once)")
-        self.suggest_btn.clicked.connect(self._suggest)
-        top_row.addWidget(self.suggest_btn)
         hv.addLayout(top_row)
 
+        # refresh rides the search row — a labeled button, not a bare glyph
+        # (todo-fixes #9); the title row stays uncramped at 334px.
+        search_row = hbox(s=8)
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search mail…")
         f = self.search_box.font()
         f.setPixelSize(12)
         self.search_box.setFont(f)
-        hv.addWidget(self.search_box)
+        search_row.addWidget(self.search_box, 1)
+        self.refresh_btn = button("↻ Refresh", "outline", px=11)
+        self.refresh_btn.setFixedHeight(26)
+        self.refresh_btn.setToolTip("Sync with Gmail now")
+        self.refresh_btn.clicked.connect(state.refresh_inbox)
+        search_row.addWidget(self.refresh_btn)
+        self.suggest_btn = button("✨", "outline", px=13)
+        self.suggest_btn.setFixedSize(28, 26)
+        self.suggest_btn.setToolTip(
+            "Suggest labels for unlabeled mail (runs the local model once)")
+        self.suggest_btn.clicked.connect(self._suggest)
+        search_row.addWidget(self.suggest_btn)
+        hv.addLayout(search_row)
 
         self.status_lab = label("", 11, T.TEXT_DIM)
         hv.addWidget(self.status_lab)
@@ -90,7 +95,17 @@ class MailScreen(QWidget):
         state.mails_changed.connect(self.populate)
         self.populate()
 
+    def showEvent(self, ev):
+        # Re-query the mirror on every visit (cheap local read): labels a rule
+        # or chat created while this tab was hidden show up in the chip row
+        # and row pills without a manual refresh (todo-fixes #10d).
+        super().showEvent(ev)
+        self.state.refresh_mails()
+
     def populate(self):
+        scope = self.state.mail_scope
+        self.title_lab.setText(
+            {"inbox": "Inbox", "unread": "Inbox", "sent": "Sent"}.get(scope, scope))
         self.unread_lab.setText(f"{self.state.unread_count()} unread")
         self.status_lab.setText(self._status_text())
         self._build_chips()
@@ -149,11 +164,13 @@ class MailScreen(QWidget):
 
     def _build_chips(self):
         # No "All": each chip is its own inbox — "Inbox" is unlabeled INBOX
-        # mail, every label shows only its own (design 2026-07-16).
+        # mail, every label shows only its own (design 2026-07-16). "Sent"
+        # is the outbound scope switcher (todo-fixes #9).
         clear_layout(self.chips_lay)
-        for name, scope in ([("Inbox", "inbox"), ("Unread", "unread")]
+        for name, scope in ([("Inbox", "inbox"), ("Unread", "unread"),
+                             ("Sent", "sent")]
                             + [(l, l) for l in self.state.mail_labels]):
-            color = (T.TEXT_SECONDARY if scope in ("inbox", "unread")
+            color = (T.TEXT_SECONDARY if scope in ("inbox", "unread", "sent")
                      else T.label_color(name))
             sel = self.state.mail_scope == scope
             self.chips_lay.addWidget(ClickChip(

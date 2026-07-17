@@ -108,6 +108,12 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
   leaves the default view); Unread applies the same exclusion; each label chip
   shows only its own mail. All chips re-query the local DB (`list_page`); the
   store-level `"all"` filter still exists for internal callers.
+- **Sent is a chip too (todo-fixes #9, 2026-07-17)** — `list_page("sent")`
+  filters on the `SENT` label, which the bounded bulk sync already mirrors
+  (its `after:` query has no label restriction). The header title follows the
+  scope (Inbox/Sent/label), refresh is a labeled "↻ Refresh" button on the
+  search row, and the screen re-queries the mirror on every `showEvent` so
+  rule/chat-created labels appear without a manual refresh (todo-fixes #10d).
 
 ## HTML bodies (built 2026-07-16)
 - `emails.body_html` stores the raw `text/html` part alongside the stripped

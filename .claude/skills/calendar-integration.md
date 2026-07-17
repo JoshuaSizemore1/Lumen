@@ -40,6 +40,13 @@
   appears in the user's message — Lumen has no contacts source, and invites are
   emailed with that stated in the dialog). The "+ Event" form on the month
   screen goes through the same `calendar.create` → confirm ritual.
+- **Relative dates are resolved in code, not by the model** (todo-fixes #8,
+  2026-07-17): `todo_parse.resolve_relative_phrase` handles weekdays,
+  "next X" (= next week's X, even said on that same weekday), "next week on
+  X", "in N days/weeks"; `propose_event` injects the concrete date into the
+  prompt AND `apply_resolved_date` mechanically rewrites the proposal onto it
+  (times/duration kept). Slot-booking follow-ups (`context=` set) are exempt —
+  their context already carries exact dates.
 
 ## Auth
 Reuse the same OAuth2 credentials/flow as email where possible (Google supports combined scopes in one consent).

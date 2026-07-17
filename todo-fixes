@@ -1,0 +1,181 @@
+# Todo Fixes for Lumen
+
+Bug/repair backlog, pulled from Lumen's in-app todo list on 2026-07-16.
+Each entry cites its source todo id — the originals are still in the app's
+todo list. Feature-sized items went to `new-features.md` instead.
+
+**Status 2026-07-17: all 10 entries fixed and live-verified** (851 tests, up
+from 813). Per-entry ✔ notes below. Leftovers worth knowing:
+- #4 was already per-turn in code — regression tests added; the live repro
+  answered correctly. If it recurs, it's 4B history bias, not routing.
+- #7's real fix (iGPU/Vulkan serving) stays open in `new-features.md`; the
+  warm-on-summon mitigation was already built and is verified working.
+- The in-app source todos can now be checked off.
+
+---
+
+## Router / intent misfires
+
+Four entries share one root cause: intent routing in `daemon/router.py` is
+regex-first (`COMPOSE_HINT` and friends), so keyword hits win over what the
+user actually asked for. Fix these as a cluster — every one below should end
+up as a regression test in the same suite.
+
+### 1. "email" anywhere in a prompt hijacks into compose (todo #11) — ✔ fixed
+- **Done:** COMPOSE_HINT now needs an explicit write verb (bare "email" only
+  as an imperative); read-shaped requests route to the tool loop via
+  MAIL_READ_HINT (search_email). Live-verified: "look through my email…"
+  searched and answered, no popup.
+- **Observed:** "look through my email for X" → opens an empty compose popup
+  and does nothing else.
+- **Root cause:** `COMPOSE_HINT` matches email-ish phrasing regardless of
+  intent; there is no read/search intent that outranks it.
+- **Fix:** compose should require an explicit write verb (send / draft /
+  reply / write an email **to**). Read verbs (look through, find, search,
+  check, read) must route to inbox search/QA even when "email" appears.
+
+### 2. Multi-step email tasks collapse into one wrong tool call (todo #9) — ✔ fixed
+- **Done:** find-then-send special case — draft carries a `to_hint` (with a
+  deterministic "<Name>'s address" fallback, since the 4B often omits it);
+  the mirror lookup prefills the newest matching sender. Live-verified with
+  the exact acceptance prompt: compose opened with to + body prefilled.
+- **Observed:** "find Chris Sizemore's address from his most recent email,
+  then send him an email with body '…'" → empty compose popup.
+- **Root cause:** the router dispatches exactly one intent per prompt; there
+  is no plan-then-act step, so the compose path never receives the search
+  result it depends on.
+- **Fix:** support short tool chains — search → extract recipient → open
+  compose **prefilled** (to, subject, body), still behind the existing send
+  confirmation. Either let the model emit an ordered tool list, or
+  special-case the common "find-then-send" shape first. Use the exact prompt
+  above as the acceptance test.
+
+### 3. Markdown-file request routed to calendar event (todo #15) — ✔ fixed
+- **Done:** FILE_TASK_HINT guards the event branches; file requests reach the
+  fs tool loop (write_file exists there, behind the write gate). Live-verified:
+  "create a meeting note file…" ran fs tools + write-gate confirm, no event
+  dialog. The dedicated file-writing intent remains `new-features.md` item 2.
+- **Observed:** asked Lumen to write a markdown file → it opened a calendar
+  event instead.
+- **Root cause:** no file-writing tool exists (see `new-features.md`
+  backlog item 2), so the nearest greedy heuristic won.
+- **Fix:** when no capable tool exists, Lumen must say "I can't do that yet"
+  instead of firing the closest match; tighten the event-create heuristic to
+  require event-ish language. Fully resolved once the file-writing feature
+  lands.
+
+### 4. Tools never load after a no-tool first turn (todo #6) — ✔ verified + regression-tested
+- **Done:** the route decision was already strictly per-turn in current code;
+  added the two-turn regression tests (calendar + files shapes) and live-ran
+  the exact scenario — the second turn loaded tools and answered from real
+  calendar data.
+- **Observed:** first turn is a plain question (no tools — fine), but a later
+  turn in the same chat that needs a tool doesn't load one either.
+- **Root hypothesis:** the tool-vs-direct decision is sticky per
+  conversation, or the prior direct-answer turn in history biases routing.
+- **Fix:** make the route decision strictly per-turn, independent of how
+  earlier turns were routed. Regression test: no-tool turn, then "what's on
+  my calendar tomorrow" in the same chat.
+
+## Chat sessions
+
+Entries 5 and 6 are two sides of the same broken session model — fix
+together, in `ui_v2/state.py` + `screens/chat.py` + the daemon's history
+assembly.
+
+### 5. Every prompt creates a new chat (todo #8) — ✔ fixed
+- **Done:** one `state.active_conv_id` shared by launcher palette, hotkey
+  overlay, and Chat screen; prompts append to it, "New chat" (or first-ever
+  prompt) is the only reset. Surfaces re-sync on show.
+- **Observed:** each typed prompt lands in a fresh chat instead of
+  continuing the open one.
+- **Fix:** one active chat id in UI state; prompts append to it. A new chat
+  is created only by an explicit "new chat" action (or first-ever prompt).
+
+### 6. New chats don't get fresh context (todo #10) — ✔ fixed
+- **Done:** daemon history was already keyed by conversation id; both
+  directions now regression-tested (continuing keeps context, new chat knows
+  nothing). The visible bleed was the launcher reusing one thread forever —
+  gone with the shared active id.
+- **Observed:** context appears to be one blob per daemon session — old
+  chats bleed into new ones.
+- **Fix:** history sent to the model must be keyed by chat id and contain
+  only that chat's turns. "New chat" = genuinely empty context.
+- **Test both directions:** continuing a chat keeps its context; a new chat
+  knows nothing from the previous one.
+
+## Model serving
+
+### 7. Cold start on every launcher prompt (todo #2) — ✔ mitigation verified, iGPU fix still open
+- **Done:** the interim mitigation was already built — overlay summon and
+  launcher/chat tab switches send `warm` (identity+memory KV prime);
+  live-verified it hits Ollama. The Vulkan/iGPU move stays a feature item.
+- **Observed:** prompting from the launcher always pays the full model load.
+- **Known direction (already decided):** move serving to the iGPU via Vulkan
+  (llama.cpp) so a resident/fast-loading model is cheap enough thermally to
+  keep warm longer.
+- **Interim mitigation:** when the launcher is summoned (hotkey), start
+  loading the model in the background while the user types — typing time
+  hides most of the load. Idle-unload stays; this changes *when* loading
+  starts, not whether we unload.
+
+## Calendar
+
+### 8. Relative dates resolve wrong on event creation (todo #1) — ✔ fixed
+- **Done:** `resolve_relative_phrase` (todo_parse.py) resolves weekdays,
+  "next X", "next week on X", "in N days/weeks" deterministically; the
+  resolved date is injected into the prompt AND mechanically overrides the
+  model's date (`apply_resolved_date`). Booking-context follow-ups exempt.
+  Live-verified: "next wednesday at 3pm" on a Friday → Wed Jul 22 confirm.
+- **Observed:** "create X event next wednesday" / "next week on wednesday"
+  → wrong date on the created event.
+- **Root cause:** date math is left to the small local model
+  (`daemon/llm/event_create.py`) — small models are unreliable at calendar
+  arithmetic.
+- **Fix:** resolve relative dates deterministically in code (extend the
+  `todo_parse.py` patterns: weekday names, "next X", "next week on X",
+  "in N days") and hand the model a concrete date; also inject "today is
+  <date> (<weekday>)" into the prompt as a backstop. Unit-test the edge
+  cases: "next wednesday" said on a Wednesday, month/year rollover.
+
+## Mail UI
+
+### 9. Mail screen navigation basics (todo #7) — ✔ fixed
+- **Done:** Sent chip (real `sent` scope over the mirror — SENT is already
+  synced), scope-aware header title, labeled "↻ Refresh" button beside the
+  search box, Compose stays primary. Live-verified sent scope returns real
+  SENT mail.
+- **Wanted:** a way to view Sent vs Inbox, a bigger/more obvious refresh
+  button, and a clear Compose button.
+- **Notes:** per-label chips already exist — add a scope switcher
+  (Inbox / Sent) alongside them; Sent requires the sync to cover the `SENT`
+  label (verify it does). Refresh (↻) and compose already work — this is
+  purely making them prominent in `ui_v2/screens/mail.py`.
+
+## Settings
+
+### 10. Settings surfacing gaps (todo #14) — ✔ all four fixed
+- **a)** new `memory.learned` op; Settings shows memory.md inline with
+  last-updated, or "Nothing learned yet". (The file had content — the old
+  view was just an open-in-editor button.)
+- **b)** proposed/active routine rows now show trigger phrases + numbered
+  steps before Approve.
+- **c)** all three rule-creation paths already wrote the same RuleStore —
+  regression test added ("always label…" chat path appears in rules.list).
+- **d)** Mail screen re-queries the mirror on every show, and rule saves
+  refresh the list — new labels/pills appear without a restart.
+- **a) "What Lumen has learned" is empty.** Either the view is broken or it
+  reads the wrong store — distilled memory lives at
+  `~/.local/share/lumen/memory.md`. Show its contents + last-updated time;
+  if genuinely empty, say "nothing learned yet" instead of blank.
+- **b) Proposed routines aren't inspectable.** Before accepting a proposed
+  routine, the user must be able to see what it does — steps, schedule,
+  what it touches.
+- **c) Email rules don't appear in Settings.** The rules editor exists
+  (`[mail_rules]`, `rule_dialog.py`) — likely rules created via the chat /
+  "always label like this" paths aren't landing where the editor reads.
+  All three creation paths must write the same rules table, and the editor
+  must list everything in it.
+- **d) Label pills aren't dynamic.** When a new label appears (created by a
+  rule or an accepted suggestion), the chip row and row pills must pick it
+  up on the next `emails.list` — no restart required.

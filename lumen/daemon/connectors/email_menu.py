@@ -117,6 +117,7 @@ class EmailStore:
         where, params = {
             "inbox": (f"WHERE {in_inbox}", ()),
             "unread": (f"WHERE is_read = 0 AND {in_inbox}", ()),
+            "sent": ("WHERE (',' || labels || ',') LIKE '%,SENT,%'", ()),
             "label": ("WHERE (',' || labels || ',') LIKE ?", (f"%,{label_id},%",)),
             "all": ("", ()),
         }[filter]

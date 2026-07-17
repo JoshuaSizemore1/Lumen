@@ -100,6 +100,15 @@ EVENT_HINT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# A request about a FILE is never a calendar event, even when it mentions a
+# meeting ("create a meeting note file") — todo-fixes #3. Guards the EVENT
+# branch so these reach the fs tool loop (write_file sits behind the write
+# gate there) instead of firing the nearest greedy heuristic.
+FILE_TASK_HINT = re.compile(
+    r"\b(?:files?|folders?|director(?:y|ies)|documents?|markdown|\.md|\.txt)\b",
+    re.IGNORECASE,
+)
+
 # Find-a-time shapes ("find 30 minutes...") — slot math is deterministic
 # daemon code; a booking request with a concrete time stays on EVENT_HINT.
 SLOT_HINT = re.compile(
@@ -128,16 +137,41 @@ RULE_HINT = re.compile(
 
 # Compose-shaped requests jump to the draft → popup path before every other
 # chat route (EVENT_HINT would steal "draft an email to schedule a meeting").
-# Read-shaped mail questions ("did Sam email me back?") must NOT match.
+# Compose requires an explicit write verb (todo-fixes #1): the bare-"email"
+# alternation only fires when "email" is used as an imperative VERB (start of
+# message/clause or after please/you/then/…), so "email" as a noun after a
+# read verb ("look through my email to find…", "did Sam email me back?")
+# never opens a compose popup.
 COMPOSE_HINT = re.compile(
     r"\b(?:send|write|draft|compose|shoot)\b.{0,60}\b(?:e-?mails?|reply|message)\b"
     r"|\breply(?:ing)?\b.{0,60}\b(?:e-?mails?|saying|telling|that)\b"
-    r"|\be-?mail\b.{0,40}\b(?:to|saying|telling|asking|about)\b",
+    r"|(?:^|[.!?;,]\s*|\b(?:please|you|then|and|now|also|just)\s+)"
+    r"e-?mail\b.{0,40}\b(?:to|saying|telling|asking|about)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Read-shaped mail requests route to the tool loop, where search_email /
+# get_email live (todo-fixes #1) — checked after COMPOSE (a find-then-send
+# request matches both and compose, with its mirror lookup, must win) and
+# after TRIAGE ("check my email for things needing a reply").
+MAIL_READ_HINT = re.compile(
+    r"\b(?:look(?:ing)?|go(?:ing)?|dig(?:ging)?|search(?:ing)?|find|check|"
+    r"read|scan|show|list)\b.{0,40}\b(?:e-?mails?|inbox|mailbox|gmail)\b",
     re.IGNORECASE | re.DOTALL,
 )
 
 # A compose wait is an edit session, not a confirm click.
 COMPOSE_TIMEOUT_S = 1800.0
+
+# Deterministic fallback for the find-then-send recipient (todo-fixes #2):
+# the 4B often leaves to_hint null, but "<Name>'s address" names the person
+# right in the message. Captured span is stop-word-filtered before the mirror
+# lookup, so an over-wide capture just misses instead of mis-addressing.
+TO_HINT_FALLBACK = re.compile(
+    r"\b([\w'-]+(?:\s+[\w'-]+){0,2})[’']s\s+(?:e-?mail\s+)?address\b",
+    re.IGNORECASE)
+_ADDR_STOP = frozenset(
+    "find get grab look up the of for from his her their my email".split())
 
 # Triage is a pull ("what needs a reply?"), never a push. Checked after
 # COMPOSE so "reply to X saying thanks" still opens the compose popup.
@@ -899,6 +933,22 @@ class Router:
                 yield {"result": {"ok": True, "rules": self._rules.list_all()}}
             else:
                 yield {"error": f"unknown request type: {type_}"}
+        elif type_ == "memory.learned":
+            # Settings "what Lumen has learned": the distilled memory.md
+            # verbatim + its last-updated stamp — the view reads exactly the
+            # file the distiller writes (todo-fixes #10a).
+            if self._memory_path is None:
+                yield {"error": "memory unavailable"}
+            else:
+                p = Path(self._memory_path)
+                try:
+                    text = p.read_text().strip()
+                    updated = datetime.fromtimestamp(
+                        p.stat().st_mtime).isoformat(timespec="minutes")
+                except OSError:
+                    text, updated = "", None
+                yield {"result": {"text": text, "updated_at": updated,
+                                  "path": str(p)}}
         elif type_ == "memory.procedures":
             if self._procedures is None:
                 yield {"error": "procedures unavailable"}
@@ -956,14 +1006,20 @@ class Router:
             sub, subsystem = self._compose_email_chat(message), "email"
         elif self._mail_store is not None and TRIAGE_HINT.search(message):
             sub, subsystem = self._triage_chat(), "email"
+        elif (self._bridge is not None and self._mail_store is not None
+                and MAIL_READ_HINT.search(message)):
+            # Read-shaped mail request: the tool loop owns inbox search/QA.
+            sub, subsystem = self._chat_with_tools(message, conv_id), "email"
         elif self._calendar is not None and SLOT_HINT.search(message):
             sub, subsystem = self._slots_chat(message), "calendar"
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and BOOKING_HINT.search(message)
+                and not FILE_TASK_HINT.search(message)
                 and (slot_ctx := self._slot_context(conv_id))):
             sub, subsystem = self._create_event_chat(message, context=slot_ctx), "calendar"
         elif (self._confirm is not None and self._bridge is not None
-                and self._calendar is not None and EVENT_HINT.search(message)):
+                and self._calendar is not None and EVENT_HINT.search(message)
+                and not FILE_TASK_HINT.search(message)):
             sub, subsystem = self._create_event_chat(message), "calendar"
         elif self._notes is not None and NOTES_HINT.search(message):
             sub, subsystem = self._notes_chat(message), "chat"
@@ -1518,6 +1574,17 @@ class Router:
                 subj = orig.get("subject") or ""
                 draft["subject"] = (subj if subj.lower().startswith("re:")
                                     else f"Re: {subj}")
+        # Find-then-send (todo-fixes #2): "find X's address from his email,
+        # then send him …" — resolve the named person against the mirror and
+        # prefill the recipient. A miss just leaves `to` for the user; the
+        # Send click stays the confirmation either way.
+        hint = draft.get("to_hint")
+        if not hint and (m := TO_HINT_FALLBACK.search(message)):
+            hint = m.group(1)
+        if not draft["to"] and hint and self._mail_store is not None:
+            addr = self._lookup_address(hint)
+            if addr:
+                draft["to"] = [addr]
         compose_id = self._confirm.begin()
         yield {"compose_request": {"to": draft["to"], "cc": draft["cc"], "bcc": [],
                                    "subject": draft["subject"], "body": draft["body"],
@@ -1533,6 +1600,24 @@ class Router:
         _ok, text = await self._send_email(answer)
         yield {"chunk": f"\n\n{text}"}
         yield {"done": True}
+
+    def _lookup_address(self, name: str) -> str | None:
+        """Newest mirrored message whose SENDER line contains every word of
+        `name` -> that sender's address. Sender-only on purpose: prefilling a
+        recipient from a body mention could email the wrong person."""
+        words = [w for w in re.findall(r"[\w']+", name.lower())
+                 if w not in _ADDR_STOP]
+        if not words:
+            return None
+        hits = sorted(self._mail_store.search(" ".join(words), limit=8),
+                      key=lambda r: r.get("received_at") or "", reverse=True)
+        for r in hits:
+            sender = (r.get("sender") or "").lower()
+            if all(w in sender for w in words):
+                addr = _sender_address(r.get("sender", ""))
+                if addr:
+                    return addr
+        return None
 
     async def _send_email(self, fields: dict) -> tuple[bool, str]:
         """Validate + send. No confirm gate: every caller is downstream of the

@@ -15,13 +15,17 @@ EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 DRAFT_SYSTEM = (
     "You draft an email from the user's request. Reply with ONLY a JSON "
     "object, no prose, shaped exactly:\n"
-    '{"to": [], "cc": [], "subject": "...", "body": "...", "reply_hint": null}\n'
+    '{"to": [], "cc": [], "subject": "...", "body": "...", "reply_hint": null, '
+    '"to_hint": null}\n'
     "Rules: to/cc may ONLY contain email addresses the user explicitly wrote — "
     "a name is not an address; leave to empty and the user will fill it in. "
     "body is the complete ready-to-send email text in the user's voice, with "
     "a simple sign-off and no [placeholders]. If the user is replying to an "
     "email they received, reply_hint is a few words identifying it (sender "
-    "name and/or subject words); otherwise null."
+    "name and/or subject words); otherwise null. If the user wants the "
+    "recipient's address found in their existing email, to_hint is that "
+    "person's name (e.g. \"find Sam Doe's address from his last email, then "
+    "email him X\" -> to_hint \"Sam Doe\"); otherwise null."
 )
 
 REVISE_SYSTEM = (
@@ -45,7 +49,8 @@ def validate_draft(p: dict, *, user_message: str) -> dict:
     return {"to": addresses(p.get("to")), "cc": addresses(p.get("cc")),
             "subject": str(p.get("subject") or "").strip(),
             "body": str(p.get("body") or "").strip(),
-            "reply_hint": str(p.get("reply_hint") or "").strip() or None}
+            "reply_hint": str(p.get("reply_hint") or "").strip() or None,
+            "to_hint": str(p.get("to_hint") or "").strip() or None}
 
 
 async def _generate(llm, system: str, user: str) -> dict | None:

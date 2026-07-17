@@ -108,8 +108,11 @@ class RuleDialog(QWidget):
                                   "subject_kw", "body_kw")):
             self.hint.setText("needs a label and at least one condition")
             return
-        done = lambda r: self.state.toast_requested.emit(
-            ("✓ " if r.get("ok") else "") + (r.get("message") or "Saved."))
+        def done(r):
+            self.state.toast_requested.emit(
+                ("✓ " if r.get("ok") else "") + (r.get("message") or "Saved."))
+            # a save may have backfill-labeled mail — reload rows + chips
+            self.state.refresh_mails()
         if self._rid is None:
             self.state.create_rule(rule, done)
         else:

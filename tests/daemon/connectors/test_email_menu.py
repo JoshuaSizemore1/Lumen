@@ -685,3 +685,13 @@ async def test_fetch_html_failure_leaves_null(tmp_path):
                      service_factory=lambda: Dead())
     assert await sync.fetch_html("m1") is None
     assert store.get("m1")["body_html"] is None   # retried on a later open
+
+
+def test_list_page_sent_scope(tmp_path):
+    # todo-fixes #9: the Sent chip is a real scope over the mirror.
+    store = make_store(tmp_path)
+    store.upsert([msg(1),
+                  msg(2, labels=["SENT"], is_read=True),
+                  msg(3, labels=["SENT", "INBOX"], is_read=True)])  # self-send
+    assert [m["id"] for m in store.list_page("sent")] == ["m3", "m2"]
+    assert [m["id"] for m in store.list_page("inbox")] == ["m3", "m1"]

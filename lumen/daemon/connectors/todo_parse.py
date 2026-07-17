@@ -50,6 +50,53 @@ def _parse_date_token(token: str, today: date) -> date | None:
     return None
 
 
+# ---- free-text relative dates (todo-fixes #8) ------------------------------
+# Small local models are unreliable at calendar arithmetic, so relative dates
+# in natural requests ("next wednesday", "in 3 days") are resolved here,
+# deterministically, and handed to the model as a concrete date. Full weekday
+# names only — 3-letter forms ("sat", "may") false-positive in free text.
+
+_FULL_WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                  "friday": 4, "saturday": 5, "sunday": 6}
+_WD = "|".join(_FULL_WEEKDAYS)
+_NUM_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+              "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+_NEXT_WEEK_ON = re.compile(rf"\bnext\s+week\s+(?:on\s+)?({_WD})\b")
+_ON_NEXT_WEEK = re.compile(rf"\b({_WD})\s+(?:of\s+)?next\s+week\b")
+_NEXT_WD = re.compile(rf"\bnext\s+({_WD})\b")
+_BARE_WD = re.compile(rf"\b(?:this\s+|on\s+)?({_WD})\b")
+_IN_N = re.compile(rf"\bin\s+(\d+|{'|'.join(_NUM_WORDS)})\s+(days?|weeks?)\b")
+
+
+def resolve_relative_phrase(text: str, today: date) -> tuple[date, str] | None:
+    """(resolved date, matched phrase) for the one relative date in `text`,
+    or None. Bails when several weekdays are named (not one resolvable date).
+    Convention: bare/'this' weekday = the coming occurrence (today counts);
+    'next <weekday>' = that weekday of NEXT week, even said on the same day."""
+    t = text.lower()
+    if len({_FULL_WEEKDAYS[m.group(1)] for m in _BARE_WD.finditer(t)}) > 1:
+        return None
+    for pat in (_NEXT_WEEK_ON, _ON_NEXT_WEEK, _NEXT_WD):
+        if m := pat.search(t):
+            wd = _FULL_WEEKDAYS[m.group(1)]
+            return today + timedelta(days=7 - today.weekday() + wd), m.group(0)
+    if m := _BARE_WD.search(t):
+        wd = _FULL_WEEKDAYS[m.group(1)]
+        return today + timedelta(days=(wd - today.weekday()) % 7), m.group(0)
+    if m := _IN_N.search(t):
+        n = int(m.group(1)) if m.group(1).isdigit() else _NUM_WORDS[m.group(1)]
+        days = n * (7 if m.group(2).startswith("week") else 1)
+        return today + timedelta(days=days), m.group(0)
+    if "day after tomorrow" in t:
+        return today + timedelta(days=2), "day after tomorrow"
+    if re.search(r"\btomorrow\b", t):
+        return today + timedelta(days=1), "tomorrow"
+    if re.search(r"\btoday\b|\btonight\b", t):
+        return today, "today"
+    return None
+
+
 def parse_todo_input(raw: str, today: date) -> tuple[str, str | None, list[str]]:
     """(text, due_date ISO or None, tags). Valid @date and #tag tokens are
     stripped; last @date wins; unrecognized @tokens stay in the text."""

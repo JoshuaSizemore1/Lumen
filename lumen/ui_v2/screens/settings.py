@@ -157,12 +157,17 @@ class SettingsScreen(QWidget):
         v.addWidget(label("Lumen learns your patterns into a small, editable "
                           "file. Deleting a line corrects it.", 11, T.TEXT_DIM))
         v.addSpacing(8)
-        view_btn = button("View what Lumen has learned", "ghost", 12, 30)
+        view_btn = button("Open memory file in editor", "ghost", 12, 30)
         view_btn.clicked.connect(self.state.open_memory_file)
         vr = hbox(s=8)
         vr.addWidget(view_btn)
         vr.addStretch(1)
         v.addLayout(vr)
+        v.addSpacing(12)
+        # what Lumen has learned, inline (todo-fixes #10a) — never a blank pane
+        self._learned_box = QWidget()
+        vbox(self._learned_box, (12, 0, 12, 0), 4)
+        v.addWidget(self._learned_box)
         v.addSpacing(12)
         self._proc_box = QWidget()
         vbox(self._proc_box, (0, 0, 0, 0), 6)
@@ -180,6 +185,22 @@ class SettingsScreen(QWidget):
         self.state.refresh_procedures()
         self.state.fetch_settings(self._on_settings)
         self.state.list_rules(self._on_rules)
+        self.state.fetch_learned(self._on_learned)
+
+    def _on_learned(self, result: dict):
+        box = self._learned_box.layout()
+        clear_layout(box)
+        text = ((result or {}).get("text") or "").strip()
+        if not text:
+            box.addWidget(label("Nothing learned yet — Lumen distills what "
+                                "it notices once you've used it a while.",
+                                11, T.TEXT_FAINT))
+            return
+        updated = (result or {}).get("updated_at")
+        if updated:
+            box.addWidget(label(f"last updated {updated.replace('T', ' ')}",
+                                10, T.TEXT_FAINT))
+        box.addWidget(label(text, 11, T.TEXT_SECONDARY, sans=True, wrap=True))
 
     # ---- live snapshot -----------------------------------------------------
 
@@ -308,15 +329,33 @@ class SettingsScreen(QWidget):
 
     # ---- supervised procedures (Phase 9) -----------------------------------
 
+    @staticmethod
+    def _proc_detail(proc: dict) -> str:
+        """What the routine actually does, readable BEFORE approving it
+        (todo-fixes #10b): its trigger phrases + the numbered steps from the
+        procedure file."""
+        lines = []
+        if proc.get("triggers"):
+            lines.append("say: " + " · ".join(proc["triggers"]))
+        lines += [s for s in ((ln.strip() for ln in
+                               (proc.get("text") or "").splitlines()))
+                  if s[:1].isdigit()]
+        return "\n".join(lines)
+
     def _proc_row(self, proc: dict, actions: list[tuple]) -> QWidget:
         row = QWidget()
-        rl = hbox(row, (12, 8, 12, 8), 10)
-        rl.addWidget(label(proc.get("name") or proc.get("slug", "routine"),
-                           12, T.TEXT_SECONDARY), 1)
+        rv = vbox(row, (12, 8, 12, 8), 5)
+        top = hbox(s=10)
+        top.addWidget(label(proc.get("name") or proc.get("slug", "routine"),
+                            12, T.TEXT_SECONDARY), 1)
         for text, variant, handler in actions:
             b = button(text, variant, 11, 26)
             b.clicked.connect(handler)
-            rl.addWidget(b)
+            top.addWidget(b)
+        rv.addLayout(top)
+        detail = self._proc_detail(proc)
+        if detail:
+            rv.addWidget(label(detail, 11, T.TEXT_DIM, sans=True, wrap=True))
         return row
 
     def _rebuild_procedures(self):

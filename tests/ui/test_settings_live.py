@@ -48,3 +48,46 @@ def test_settings_offline_shows_placeholder(qtbot):
     w.show()
     data.cb_for("settings.get")({"error": "settings unavailable"})
     assert "daemon offline" in _texts(w)
+
+
+# ---- what Lumen has learned, inline (todo-fixes #10a) -----------------------
+
+def test_settings_shows_learned_memory_inline(qtbot):
+    state, data = _state()
+    w = SettingsScreen(state)
+    qtbot.addWidget(w)
+    w.show()
+    data.cb_for("memory.learned")({"text": "## Email\n- prefers short replies",
+                                   "updated_at": "2026-07-16T09:30",
+                                   "path": "/x/memory.md"})
+    t = _texts(w)
+    assert "prefers short replies" in t
+    assert "last updated 2026-07-16 09:30" in t
+
+
+def test_settings_learned_empty_says_so(qtbot):
+    state, data = _state()
+    w = SettingsScreen(state)
+    qtbot.addWidget(w)
+    w.show()
+    data.cb_for("memory.learned")({"text": "", "updated_at": None, "path": ""})
+    assert "Nothing learned yet" in _texts(w)
+
+
+# ---- proposed routines are inspectable (todo-fixes #10b) --------------------
+
+def test_proposed_routine_shows_triggers_and_steps(qtbot):
+    state, _data = _state()
+    w = SettingsScreen(state)
+    qtbot.addWidget(w)
+    state.proposed_procedures = [
+        {"slug": "morning-brief", "name": "Morning brief",
+         "triggers": ["morning brief", "start my day"],
+         "last_used": "2026-07-15",
+         "text": "# Morning brief\ntriggers: morning brief; start my day\n"
+                 "last-used: 2026-07-15\n\n1. Run the briefing\n"
+                 "2. List today's todos\n"}]
+    state.procedures_changed.emit()
+    t = _texts(w)
+    assert "say: morning brief · start my day" in t
+    assert "1. Run the briefing" in t and "2. List today's todos" in t

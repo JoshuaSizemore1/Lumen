@@ -166,3 +166,54 @@ async def test_propose_event_unparseable_answer_is_honest():
     llm = FakeLLM("Sorry, no idea.")
     p, err = await propose_event(llm, "make an event", now=NOW)
     assert p is None and err
+
+
+# ---- todo-fixes #8: deterministic dates override the model's arithmetic ----
+
+from datetime import date
+
+from lumen.daemon.llm.event_create import apply_resolved_date
+
+
+def test_apply_resolved_date_shifts_start_and_end():
+    raw = {"start": "2026-07-11T15:00", "end": "2026-07-11T15:30"}
+    out = apply_resolved_date(raw, date(2026, 7, 15))
+    assert out["start"] == "2026-07-15T15:00"
+    assert out["end"] == "2026-07-15T15:30"
+
+
+def test_apply_resolved_date_all_day_span_keeps_length():
+    raw = {"start": "2026-07-11", "end": "2026-07-12"}
+    out = apply_resolved_date(raw, date(2026, 7, 15))
+    assert out == {"start": "2026-07-15", "end": "2026-07-16"}
+
+
+def test_apply_resolved_date_garbage_untouched():
+    raw = {"start": "whenever", "end": None}
+    assert apply_resolved_date(raw, date(2026, 7, 15)) is raw
+
+
+async def test_propose_event_overrides_wrong_relative_date():
+    # NOW is Friday 2026-07-10, so "next wednesday" = 2026-07-15. The model
+    # answered with the wrong day (the live bug) — code, not the 4B, owns
+    # the calendar arithmetic.
+    llm = FakeLLM('{"title": "Sync", "start": "2026-07-11T15:00", '
+                  '"end": "2026-07-11T15:30"}')
+    p, err = await propose_event(llm, "create a sync next wednesday at 3pm",
+                                 now=NOW)
+    assert err is None
+    assert p["start"].startswith("2026-07-15T15:00")
+    assert p["end"].startswith("2026-07-15T15:30")
+    # and the resolved date was handed to the model up front
+    assert "2026-07-15" in llm.messages[0]["content"]
+
+
+async def test_propose_event_booking_context_skips_override():
+    # A slot-booking follow-up carries exact dates in `context`; the resolver
+    # must not second-guess them ("the tuesday slot" may be NEXT week's).
+    llm = FakeLLM('{"title": "Call", "start": "2026-07-21T10:00", '
+                  '"end": "2026-07-21T10:30"}')
+    p, err = await propose_event(llm, "book the tuesday slot", now=NOW,
+                                 context="- Tue 2026-07-21 10:00-10:30")
+    assert err is None
+    assert p["start"].startswith("2026-07-21T10:00")

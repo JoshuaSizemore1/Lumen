@@ -27,7 +27,10 @@ class ChatScreen(QWidget):
         super().__init__()
         self.state = state
         self.chat = chat_client if chat_client is not None else state._chat
-        self._conv_id = None
+        # The open thread is app-wide (state.active_conv_id) so the launcher
+        # and this screen continue the same conversation; _rendered_conv is
+        # only which thread this pane currently shows.
+        self._rendered_conv = None
         self._busy = False
         self._acc = ""
         self.resp_text = None      # current assistant bubble
@@ -88,7 +91,7 @@ class ChatScreen(QWidget):
         """Local-only delete (like a todo) — no confirm ritual. If the open
         thread is the one deleted, the pane resets to a fresh chat."""
         def done(_result: dict):
-            if self._conv_id == cid:
+            if self.state.active_conv_id == cid:
                 self.new_chat()
             self.refresh_list()
         self.state.delete_conversation(cid, done)
@@ -186,7 +189,8 @@ class ChatScreen(QWidget):
 
     # ---- conversation lifecycle -----------------------------------------
     def new_chat(self):
-        self._conv_id = None
+        self.state.active_conv_id = None   # next prompt (any surface) starts fresh
+        self._rendered_conv = None
         self._busy = False
         self.resp_text = None
         self._empty = None              # clear_layout below drops the old widget
@@ -196,9 +200,25 @@ class ChatScreen(QWidget):
         self.input.setFocus()
 
     def load_conversation(self, cid: int):
-        """Reopen a past thread from storage (also the overlay-handoff entry)."""
-        self._conv_id = cid
+        """Reopen a past thread from storage (also the overlay-handoff entry).
+        Opening a thread makes it THE active chat everywhere."""
+        self.state.active_conv_id = cid
+        self._rendered_conv = cid
         self.state.get_conversation(cid, self._render_thread)
+
+    def showEvent(self, ev):
+        # The active thread may have moved on while this tab was hidden
+        # (launcher turns append to it; New chat elsewhere resets it) —
+        # re-sync the pane so surfaces never show diverged threads.
+        super().showEvent(ev)
+        if self._busy:
+            return
+        active = self.state.active_conv_id
+        if active != self._rendered_conv:
+            self.new_chat() if active is None else self.load_conversation(active)
+        elif active is not None:
+            self.state.get_conversation(active, self._render_thread)
+        self.refresh_list()
 
     def _render_thread(self, got: dict):
         self._empty = None              # clear_layout below drops the old widget
@@ -227,14 +247,15 @@ class ChatScreen(QWidget):
         self._begin_assistant_turn()
         self.input.clear()
         payload = {"message": msg}
-        if self._conv_id is not None:      # continue the loaded/ongoing thread
-            payload["conversation_id"] = self._conv_id
+        if self.state.active_conv_id is not None:   # continue the active thread
+            payload["conversation_id"] = self.state.active_conv_id
         self.chat.send("chat", payload)
 
     # ---- streaming (busy-guarded so the shared client can't cross-talk) --
     def _on_conversation(self, cid: int):
         if self._busy:
-            self._conv_id = cid
+            self.state.active_conv_id = cid
+            self._rendered_conv = cid
 
     def _on_tool(self, name: str):
         if self._busy and getattr(self, "tool_lab", None) is not None:
