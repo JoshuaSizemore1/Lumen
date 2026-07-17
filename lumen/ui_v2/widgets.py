@@ -3,7 +3,7 @@ from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QRectF
 from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton, QFrame, QHBoxLayout, QLabel, QLayout, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from . import theme as T
@@ -117,6 +117,40 @@ def scroll(inner: QWidget) -> QScrollArea:
     sa.viewport().setAutoFillBackground(False)
     inner.setAutoFillBackground(False)
     return sa
+
+
+class HtmlBody(QTextBrowser):
+    """HTML email body rendered on a white "paper" card (HTML mail assumes a
+    light background), sized to its document so the reading pane's outer
+    scroll area does all the scrolling — no nested scrollbars. QTextBrowser
+    cannot run scripts and never fetches remote resources, so opening a
+    message leaks nothing; links open in the system browser."""
+
+    def __init__(self, html: str):
+        super().__init__()
+        self.setOpenExternalLinks(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setStyleSheet(
+            "QTextBrowser { background: #ffffff; color: #1f1f1f; "
+            f"border: 1px solid {T.BORDER_SOFT}; border-radius: 8px; "
+            "padding: 10px; }")
+        self.document().setDefaultFont(font(13, sans=True))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Fixed)
+        self.setHtml(html)
+        self.document().documentLayout().documentSizeChanged.connect(
+            lambda _s: self._fit())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.document().setTextWidth(self.viewport().width())
+        self._fit()
+
+    def _fit(self):
+        h = max(int(self.document().size().height()) + 26, 40)
+        if h != self.height():
+            self.setFixedHeight(h)
 
 
 def empty_state(text: str, sub: str | None = None) -> QWidget:

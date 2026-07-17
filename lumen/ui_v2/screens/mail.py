@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    Chip, ClickChip, ClickRow, Dot, ElideLabel, FlowLayout, button,
+    Chip, ClickChip, ClickRow, Dot, ElideLabel, FlowLayout, HtmlBody, button,
     clear_layout, empty_state, font, hbox, label, qcolor, scroll, vbox, vline,
 )
 
@@ -56,7 +56,7 @@ class MailScreen(QWidget):
         self.status_lab = label("", 11, T.TEXT_DIM)
         hv.addWidget(self.status_lab)
 
-        # filter chips: All · Unread · one per user label (scoped DB re-query)
+        # filter chips: Inbox · Unread · one per user label (scoped DB re-query)
         chips_host = QWidget()
         self.chips_lay = FlowLayout(chips_host)
         hv.addWidget(chips_host)
@@ -87,26 +87,10 @@ class MailScreen(QWidget):
         self.search_box.textChanged.connect(
             lambda _t: self._search_timer.start())
 
-        # dwell auto-read: a message kept open ~1s is read — arrow-keying past
-        # mail never marks it (design 2026-07-15)
-        self._dwell = QTimer(self)
-        self._dwell.setSingleShot(True)
-        self._dwell.setInterval(1000)
-        self._dwell.timeout.connect(self._dwell_fired)
-        self._dwell_mid = None
-        self._last_sel = object()   # sentinel: first populate() always arms
-
         state.mails_changed.connect(self.populate)
         self.populate()
 
     def populate(self):
-        if self.state.selected_mail != self._last_sel:
-            self._last_sel = self.state.selected_mail
-            self._dwell.stop()
-            sel = self.state.sel_mail()
-            if sel is not None and sel["unread"]:
-                self._dwell_mid = sel["id"]
-                self._dwell.start()
         self.unread_lab.setText(f"{self.state.unread_count()} unread")
         self.status_lab.setText(self._status_text())
         self._build_chips()
@@ -164,19 +148,17 @@ class MailScreen(QWidget):
         self._populate_pane()
 
     def _build_chips(self):
+        # No "All": each chip is its own inbox — "Inbox" is unlabeled INBOX
+        # mail, every label shows only its own (design 2026-07-16).
         clear_layout(self.chips_lay)
-        for name, scope in ([("All", "all"), ("Unread", "unread")]
+        for name, scope in ([("Inbox", "inbox"), ("Unread", "unread")]
                             + [(l, l) for l in self.state.mail_labels]):
-            color = (T.TEXT_SECONDARY if scope in ("all", "unread")
+            color = (T.TEXT_SECONDARY if scope in ("inbox", "unread")
                      else T.label_color(name))
             sel = self.state.mail_scope == scope
             self.chips_lay.addWidget(ClickChip(
                 name, color, color, bg=(color + "1f" if sel else None),
                 on_click=lambda s=scope: self.state.set_mail_scope(s)))
-
-    def _dwell_fired(self):
-        if self._dwell_mid and self.state.selected_mail == self._dwell_mid:
-            self.state.auto_read(self._dwell_mid)
 
     def _suggest(self):
         self.suggest_btn.setEnabled(False)
@@ -261,7 +243,10 @@ class MailScreen(QWidget):
             self.pane_lay.addWidget(
                 label("📎 " + ", ".join(attachments), 11, T.TEXT_DIM, sans=True))
 
-        body = label(m["body"], 13, T.TEXT_PRIMARY, sans=True, wrap=True)
+        # HTML when the mirror has it; plain text otherwise (older rows get
+        # their HTML lazily via emails.get the first time they're opened).
+        body = (HtmlBody(m["body_html"]) if m.get("body_html")
+                else label(m["body"], 13, T.TEXT_PRIMARY, sans=True, wrap=True))
         bw = QWidget()
         bl = vbox(bw, (0, 16, 0, 16), 0)
         bl.addWidget(body)

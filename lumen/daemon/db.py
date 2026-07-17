@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS emails (
     recipients TEXT,
     subject TEXT,
     body TEXT,                              -- plain text (text/plain part, else stripped HTML)
+    body_html TEXT,                         -- raw text/html part; NULL = never fetched, '' = message has none
     snippet TEXT,
     labels TEXT,                            -- comma-separated Gmail label ids
     received_at TEXT,                       -- RFC3339 UTC from internalDate
@@ -146,4 +147,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    # Hand-written additive migrations for DBs created before a column existed
+    # (CREATE IF NOT EXISTS never alters an existing table).
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(emails)")}
+    if "body_html" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN body_html TEXT")
     return conn

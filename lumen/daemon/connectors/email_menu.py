@@ -23,8 +23,12 @@ WINDOW_KEY = "gmail_bulk_window_months"
 LAST_SYNC_KEY = "gmail_last_sync"
 RUN_KEY = "gmail_rebaseline_run"
 
-_COLS = ("id", "thread_id", "sender", "recipients", "subject", "body", "snippet",
-         "labels", "received_at", "is_read", "attachments", "last_seen")
+_COLS = ("id", "thread_id", "sender", "recipients", "subject", "body",
+         "body_html", "snippet", "labels", "received_at", "is_read",
+         "attachments", "last_seen")
+# List/search responses skip body_html — 50 raw-HTML bodies per IPC page is
+# dead weight; the reading pane fetches one message's HTML via emails.get.
+_LIST_COLS = ", ".join(c for c in _COLS if c != "body_html")
 
 
 def _decode(data: str) -> str:
@@ -38,9 +42,10 @@ def _strip_html(html: str) -> str:
     return _re.sub(r"\s+", " ", unescape(text)).strip()
 
 
-def _walk_body(payload: dict) -> tuple[str, list[str]]:
+def _walk_body(payload: dict) -> tuple[str, str, list[str]]:
     """Depth-first: collect attachment filenames; body is the first text/plain
-    part, else the first text/html part stripped."""
+    part, else the first text/html part stripped; the raw HTML is kept too so
+    the reading pane can render the message properly."""
     plain, html, attachments = [], [], []
 
     def walk(part: dict) -> None:
@@ -57,19 +62,20 @@ def _walk_body(payload: dict) -> tuple[str, list[str]]:
 
     walk(payload)
     body = "\n".join(plain) if plain else _strip_html("\n".join(html))
-    return body, attachments
+    return body, "\n".join(html), attachments
 
 
 def normalize_message(raw: dict) -> dict:
     headers = {h["name"].lower(): h["value"]
                for h in raw.get("payload", {}).get("headers", [])}
-    body, attachments = _walk_body(raw.get("payload", {}))
+    body, body_html, attachments = _walk_body(raw.get("payload", {}))
     labels = list(raw.get("labelIds", []))
     received = datetime.fromtimestamp(
         int(raw.get("internalDate", 0)) / 1000, tz=timezone.utc)
     return {"id": raw["id"], "thread_id": raw.get("threadId"),
             "sender": headers.get("from", ""), "recipients": headers.get("to", ""),
             "subject": headers.get("subject", ""), "body": body,
+            "body_html": body_html,
             "snippet": raw.get("snippet", ""), "labels": labels,
             "received_at": received.isoformat(timespec="seconds"),
             "is_read": "UNREAD" not in labels, "attachments": attachments}
@@ -101,16 +107,21 @@ class EmailStore:
 
     def list_page(self, filter: str = "inbox", limit: int = 50, offset: int = 0,
                   label_id: str | None = None) -> list[dict]:
-        # "unread" is inbox-scoped: labeled mail has left the inbox (2026-07-15).
+        # Each label chip is its own inbox (design 2026-07-16): "inbox" is the
+        # default one — INBOX mail carrying no user label — so mail labeled
+        # upstream without being archived still leaves the default view.
+        # "unread" stays inbox-scoped (2026-07-15).
+        in_inbox = ("(',' || labels || ',') LIKE '%,INBOX,%' AND NOT EXISTS "
+                    "(SELECT 1 FROM gmail_labels gl WHERE gl.type = 'user' "
+                    "AND (',' || emails.labels || ',') LIKE '%,' || gl.id || ',%')")
         where, params = {
-            "inbox": ("WHERE (',' || labels || ',') LIKE '%,INBOX,%'", ()),
-            "unread": ("WHERE is_read = 0 "
-                       "AND (',' || labels || ',') LIKE '%,INBOX,%'", ()),
+            "inbox": (f"WHERE {in_inbox}", ()),
+            "unread": (f"WHERE is_read = 0 AND {in_inbox}", ()),
             "label": ("WHERE (',' || labels || ',') LIKE ?", (f"%,{label_id},%",)),
             "all": ("", ()),
         }[filter]
         rows = self._conn.execute(
-            f"SELECT * FROM emails {where} ORDER BY received_at DESC, id "
+            f"SELECT {_LIST_COLS} FROM emails {where} ORDER BY received_at DESC, id "
             f"LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         return [self._to_dict(r) for r in rows]
 
@@ -119,8 +130,9 @@ class EmailStore:
         q = " ".join(f'"{t}"' for t in (query or "").replace('"', " ").split())
         if not q:
             return []
+        cols = ", ".join(f"e.{c}" for c in _COLS if c != "body_html")
         rows = self._conn.execute(
-            "SELECT e.* FROM emails_fts f JOIN emails e ON e.rowid = f.rowid "
+            f"SELECT {cols} FROM emails_fts f JOIN emails e ON e.rowid = f.rowid "
             "WHERE emails_fts MATCH ? ORDER BY bm25(emails_fts) LIMIT ?",
             (q, limit)).fetchall()
         return [self._to_dict(r) for r in rows]
@@ -163,6 +175,11 @@ class EmailStore:
             self._conn.execute(
                 "UPDATE emails SET labels = ?, is_read = ? WHERE id = ?",
                 (",".join(labels), int("UNREAD" not in labels), mid))
+
+    def set_body_html(self, mid: str, html: str) -> None:
+        with self._conn:
+            self._conn.execute("UPDATE emails SET body_html = ? WHERE id = ?",
+                               (html, mid))
 
     def set_labels(self, rows: list[dict]) -> None:
         with self._conn:
@@ -445,6 +462,28 @@ class GmailSync:
             except Exception:
                 log.exception("gmail poll iteration failed")
             await asyncio.sleep(interval)
+
+    async def fetch_html(self, mid: str) -> str | None:
+        """Lazy HTML backfill: mail mirrored before the body_html column gets
+        its HTML on first open — one read-scope fetch, cached forever ('' when
+        the message simply has no HTML part)."""
+        try:
+            service = self._service_factory()
+        except Exception:
+            log.exception("could not build gmail service")
+            return None
+        if service is None:
+            return None
+        try:
+            raw = await asyncio.to_thread(
+                lambda: service.users().messages().get(
+                    userId="me", id=mid, format="full").execute())
+        except Exception:
+            log.exception("gmail html fetch failed for %s", mid)
+            return None
+        _body, html, _atts = _walk_body(raw.get("payload", {}))
+        self._store.set_body_html(mid, html)
+        return html
 
     async def _modify(self, mid: str, body: dict) -> bool:
         """Router (Task 9) only calls archive/mark_read AFTER a user confirm."""

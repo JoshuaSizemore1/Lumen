@@ -6,6 +6,7 @@ the regex hints below — cheap heuristics, no LLM pre-pass."""
 import asyncio
 import logging
 import re
+import sqlite3
 import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -762,7 +763,15 @@ class Router:
                                             int(payload.get("limit", 50))))}}
             elif type_ == "emails.get":
                 row = self._mail_store.get(str(payload.get("id", "")))
-                yield {"error": "email not found"} if row is None else {"result": row}
+                if row is None:
+                    yield {"error": "email not found"}
+                    return
+                if row.get("body_html") is None:
+                    # Mirrored before the body_html column: backfill this one
+                    # message now. Failure just falls back to the plain body.
+                    await self._mail.fetch_html(row["id"])
+                    row = self._mail_store.get(row["id"])
+                yield {"result": row}
             elif type_ == "emails.unread":
                 yield {"result": {
                     "emails": self._mail_store.unread(int(payload.get("limit", 10))),
@@ -975,9 +984,16 @@ class Router:
                     tools.append(ev["tool_used"])
                 yield ev
         if self._conv is not None and conv_id is not None and (acc or tools):
-            self._conv.add_message(conv_id, "assistant", "".join(acc), tools or None)
-            if tools:                         # this thread is now tool-shaped for its follow-ups
-                self._conv.mark_tool_engaged(conv_id)
+            try:
+                self._conv.add_message(conv_id, "assistant", "".join(acc),
+                                       tools or None)
+                if tools:                     # this thread is now tool-shaped for its follow-ups
+                    self._conv.mark_tool_engaged(conv_id)
+            except sqlite3.IntegrityError:
+                # Thread deleted mid-stream (sidebar ✕ during a reply): the
+                # user already saw the streamed text — nothing left to store,
+                # and it must not error an otherwise-finished stream.
+                pass
         if not skip_log:
             kind = "correction" if CORRECTION_HINT.search(message) else "query"
             self._log(subsystem, kind, {"message": message[:300], "tools": tools or None})

@@ -301,7 +301,7 @@ def test_norm_mail_carries_label_names():
 
 def test_sample_mode_scope_and_labels(qtbot):
     st = AppState()
-    assert st.mail_scope == "all"
+    assert st.mail_scope == "inbox"
     assert st.mail_labels        # derived from sample rows' label_names
     seen = []
     st.mails_changed.connect(lambda: seen.append(1))
@@ -328,7 +328,7 @@ def test_scope_resets_when_label_vanishes(qtbot):
     st = AppState(data=data)
     st.mail_scope = "Bills"
     st._set_mails({"emails": [], "labels": []})
-    assert st.mail_scope == "all"
+    assert st.mail_scope == "inbox"
 
 
 def test_auto_read_flips_locally_and_hits_daemon(qtbot):
@@ -714,6 +714,24 @@ def test_chat_sidebar_rows_have_delete_affordance(qtbot):
     assert len(xs) == 1
 
 
+def test_chat_sidebar_x_click_deletes_without_opening(qtbot):
+    # A real mouse click on ✕ must fire the delete and must NOT leak through
+    # to the row underneath (which would open the chat instead).
+    from PyQt6.QtCore import Qt
+    from lumen.ui_v2.screens.chat import ChatScreen
+    from lumen.ui_v2.widgets import ClickLabel
+    data = FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=FakeClient())
+    qtbot.addWidget(sc)
+    data.cb_for("conversations.list")([{"id": 3, "title": "q", "updated_at": "x"}])
+    x = next(w for w in sc.list_host.findChildren(ClickLabel) if w.text() == "✕")
+    data.requests.clear()
+    qtbot.mouseClick(x, Qt.MouseButton.LeftButton)
+    kinds = [t for t, _p, _cb in data.requests]
+    assert "conversations.delete" in kinds
+    assert "conversations.get" not in kinds
+
+
 def test_chat_delete_open_thread_resets_and_reloads(qtbot):
     from lumen.ui_v2.screens.chat import ChatScreen
     data, chat = FakeClient(), FakeClient()
@@ -811,15 +829,49 @@ def test_archive_result_toasts_and_refreshes(qtbot):
     assert data.requests[-1][0] == "emails.list"      # refresh after action
 
 
-def test_select_mail_no_longer_marks_read_locally(qtbot):
+def test_select_mail_marks_read_but_initial_load_does_not(qtbot):
     data = FakeClient()
     st = AppState(data=data)
     st.refresh_mails()
     data.cb_for("emails.list")({"emails": [daemon_mail_row()], "connected": True,
                                 "syncing": False, "last_sync": None,
                                 "counts": {"total": 1, "unread": 1}})
-    st.select_mail("m1")
-    assert st.mails[0]["unread"] is True             # decided gate: no silent flip
+    # _set_mails auto-selected m1 programmatically — that must NOT mark it
+    assert st.mails[0]["unread"] is True
+    data.requests.clear()
+    st.select_mail("m1")                # a real click: open == read
+    assert st.mails[0]["unread"] is False
+    assert data.requests[0][0] == "emails.auto_read"
+
+
+def test_body_html_fetched_once_on_open(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.refresh_mails()
+    data.cb_for("emails.list")({"emails": [daemon_mail_row(), daemon_mail_row(2)],
+                                "connected": True, "syncing": False,
+                                "last_sync": None, "counts": {"total": 2}})
+    # initial load auto-selected m1 → pane wants its HTML right away
+    assert ("emails.get", {"id": "m1"}) in [(t, p) for t, p, _cb in data.requests]
+    data.cb_for("emails.get")({**daemon_mail_row(), "body_html": "<p>rich</p>"})
+    assert st.mails[0]["body_html"] == "<p>rich</p>"
+    data.requests.clear()
+    st.select_mail("m1")                       # already fetched: no re-request
+    assert "emails.get" not in [t for t, _p, _cb in data.requests]
+    st.select_mail("m2")                       # new open: fetch its HTML
+    assert ("emails.get", {"id": "m2"}) in [(t, p) for t, p, _cb in data.requests]
+
+
+def test_mail_pane_renders_html_body(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import HtmlBody
+    state = AppState()
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    assert not screen.findChildren(HtmlBody)   # sample mail: plain text
+    state.sel_mail()["body_html"] = "<p>rich <b>text</b></p>"
+    state.mails_changed.emit()
+    assert screen.findChildren(HtmlBody)
 
 
 def test_mail_search_box_debounces_into_state(qtbot, monkeypatch):
@@ -875,7 +927,7 @@ def test_mail_chip_row_and_pills_sample_mode(qtbot):
     qtbot.addWidget(screen)
     chips = [screen.chips_lay.itemAt(i).widget().text()
              for i in range(screen.chips_lay.count())]
-    assert chips == ["All", "Unread", "Health", "Newsletters"]
+    assert chips == ["Inbox", "Unread", "Health", "Newsletters"]
     assert "Health" in [c.text() for c in screen.findChildren(Chip)]  # row pill
 
 
@@ -891,25 +943,31 @@ def test_mail_chip_click_sets_scope(qtbot, monkeypatch):
     assert scopes == ["Health"]
 
 
-def test_mail_dwell_auto_reads_selected_unread(qtbot, monkeypatch):
+def test_mail_row_click_selects_and_marks_read(qtbot):
+    from PyQt6.QtCore import Qt
     from lumen.ui_v2.screens.mail import MailScreen
-    state = AppState()
-    calls = []
-    monkeypatch.setattr(state, "auto_read", calls.append)
-    screen = MailScreen(state)      # m1 selected & unread → dwell armed
-    qtbot.addWidget(screen)
-    assert screen._dwell.isActive()
-    screen._dwell_fired()
-    assert calls == ["m1"]
-
-
-def test_mail_dwell_not_armed_for_read_mail(qtbot):
-    from lumen.ui_v2.screens.mail import MailScreen
-    state = AppState()
+    from lumen.ui_v2.widgets import ClickRow
+    state = AppState()              # sample mode: m1 selected, others unread too
     screen = MailScreen(state)
     qtbot.addWidget(screen)
-    state.select_mail("m5")         # m5 is read → no dwell
-    assert not screen._dwell.isActive()
+    target = next(m for m in state.mails
+                  if m["unread"] and m["id"] != state.selected_mail)
+    rows = screen.findChildren(ClickRow)
+    idx = [m["id"] for m in state.mails].index(target["id"])
+    qtbot.mouseClick(rows[idx], Qt.MouseButton.LeftButton)
+    assert state.selected_mail == target["id"]
+    assert target["unread"] is False        # open == read
+
+
+def test_mail_screen_open_does_not_auto_read(qtbot):
+    # Building the screen (tab open / initial load) must never mark anything
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    before = state.unread_count()
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    qtbot.wait(1200)                # old dwell interval — nothing may fire
+    assert state.unread_count() == before
 
 
 def test_mail_suggest_button_busy_state(qtbot, monkeypatch):

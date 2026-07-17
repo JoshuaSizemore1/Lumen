@@ -80,6 +80,8 @@ def _norm_mail(r: dict) -> dict:
             "subj": r.get("subject") or "(no subject)",
             "preview": r.get("snippet", ""), "time": time_s, "date": date_s,
             "unread": not r.get("is_read", True), "body": r.get("body", ""),
+            # list rows omit body_html (kept light); None = fetch on open
+            "body_html": r.get("body_html"),
             "labels": r.get("labels", []), "label_names": r.get("label_names", []),
             "attachments": r.get("attachments", [])}
 
@@ -149,7 +151,7 @@ class AppState(QObject):
         self.mail_syncing = False
         self.mail_last_sync = None
         self.selected_mail = "m1"
-        self.mail_scope = "all"        # "all" | "unread" | a label name
+        self.mail_scope = "inbox"      # "inbox" | "unread" | a label name
         self.mail_labels: list[str] = []
         self.mail_suggestions: dict[str, str] = {}
 
@@ -380,10 +382,29 @@ class AppState(QObject):
                     self.mails[0] if self.mails else None)
 
     def select_mail(self, mid: str):
-        # Selecting only selects: read-state changes are explicit, confirmed
-        # writes (decided 2026-07-12) — never a side effect of browsing.
+        # Opening a message marks it read, Gmail-style (decided 2026-07-16 —
+        # replaced the 1s dwell timer; every selection here is a deliberate
+        # click, there is no key-browsing to protect). Programmatic selection
+        # in _set_mails never marks anything.
         self.selected_mail = mid
+        self.auto_read(mid)
+        self.fetch_body_html(mid)
         self.mails_changed.emit()
+
+    def fetch_body_html(self, mid: str) -> None:
+        """List rows arrive without HTML (kept light); the reading pane pulls
+        one message's HTML on open. None stays None on failure → retried on
+        the next open; '' means the message has no HTML part."""
+        m = next((x for x in self.mails if x["id"] == mid), None)
+        if m is None or m.get("body_html") is not None or self._data is None:
+            return
+
+        def handle(row):
+            m2 = next((x for x in self.mails if x["id"] == mid), None)
+            if m2 is not None:
+                m2["body_html"] = (row or {}).get("body_html")
+                self.mails_changed.emit()
+        self._data.request("emails.get", {"id": mid}, handle)
 
     def _set_mails(self, result: dict) -> None:
         # emails.search responses carry only {"emails": [...]} — no status
@@ -395,14 +416,16 @@ class AppState(QObject):
         self.mail_syncing = result.get("syncing", self.mail_syncing)
         self.mail_last_sync = result.get("last_sync", self.mail_last_sync)
         self.mail_labels = result.get("labels", self.mail_labels)
-        if (self.mail_scope not in ("all", "unread")
+        if (self.mail_scope not in ("inbox", "unread")
                 and self.mail_scope not in self.mail_labels):
-            self.mail_scope = "all"   # scope label vanished upstream
+            self.mail_scope = "inbox"   # scope label vanished upstream
         counts = result.get("counts")
         if counts:
             self.mail_total = counts.get("total", self.mail_total)
         if self.selected_mail not in {m["id"] for m in self.mails}:
             self.selected_mail = self.mails[0]["id"] if self.mails else None
+        if self.selected_mail is not None:
+            self.fetch_body_html(self.selected_mail)   # pane shows it right away
         self.mails_changed.emit()
 
     def set_mail_scope(self, scope: str) -> None:
@@ -416,10 +439,8 @@ class AppState(QObject):
             self.mails_changed.emit()   # sample mode: chips reflect selection only
 
     def _scope_payload(self) -> dict:
-        if self.mail_scope == "unread":
-            return {"filter": "unread"}
-        if self.mail_scope == "all":
-            return {"filter": "inbox"}
+        if self.mail_scope in ("inbox", "unread"):
+            return {"filter": self.mail_scope}
         return {"filter": "label", "label": self.mail_scope}
 
     def refresh_mails(self) -> None:
@@ -458,13 +479,12 @@ class AppState(QObject):
                                self._mail_action_done)
 
     def auto_read(self, mid: str) -> None:
-        """Dwell-timer read receipt: silent, ungated, flips the row locally
-        so the dot clears immediately (design 2026-07-15)."""
+        """Open-as-read receipt: silent, ungated, flips the row locally so
+        the dot clears immediately. Callers emit mails_changed themselves."""
         m = next((x for x in self.mails if x["id"] == mid), None)
         if m is None or not m["unread"]:
             return
         m["unread"] = False
-        self.mails_changed.emit()
         if self._data is not None:
             self._data.request("emails.auto_read", {"id": mid}, lambda _r: None)
 

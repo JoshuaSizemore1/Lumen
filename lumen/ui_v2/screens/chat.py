@@ -73,10 +73,14 @@ class ChatScreen(QWidget):
             # elide, don't overflow: a long title must not push ✕ off-sidebar
             rl.addWidget(ElideLabel(r.get("title") or "Untitled", 12,
                                     T.TEXT_SECONDARY), 1)
-            rl.addWidget(ClickLabel(
-                "✕", 12, T.TEXT_FAINT,
-                lambda cid=r["id"]: self.delete_conversation(cid),
-                "Delete chat"))
+            # a real hit target, not a 12px glyph — a missed ✕ falls through
+            # to the row and opens the chat instead of deleting it
+            x = ClickLabel("✕", 13, T.TEXT_DIM,
+                           lambda cid=r["id"]: self.delete_conversation(cid),
+                           "Delete chat")
+            x.setFixedSize(22, 22)
+            x.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            rl.addWidget(x)
             self.list_lay.addWidget(row)
         self.list_lay.addStretch(1)
 

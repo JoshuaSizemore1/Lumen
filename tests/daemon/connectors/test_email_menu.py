@@ -91,6 +91,21 @@ def test_list_page_label_scope_and_present_ids(tmp_path):
     assert store.present_label_ids() == {"INBOX", "UNREAD", "Label_7"}
 
 
+def test_inbox_excludes_user_labeled_mail(tmp_path):
+    # Design 2026-07-16: each label chip is its own inbox — the default
+    # "inbox" view is INBOX mail carrying no user label, so mail labeled in
+    # Gmail without being archived still leaves the default view.
+    store = make_store(tmp_path)
+    store.set_labels([{"id": "Label_7", "name": "Bills", "type": "user"},
+                      {"id": "IMPORTANT", "name": "IMPORTANT", "type": "system"}])
+    store.upsert([msg(1),                                       # plain inbox
+                  msg(2, labels=["INBOX", "UNREAD", "Label_7"]),  # labeled upstream
+                  msg(3, labels=["INBOX", "UNREAD", "IMPORTANT"])])
+    assert [m["id"] for m in store.list_page("inbox")] == ["m3", "m1"]
+    assert [m["id"] for m in store.list_page("unread")] == ["m3", "m1"]
+    assert [m["id"] for m in store.list_page("label", label_id="Label_7")] == ["m2"]
+
+
 def test_unread_filter_is_inbox_scoped(tmp_path):
     # Design 2026-07-15: labeled mail has left the inbox — "unread" means
     # INBOX + UNREAD, so rule-filed newsletters stop nagging chat/briefing.
@@ -169,6 +184,30 @@ def test_normalize_nested_parts_and_read_state():
         {"mimeType": "text/plain", "filename": "", "body": {"data": b64("deep")}}]}
     m = normalize_message(raw_msg(parts=[inner], labels=("INBOX",)))
     assert m["body"] == "deep" and m["is_read"] is True
+
+
+def test_normalize_keeps_raw_html():
+    parts = [
+        {"mimeType": "text/html", "filename": "",
+         "body": {"data": b64("<p>rich <b>text</b></p>")}},
+        {"mimeType": "text/plain", "filename": "",
+         "body": {"data": b64("plain wins")}},
+    ]
+    m = normalize_message(raw_msg(parts=parts))
+    assert m["body"] == "plain wins"
+    assert m["body_html"] == "<p>rich <b>text</b></p>"
+    # '' (not NULL) when the message simply has no HTML part
+    assert normalize_message(raw_msg(body_data="just text"))["body_html"] == ""
+
+
+def test_body_html_stored_but_kept_out_of_lists(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1, body_html="<p>hi</p>")])
+    assert store.get("m1")["body_html"] == "<p>hi</p>"
+    assert "body_html" not in store.list_page("inbox")[0]      # lists stay light
+    assert "body_html" not in store.search("subject")[0]
+    store.set_body_html("m1", "<div>new</div>")
+    assert store.get("m1")["body_html"] == "<div>new</div>"
 
 
 # GmailSync tests (Task 5)
@@ -619,3 +658,30 @@ def test_involving_escapes_like_wildcards(tmp_path):
     store = make_store(tmp_path)
     store.upsert([msg(1, sender="A <a_b@x.com>"), msg(2, sender="B <axb@x.com>")])
     assert [m["id"] for m in store.involving("a_b@x.com")] == ["m1"]
+
+
+async def test_fetch_html_backfills_legacy_rows(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1)])                       # pre-column row: NULL body_html
+    assert store.get("m1")["body_html"] is None
+    full = {"m1": raw_msg(parts=[
+        {"mimeType": "text/html", "filename": "",
+         "body": {"data": b64("<i>hi</i>")}}]) | {"id": "m1"}}
+    _store, sync = make_sync(tmp_path, FakeService({}, full))
+    sync._store = store
+    assert await sync.fetch_html("m1") == "<i>hi</i>"
+    assert store.get("m1")["body_html"] == "<i>hi</i>"
+
+
+async def test_fetch_html_failure_leaves_null(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1)])
+
+    class Dead:
+        def users(self):
+            raise RuntimeError("offline")
+
+    sync = GmailSync(store, GoogleConfig(), SyncConfig(),
+                     service_factory=lambda: Dead())
+    assert await sync.fetch_html("m1") is None
+    assert store.get("m1")["body_html"] is None   # retried on a later open

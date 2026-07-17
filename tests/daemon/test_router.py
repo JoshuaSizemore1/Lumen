@@ -104,7 +104,7 @@ class FakeMailSync:
 
     def __init__(self):
         self.archived, self.marked, self.synced = [], [], 0
-        self.labeled = []
+        self.labeled, self.html_fetched = [], []
 
     async def apply_label(self, mid, label_name):
         self.labeled.append((mid, label_name))
@@ -124,6 +124,10 @@ class FakeMailSync:
     async def mark_read(self, mid, read):
         self.marked.append((mid, read))
         return True
+
+    async def fetch_html(self, mid):
+        self.html_fetched.append(mid)
+        return "<p>hi</p>"
 
 
 async def collect(router, type_, payload):
@@ -204,6 +208,23 @@ async def test_followup_threads_prior_turns_into_prompt(tmp_path):
     assert "first q" in contents and "first a" in contents   # history seen by the model
     assert llm.messages[0]["role"] == "system"               # identity still leads
     assert llm.messages[-1] == {"role": "user", "content": "follow up"}
+
+
+async def test_thread_deleted_mid_stream_finishes_clean(tmp_path):
+    # Sidebar ✕ during a running reply: the finished stream must not error
+    # just because there is no thread left to store the assistant turn in.
+    conv = conv_store(tmp_path)
+    cid = conv.create("q")
+    conv.add_message(cid, "user", "q")
+    router = Router(FakeLLM(chunks=("a", "b")), FakeStore(), conversations=conv)
+    out = []
+    async for ev in router.handle("chat", {"message": "more",
+                                           "conversation_id": cid}):
+        out.append(ev)
+        conv.delete(cid)                  # lands while the reply streams
+    assert {"done": True} in out
+    assert not any("error" in o for o in out)
+    assert conv.get(cid) is None          # gone, and nothing resurrected it
 
 
 async def test_no_conversation_id_reemitted_for_existing_thread(tmp_path):
@@ -1811,6 +1832,17 @@ async def test_emails_list_search_get_unread():
     assert "error" in out[-1]
     out = await collect(router, "emails.unread", {})
     assert len(out[-1]["result"]["emails"]) == 1
+
+
+async def test_emails_get_lazily_backfills_html():
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    await collect(router, "emails.get", {"id": "m1"})   # no body_html key = NULL
+    assert sync.html_fetched == ["m1"]
+    store.rows[0]["body_html"] = ""                     # backfilled: has no HTML
+    out = await collect(router, "emails.get", {"id": "m1"})
+    assert sync.html_fetched == ["m1"]                  # cached — no second fetch
+    assert out[-1]["result"]["id"] == "m1"
 
 
 async def test_mail_refresh_triggers_sync():

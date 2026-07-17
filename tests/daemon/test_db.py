@@ -89,3 +89,23 @@ def test_emails_schema_and_fts_triggers(tmp_path):
     conn.execute("DELETE FROM emails WHERE id = 'm1'")
     conn.commit()
     assert not conn.execute("SELECT rowid FROM emails_fts WHERE emails_fts MATCH 'engine'").fetchall()
+
+
+def test_connect_adds_body_html_to_legacy_emails_table(tmp_path):
+    # DBs created before the body_html column get it via the hand-written
+    # additive migration (CREATE IF NOT EXISTS never alters existing tables).
+    import sqlite3
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "CREATE TABLE emails (id TEXT PRIMARY KEY, thread_id TEXT, sender TEXT,"
+        " recipients TEXT, subject TEXT, body TEXT, snippet TEXT, labels TEXT,"
+        " received_at TEXT, is_read INTEGER,"
+        " attachments TEXT NOT NULL DEFAULT '[]', last_seen TEXT)")
+    raw.execute("INSERT INTO emails (id) VALUES ('m1')")
+    raw.commit()
+    raw.close()
+    conn = db.connect(path)
+    row = conn.execute("SELECT body_html FROM emails WHERE id = 'm1'").fetchone()
+    assert row["body_html"] is None            # NULL = never fetched
+    conn.close()

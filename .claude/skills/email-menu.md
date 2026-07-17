@@ -65,12 +65,15 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
 
 ## Decided gates (2026-07-12, revised 2026-07-15)
 - Bulk sync window: 6 months, configurable via `config.toml`'s `gmail_window_months` (default 6).
-- ~~Browsing the mail menu never changes read state~~ **Reversed 2026-07-15**
-  (user decision, `new-features.md`): a message kept open ~1s is marked read —
-  locally at once, propagated to Gmail via a silent idempotent
-  `emails.auto_read` one-shot. Arrow-keying past mail never marks it (the
-  dwell timer re-arms on every selection change). Explicit mark read/unread is
-  also ungated now — consistency with the silent path.
+- ~~Browsing the mail menu never changes read state~~ **Reversed 2026-07-15,
+  simplified 2026-07-16** (user decisions): opening a message marks it read,
+  Gmail-style — the row flips locally at once, propagated to Gmail via a
+  silent idempotent `emails.auto_read` one-shot. The 1s dwell timer was
+  removed 2026-07-16: the list has no keyboard browsing, so every selection
+  is a deliberate click and the delay only read as "auto-read is broken".
+  Programmatic selection (`_set_mails` picking the first row) never marks
+  anything. Explicit mark read/unread is also ungated — consistency with the
+  silent path.
 - Archive still confirms. Delete is still out of scope.
 - **Labeling = moving** (Gmail semantics the user chose): applying a label
   also removes `INBOX`, locally and upstream. There is no keep-in-inbox+label
@@ -99,5 +102,26 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
   NOTHING; each suggestion is a chip the user taps to apply.
 - **Unread is inbox-scoped everywhere** — labeled mail has left the inbox, so
   it no longer counts as unread anywhere the UI shows a count.
-- Default list view = `INBOX` label only; filter chips (All · Unread · one per
-  user label) re-query the local DB scoped by label id.
+- **Chips are separate inboxes (2026-07-16, user decision)** — there is no
+  "All" chip. The default **Inbox** chip = `INBOX` mail carrying **no user
+  label** (so mail labeled upstream in Gmail without being archived still
+  leaves the default view); Unread applies the same exclusion; each label chip
+  shows only its own mail. All chips re-query the local DB (`list_page`); the
+  store-level `"all"` filter still exists for internal callers.
+
+## HTML bodies (built 2026-07-16)
+- `emails.body_html` stores the raw `text/html` part alongside the stripped
+  plain `body` (which search/LLM paths keep using). `''` = message has no HTML
+  part; `NULL` = row predates the column (hand-written additive migration in
+  `db.py`) and gets a **lazy backfill**: `emails.get` fetches that one message
+  (read scope, `format=full`) on first open and caches it forever. Failure
+  leaves `NULL` so a later open retries.
+- **List/search IPC responses never carry `body_html`** (`_LIST_COLS`) — 50
+  raw HTML bodies per page is dead weight; the UI pulls one message's HTML via
+  `emails.get` when it's opened (and re-uses it until the row is replaced).
+- Rendering is `QTextBrowser` (`widgets.HtmlBody`), not WebEngine — no
+  Chromium process on an iGPU/power budget. It cannot run scripts and never
+  fetches remote resources (privacy: no tracking-pixel hits); links open in
+  the system browser; body sits on a white card since HTML mail assumes a
+  light background; widget height follows the document so the reading pane's
+  outer scroll does all the scrolling.
