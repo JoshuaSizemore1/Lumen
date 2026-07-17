@@ -2126,12 +2126,25 @@ def test_mail_hint_vocabulary():
 def test_mail_context_lines_and_markers():
     unread = [{"sender": "Ada <a@x.com>", "subject": "Engines",
                "received_at": "2026-07-12T10:00:00+00:00"}]
-    ctx = mail_context(unread, {"total": 40, "unread": 1}, True)
+    ctx = mail_context(unread, {"total": 40, "unread": 1}, True, has_tool=True)
     assert "Ada" in ctx and "Engines" in ctx and "search_email" in ctx
     empty = mail_context([], {"total": 40, "unread": 0}, True)
     assert "no unread" in empty.lower()
     off = mail_context([], {"total": 0, "unread": 0}, False)
     assert "not connected" in off.lower()
+
+
+def test_mail_context_without_tool_never_names_search_email():
+    # Honesty rule (live fabrication 2026-07-17): a model told about a tool it
+    # doesn't hold role-plays using it. No tool attached → no tool mentioned.
+    unread = [{"received_at": "2026-07-12T09:30:00", "sender": "Ada <a@x.com>",
+               "subject": "Engines"}]
+    for kwargs in ({"brief": False}, {"brief": True}):
+        ctx = mail_context(unread, {"total": 40, "unread": 1}, True, **kwargs)
+        assert "search_email" not in ctx
+    with_tool = mail_context(unread, {"total": 40, "unread": 1}, True,
+                             has_tool=True)
+    assert "search_email" in with_tool
 
 
 def test_identity_owns_email():

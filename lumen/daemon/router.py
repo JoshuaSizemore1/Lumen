@@ -334,27 +334,33 @@ def calendar_context(events: list[dict], now: datetime, window_end: date) -> str
 
 
 def mail_context(unread: list[dict], counts: dict, connected: bool,
-                 syncing: bool = False, brief: bool = False) -> str:
+                 syncing: bool = False, brief: bool = False,
+                 has_tool: bool = False) -> str:
     """System-message context: unread summary from the local mirror, explicit
-    empty/not-connected/still-syncing markers, and a pointer at search_email
-    for the rest. `brief` drops the enumerated unread rows and keeps only the
-    counts + search_email pointer — used when mail context rides along on a
-    (non-mail-shaped) tool loop purely as grounding, so a file request doesn't
-    drag the whole unread list into the prompt."""
+    empty/not-connected/still-syncing markers. `brief` drops the enumerated
+    unread rows and keeps only the counts — used when mail context rides along
+    on a (non-mail-shaped) tool loop purely as grounding, so a file request
+    doesn't drag the whole unread list into the prompt. `has_tool` marks that
+    search_email is attached to THIS request; only then may the text name it —
+    a model told about a tool it doesn't hold role-plays using it (live
+    fabrication 2026-07-17)."""
     if not connected:
         return ("Gmail is not connected yet — the user needs to run the one-time "
                 "Google setup. Say so if asked about email; do not invent messages.")
     if brief:
         head = (f"The user's mailbox mirror holds {counts['total']} messages, "
-                f"{counts['unread']} unread — use the search_email tool to read "
-                "any of them.")
+                f"{counts['unread']} unread"
+                + (" — use the search_email tool to read any of them."
+                   if has_tool else "."))
         return (head if not syncing else
                 "The first mailbox sync has not finished — the mirror is "
                 "incomplete; missing messages are not absent, just not pulled "
                 "yet.\n" + head)
     lines = [f"The user's mailbox mirror holds {counts['total']} messages, "
-             f"{counts['unread']} unread. Unread messages (only these are shown — "
-             "use the search_email tool for anything else):"]
+             f"{counts['unread']} unread. Unread messages "
+             + ("(only these are shown — use the search_email tool for "
+                "anything else):" if has_tool
+                else "(only these are shown in this conversation):")]
     if syncing:
         lines.insert(0, "The first mailbox sync has not finished — the mirror is "
                         "incomplete. Say so if asked about email; missing "
