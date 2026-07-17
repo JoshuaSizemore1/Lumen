@@ -82,7 +82,7 @@ def stop_daemon(proc) -> None:
 
 
 def main() -> None:
-    from lumen.ui.single_instance import SOCKET_NAME, try_send
+    from lumen.ui_v2.single_instance import SOCKET_NAME, try_send
     toggle = "--toggle-launcher" in sys.argv
     if try_send(SOCKET_NAME, "toggle-launcher" if toggle else "show"):
         return   # already running — it handled the command; its daemon is its own

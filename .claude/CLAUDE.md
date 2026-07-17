@@ -17,9 +17,10 @@ lumen/
     llm/          # Ollama client, model routing, idle/keep-alive config
     connectors/   # gmail.py, gcal.py, todos.py — thin sync + query interfaces
     router.py     # tool-call vs direct-answer decision, dispatch
-  ui/
-    tray.py        # PyQt6 tray icon + menu
-    launcher.py     # hotkey-invoked quick-launcher (command palette style)
+  ui_v2/
+    app.py         # PyQt6 entry: tray, single-instance guard, hotkey launcher overlay
+    screens/       # chat, dashboard, calendar, todos, books, mail, settings
+    daemon_client.py  # IPC client (moved here 2026-07-17 when the dead ui/ tree was removed)
   design/          # Claude Design output — HTML/React mockups, reference only
   config.toml
   .env             # secrets, gitignored

@@ -1,4 +1,4 @@
-from lumen.ui.single_instance import InstanceServer, try_send
+from lumen.ui_v2.single_instance import InstanceServer, try_send
 
 
 def test_second_instance_hands_off_command(qtbot):

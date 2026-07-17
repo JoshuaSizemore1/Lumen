@@ -12,8 +12,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QDialog
 
 from lumen.daemon.config import load_config
-from lumen.ui.daemon_client import DaemonClient
-from lumen.ui.single_instance import SOCKET_NAME, InstanceServer, try_send
+from lumen.ui_v2.daemon_client import DaemonClient
+from lumen.ui_v2.single_instance import SOCKET_NAME, InstanceServer, try_send
 
 from . import main as main_mod
 from . import theme as T

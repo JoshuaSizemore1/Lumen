@@ -69,7 +69,7 @@ def test_stop_daemon_noop_when_already_dead():
 
 def test_main_forwards_to_running_instance(monkeypatch):
     sent = []
-    monkeypatch.setattr("lumen.ui.single_instance.try_send",
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
                         lambda name, cmd: sent.append(cmd) or True)
     launch.main()
     assert sent == ["show"]
@@ -78,7 +78,7 @@ def test_main_forwards_to_running_instance(monkeypatch):
 def test_main_starts_ui_then_stops_spawned_daemon(monkeypatch):
     events = []
     proc = FakeProc()
-    monkeypatch.setattr("lumen.ui.single_instance.try_send", lambda n, c: False)
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send", lambda n, c: False)
     monkeypatch.setattr(launch, "daemon_alive", lambda p: False)
     monkeypatch.setattr(launch, "spawn_daemon",
                         lambda: events.append("spawn") or proc)
@@ -95,7 +95,7 @@ def test_main_starts_ui_then_stops_spawned_daemon(monkeypatch):
 def test_main_stops_daemon_even_when_ui_exits_nonzero(monkeypatch):
     stops = []
     proc = FakeProc()
-    monkeypatch.setattr("lumen.ui.single_instance.try_send", lambda n, c: False)
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send", lambda n, c: False)
     monkeypatch.setattr(launch, "daemon_alive", lambda p: False)
     monkeypatch.setattr(launch, "spawn_daemon", lambda: proc)
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: True)
@@ -109,7 +109,7 @@ def test_main_stops_daemon_even_when_ui_exits_nonzero(monkeypatch):
 
 def test_main_leaves_external_daemon_alone(monkeypatch):
     events = []
-    monkeypatch.setattr("lumen.ui.single_instance.try_send", lambda n, c: False)
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send", lambda n, c: False)
     monkeypatch.setattr(launch, "daemon_alive", lambda p: True)
     monkeypatch.setattr(launch, "spawn_daemon", lambda: events.append("spawn"))
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: events.append("stop"))
@@ -121,7 +121,7 @@ def test_main_leaves_external_daemon_alone(monkeypatch):
 def test_main_aborts_when_daemon_never_comes_up(monkeypatch):
     stops = []
     proc = FakeProc()
-    monkeypatch.setattr("lumen.ui.single_instance.try_send", lambda n, c: False)
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send", lambda n, c: False)
     monkeypatch.setattr(launch, "daemon_alive", lambda p: False)
     monkeypatch.setattr(launch, "spawn_daemon", lambda: proc)
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: False)

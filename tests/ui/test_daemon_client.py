@@ -2,7 +2,7 @@ import json
 
 from PyQt6.QtNetwork import QLocalServer
 
-from lumen.ui.daemon_client import DaemonClient
+from lumen.ui_v2.daemon_client import DaemonClient
 
 
 def test_send_and_stream(qtbot, tmp_path):
