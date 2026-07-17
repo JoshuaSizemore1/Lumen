@@ -114,6 +114,12 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
   scope (Inbox/Sent/label), refresh is a labeled "↻ Refresh" button on the
   search row, and the screen re-queries the mirror on every `showEvent` so
   rule/chat-created labels appear without a manual refresh (todo-fixes #10d).
+- **Auto-refresh (2026-07-17, new-features item 5)** — app launch and entering
+  the Mail tab trigger a real Gmail delta-sync via `AppState.sync_inbox()`,
+  debounced to one per minute (manual ↻ counts toward the window; inside it
+  the tab-open falls back to the local mirror re-read). While the tab is
+  visible a 5-min UI timer re-reads the mirror so mail from the daemon's
+  background poll surfaces without a click — the timer never talks to Gmail.
 
 ## HTML bodies (built 2026-07-16)
 - `emails.body_html` stores the raw `text/html` part alongside the stripped

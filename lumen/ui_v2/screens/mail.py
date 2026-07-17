@@ -92,15 +92,27 @@ class MailScreen(QWidget):
         self.search_box.textChanged.connect(
             lambda _t: self._search_timer.start())
 
+        # while the tab is visible, re-read the local mirror every 5 min so
+        # mail the daemon's background Gmail poll brought in becomes visible
+        # without a click — local read only, no extra Gmail traffic
+        self._auto_requery = QTimer(self)
+        self._auto_requery.setInterval(5 * 60 * 1000)
+        self._auto_requery.timeout.connect(self.state.refresh_mails)
+
         state.mails_changed.connect(self.populate)
         self.populate()
 
     def showEvent(self, ev):
-        # Re-query the mirror on every visit (cheap local read): labels a rule
-        # or chat created while this tab was hidden show up in the chip row
-        # and row pills without a manual refresh (todo-fixes #10d).
+        # Entering the tab syncs with Gmail (debounced to 1/min in AppState);
+        # inside the debounce window it still re-reads the local mirror, so
+        # labels created while hidden appear without ↻ (todo-fixes #10d).
         super().showEvent(ev)
-        self.state.refresh_mails()
+        self.state.sync_inbox()
+        self._auto_requery.start()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        self._auto_requery.stop()
 
     def populate(self):
         scope = self.state.mail_scope

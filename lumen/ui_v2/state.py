@@ -156,6 +156,7 @@ class AppState(QObject):
         self.mail_connected = True
         self.mail_syncing = False
         self.mail_last_sync = None
+        self._last_sync_req: float | None = None   # monotonic; sync debounce
         self.selected_mail = "m1"
         self.mail_scope = "inbox"      # "inbox" | "unread" | a label name
         self.mail_labels: list[str] = []
@@ -176,7 +177,7 @@ class AppState(QObject):
                 self.attach_compose_source(chat)
             self.refresh_todos()
             self.refresh_books()
-            self.refresh_mails()
+            self.sync_inbox()    # launch → immediate Gmail delta-sync
             self.refresh_suggestions()
             self.refresh_procedures()
         else:
@@ -466,8 +467,23 @@ class AppState(QObject):
         """Manual refresh: delta-sync against Gmail, then reload the current
         scope (a label view reloads as itself)."""
         if self._data is not None:
+            self._last_sync_req = time.monotonic()
             self._data.request("mail.refresh", self._scope_payload(),
                                self._set_mails)
+
+    SYNC_DEBOUNCE_S = 60.0
+
+    def sync_inbox(self) -> None:
+        """Automatic refresh (app launch, Mail tab shown): a real Gmail
+        delta-sync, debounced to one per minute so tab-flipping can't hammer
+        Gmail. Inside the window it still re-reads the local mirror, so the
+        view stays fresh either way."""
+        now = time.monotonic()
+        if (self._last_sync_req is not None
+                and now - self._last_sync_req < self.SYNC_DEBOUNCE_S):
+            self.refresh_mails()
+        else:
+            self.refresh_inbox()
 
     def search_mails(self, query: str) -> None:
         query = query.strip()

@@ -1410,3 +1410,45 @@ def test_mail_screen_requeries_mirror_on_show(qtbot):
     data.requests.clear()
     sc.show()
     assert any(t == "emails.list" for t, _p, _cb in data.requests)
+
+
+# ---- auto-refresh mail on open + while open (new-features item 5) ----------
+
+def test_launch_syncs_gmail(qtbot):
+    data = FakeClient()
+    AppState(data=data)
+    assert any(t == "mail.refresh" for t, _p, _cb in data.requests)
+
+
+def test_sync_inbox_debounces_to_local_requery(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)          # init synced → debounce window open
+    data.requests.clear()
+    st.sync_inbox()                   # within 60s: local mirror read only
+    assert [t for t, _p, _cb in data.requests] == ["emails.list"]
+    st._last_sync_req -= AppState.SYNC_DEBOUNCE_S     # age past the window
+    data.requests.clear()
+    st.sync_inbox()
+    assert data.requests[0][0] == "mail.refresh"
+
+
+def test_manual_refresh_counts_toward_debounce(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st._last_sync_req = None
+    st.refresh_inbox()                # manual ↻
+    data.requests.clear()
+    st.sync_inbox()                   # right after: no second Gmail sync
+    assert data.requests[0][0] == "emails.list"
+
+
+def test_mail_screen_requery_timer_follows_visibility(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    st = AppState(data=FakeClient())
+    sc = MailScreen(st)
+    qtbot.addWidget(sc)
+    sc.show()
+    assert sc._auto_requery.isActive()
+    assert sc._auto_requery.interval() == 5 * 60 * 1000
+    sc.hide()
+    assert not sc._auto_requery.isActive()
