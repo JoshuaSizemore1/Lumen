@@ -1,7 +1,8 @@
 """Request router: chat streaming (plain, tool-augmented, book-rec, and
 event-creation paths), sleep, todos.*/books.*/calendar.*/emails.* one-shots,
 and confirm.response resolution. Tool-call vs direct-answer classification is
-the regex hints below — cheap heuristics, no LLM pre-pass."""
+the subject hints below plus a small-model classifier fallback on total regex
+miss (daemon/llm/intent.py)."""
 
 import asyncio
 import logging
@@ -248,6 +249,15 @@ IDENTITY = (
 # mechanical, not prompt-enforced.
 WRITE_TOOLS = frozenset({"create_event", "delete_event"})
 
+# Tool groups = MCP server names. Tools attach by subject-matter group (union
+# on multi-subject messages) keyed off the same wide hints that inject context
+# — the old split (wide hints for context, narrow verb regexes for tools) let
+# a message get context naming search_email with no tools attached, and the
+# model role-played the search (live fabrication 2026-07-17). Liberal bias is
+# deliberate: a false positive costs a few schema tokens, a miss costs a
+# fabricated answer. "todos" is a context-only pseudo-group (no MCP server).
+SERVER_GROUPS = frozenset({"fs", "mail", "gcal", "books"})
+
 # No single tool call may run longer than this. The filesystem server processes
 # requests sequentially over stdio, so a `search_files` from '/' can block for
 # minutes (observed 6.5 min) and hang the whole chat. Grounding (fs_context)
@@ -443,13 +453,15 @@ class Router:
                 {"role": "user", "content": "hi"}]
 
     def _build_messages(self, message: str, history: list[dict],
-                        tool_loop: bool = False) -> list[dict]:
+                        groups: frozenset[str] = frozenset()) -> list[dict]:
         """A constant identity block + keyword-gated per-query context as the
         system message, then the conversation history (which ends with the
-        current user turn). Context is keyed on the current message; fs grounding
-        also rides along whenever the tool loop is active, so a keyword-less
-        follow-up in a tool-engaged thread still knows where the user's files
-        live instead of scanning '/' (found in live verification)."""
+        current user turn). Context is keyed on the current message's subject
+        hints OR an attached group in `groups` (= the tool groups actually
+        attached to this request; the classifier can attach groups the regexes
+        missed, and a tool-engaged follow-up carries every group). Grounding
+        that names a tool rides only when its group is attached — never coach
+        the model toward a tool it doesn't hold."""
         context = [IDENTITY]
         if self._memory_path is not None:
             mem = memory_mod.memory_context(self._memory_path, self._memory_cap)
@@ -461,33 +473,33 @@ class Router:
                 context.append(
                     "The user has a saved routine that matches this request. "
                     "Follow its steps in order:\n" + proc["text"])
-        if TODO_HINT.search(message):
+        if TODO_HINT.search(message) or "todos" in groups:
             context.append(todo_context(self._todos.open_todos(), date.today()))
-        if self._books is not None and BOOK_HINT.search(message):
+        if self._books is not None and (BOOK_HINT.search(message)
+                                        or "books" in groups):
             context.append(self._books.catalog_context())
-        if self._calendar is not None and CAL_HINT.search(message):
+        if self._calendar is not None and (CAL_HINT.search(message)
+                                           or "gcal" in groups):
             now = datetime.now().astimezone()
             end = now.date() + timedelta(days=CAL_CONTEXT_DAYS)
             context.append(calendar_context(
                 self._calendar.list_range(now.date().isoformat(), end.isoformat()),
                 now, end))
         mail_shaped = bool(MAIL_HINT.search(message))
-        if self._mail_store is not None and (tool_loop or mail_shaped):
-            # On a non-mail-shaped tool loop, mail context is grounding only
-            # (so the model knows search_email exists) — keep it to the counts,
-            # not the full unread list, so a file request stays lean.
+        if self._mail_store is not None and (mail_shaped or "mail" in groups):
+            # Non-mail-shaped tool loops still get the counts as grounding;
+            # the search_email pointer only rides when the tool itself does.
             context.append(mail_context(
                 self._mail_store.unread(limit=10), self._mail_store.counts(),
                 self._mail.connected if self._mail is not None else False,
                 syncing=self._mail.syncing if self._mail is not None else False,
-                brief=not mail_shaped))
-        if self._bridge is not None and (tool_loop or TOOL_HINT.search(message)
-                                         or FS_WRITE_HINT.search(message)):
+                brief=not mail_shaped, has_tool="mail" in groups))
+        if self._bridge is not None and "fs" in groups:
             context.append(fs_context(Path.home()))
         return [{"role": "system", "content": "\n\n".join(context)}] + history
 
     def _messages_for(self, message: str, conv_id: int | None,
-                      tool_loop: bool = False) -> list[dict]:
+                      groups: frozenset[str] = frozenset()) -> list[dict]:
         """Prompt messages for a chat turn: the current user message is already
         persisted, so the store's (capped) history ends with it. Without a store
         this degrades to a single stateless user turn."""
@@ -495,16 +507,40 @@ class Router:
             history = self._conv.history(conv_id, limit=HISTORY_TURNS)
         else:
             history = [{"role": "user", "content": message}]
-        return self._build_messages(message, history, tool_loop)
+        return self._build_messages(message, history, groups)
 
-    def _tool_shaped(self, message: str, conv_id: int | None) -> bool:
-        """Enter the tool loop when the current message hints at a tool OR this
-        conversation has already used one — so a bare follow-up ('and delete it')
-        stays tool-capable. Gate on the flag, not a full tool loop every turn."""
+    def _subject_groups(self, message: str) -> set[str]:
+        """Which tool groups this message's subject matter wants — the same
+        wide hints that key context injection, never narrower verb shapes."""
+        groups = set()
+        if self._mail_store is not None and MAIL_HINT.search(message):
+            groups.add("mail")
+        if self._calendar is not None and CAL_HINT.search(message):
+            groups.add("gcal")
+        if self._books is not None and BOOK_HINT.search(message):
+            groups.add("books")
         if TOOL_HINT.search(message) or FS_WRITE_HINT.search(message):
-            return True
-        return (self._conv is not None and conv_id is not None
-                and self._conv.is_tool_engaged(conv_id))
+            groups.add("fs")
+        return groups
+
+    def _engaged_groups(self, conv_id: int | None) -> set[str]:
+        """A tool-engaged conversation keeps every group on a bare follow-up
+        ('and delete it') — same all-tools behavior as before groups existed."""
+        if (self._conv is not None and conv_id is not None
+                and self._conv.is_tool_engaged(conv_id)):
+            return set(SERVER_GROUPS)
+        return set()
+
+    @staticmethod
+    def _group_subsystem(groups) -> str:
+        """Memory-log subsystem name for a group set. fs outranks mail because
+        mail rides along on every tool loop as grounding."""
+        for group, name in (("fs", "files"), ("gcal", "calendar"),
+                            ("books", "books"), ("mail", "email"),
+                            ("todos", "todos")):
+            if group in groups:
+                return name
+        return "chat"
 
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
@@ -1015,7 +1051,10 @@ class Router:
         elif (self._bridge is not None and self._mail_store is not None
                 and MAIL_READ_HINT.search(message)):
             # Read-shaped mail request: the tool loop owns inbox search/QA.
-            sub, subsystem = self._chat_with_tools(message, conv_id), "email"
+            sub = self._chat_with_tools(
+                message, conv_id,
+                groups=frozenset(self._subject_groups(message) | {"mail"}))
+            subsystem = "email"
         elif self._calendar is not None and SLOT_HINT.search(message):
             sub, subsystem = self._slots_chat(message), "calendar"
         elif (self._confirm is not None and self._bridge is not None
@@ -1032,8 +1071,14 @@ class Router:
         elif (self._books is not None and self._bridge is not None
               and REC_HINT.search(message)):
             sub, subsystem = self._recommend_chat(message), "books"
-        elif self._bridge is not None and self._tool_shaped(message, conv_id):
-            sub, subsystem = self._chat_with_tools(message, conv_id), "files"
+        elif self._bridge is not None and (groups := (
+                self._subject_groups(message) or self._engaged_groups(conv_id))):
+            if self._mail_store is not None:
+                groups.add("mail")   # ride-along: two small schemas, and every
+                                     # tool loop can be asked a mail follow-up
+            sub = self._chat_with_tools(message, conv_id,
+                                        groups=frozenset(groups))
+            subsystem = self._group_subsystem(groups)
         else:
             sub, subsystem = self._plain_chat(message, conv_id), self._infer_subsystem(message)
 
@@ -1106,8 +1151,9 @@ class Router:
             yield {"chunk": "I couldn't find anything matching that in my memory."}
         yield {"done": True}
 
-    async def _plain_chat(self, message: str, conv_id: int | None):
-        messages = self._messages_for(message, conv_id)
+    async def _plain_chat(self, message: str, conv_id: int | None,
+                          groups: frozenset[str] = frozenset()):
+        messages = self._messages_for(message, conv_id, groups)
         try:
             async for chunk in self._llm.chat(messages):
                 yield {"chunk": chunk}
@@ -1730,17 +1776,19 @@ class Router:
         yield {"result": {"ok": ok, "message": "Archived." if ok else
                           "Couldn't reach Gmail — nothing was changed."}}
 
-    async def _chat_with_tools(self, message: str, conv_id: int | None = None):
+    async def _chat_with_tools(self, message: str, conv_id: int | None = None,
+                               groups: frozenset[str] = SERVER_GROUPS):
         try:
             await self._bridge.ensure_started()
-            tools = [t for t in self._bridge.ollama_tools()
+            tools = [t for t in self._bridge.ollama_tools(
+                         servers=set(groups) & set(SERVER_GROUPS))
                      if t.get("function", {}).get("name", "").split("__")[-1]
                      not in WRITE_TOOLS]
         except Exception:
             log.exception("MCP bridge unavailable — answering without tools")
             tools = []
-        if not tools:                      # no servers came up → fall back to plain chat
-            messages = self._messages_for(message, conv_id, tool_loop=True)
+        if not tools:   # no servers came up → plain chat, honest context only
+            messages = self._messages_for(message, conv_id)
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
@@ -1788,7 +1836,7 @@ class Router:
                 text = text[:TOOL_RESULT_MAX_CHARS] + TRUNCATION_NOTE
             return text
 
-        messages = self._messages_for(message, conv_id, tool_loop=True)
+        messages = self._messages_for(message, conv_id, groups)
         model = self._pick_model(message)
 
         async def pump():

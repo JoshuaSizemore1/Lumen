@@ -420,8 +420,9 @@ def test_hint_matches_whole_words_only():
 
 
 class FakeBridge:
-    def __init__(self, tools=(("list_directory", {}),), result="a.txt\nb.txt", fail=False):
-        self._tools = [{"type": "function", "function": {"name": n}} for n, _ in tools]
+    def __init__(self, tools=(("list_directory", "fs"),), result="a.txt\nb.txt",
+                 fail=False):
+        self._tools = list(tools)               # (exposed_name, server_name)
         self._result = result
         self._fail = fail
         self.started = False
@@ -430,8 +431,10 @@ class FakeBridge:
     async def ensure_started(self):
         self.started = True
 
-    def ollama_tools(self):
-        return self._tools
+    def ollama_tools(self, servers=None):
+        return [{"type": "function", "function": {"name": n}}
+                for n, server in self._tools
+                if servers is None or server in servers]
 
     async def call(self, name, args):
         self.calls.append((name, args))
@@ -591,6 +594,52 @@ async def test_chat_non_lookup_skips_tools_even_with_bridge():
                         "chat", {"message": "how are you today"})
     assert bridge.started is False           # gate missed → no connect, plain path
     assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+class CaptureToolsLLM:
+    """Records which tool schemas the router attached, answers directly."""
+    def __init__(self):
+        self.tools = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.tools = tools
+        yield {"content": "checked."}
+
+
+async def test_verbless_mail_question_gets_mail_tools():
+    # Regression for the 2026-07-17 fabrication: "what emails were sent to me
+    # on the 8th this month" has no read-verb, matched no tool route, and took
+    # the plain path — whose mail context named search_email. The model
+    # role-played the search and invented three emails. Subject-shaped mail
+    # questions must enter the tool loop with the mail tools attached.
+    bridge = FakeBridge(tools=(("search_email", "mail"), ("get_email", "mail"),
+                               ("list_directory", "fs")))
+    llm = CaptureToolsLLM()
+    router = Router(llm, FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore(), bridge=bridge,
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "what emails were sent to me on the 8th this month"})
+    names = {t["function"]["name"] for t in llm.tools}
+    assert {"search_email", "get_email"} <= names
+    assert "list_directory" not in names        # no fs hint → no fs tools
+    assert {"done": True} in out
+
+
+async def test_multi_subject_message_gets_group_union():
+    bridge = FakeBridge(tools=(("search_email", "mail"), ("list_events", "gcal"),
+                               ("list_directory", "fs")))
+    llm = CaptureToolsLLM()
+    router = Router(llm, FakeStore(), calendar=FakeCal(),
+                    mail=FakeMailSync(), mail_store=FakeMailStore(),
+                    bridge=bridge, model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "any emails about tomorrow's schedule"})
+    names = {t["function"]["name"] for t in llm.tools}
+    assert {"search_email", "list_events"} <= names
+    assert "list_directory" not in names
+    assert {"done": True} in out
 
 
 async def test_chat_tool_error_fed_back_to_model():
@@ -774,14 +823,14 @@ def gated_router(tmp_path, llm, bridge=None, tool_log=None):
     gate = WriteGate(grants, broker,
                      {"write_file": ("path",)})
     router = Router(llm, FakeStore(),
-                    bridge=bridge or FakeBridge(tools=(("write_file", {}),)),
+                    bridge=bridge or FakeBridge(tools=(("write_file", "fs"),)),
                     confirm=broker, write_gate=gate,
                     model_router=FakeModelRouter(), tool_log=tool_log)
     return router, broker, grants
 
 
 async def test_ungranted_write_confirm_approve_calls_tool(tmp_path):
-    bridge = FakeBridge(tools=(("write_file", {}),), result="ok, written")
+    bridge = FakeBridge(tools=(("write_file", "fs"),), result="ok, written")
     router, broker, grants = gated_router(
         tmp_path, GateLLM(args={"path": str(tmp_path / "f.txt"), "content": "hi"}),
         bridge=bridge)
@@ -799,7 +848,7 @@ async def test_ungranted_write_confirm_approve_calls_tool(tmp_path):
 
 async def test_ungranted_write_decline_never_calls_tool(tmp_path):
     from lumen.daemon.write_gate import DENIAL
-    bridge = FakeBridge(tools=(("write_file", {}),))
+    bridge = FakeBridge(tools=(("write_file", "fs"),))
     logrec = []
 
     class FakeLog:
@@ -821,7 +870,7 @@ async def test_ungranted_write_decline_never_calls_tool(tmp_path):
 
 
 async def test_granted_write_skips_confirm_entirely(tmp_path):
-    bridge = FakeBridge(tools=(("write_file", {}),), result="ok")
+    bridge = FakeBridge(tools=(("write_file", "fs"),), result="ok")
     router, broker, grants = gated_router(
         tmp_path, GateLLM(args={"path": str(tmp_path / "f.txt")}), bridge=bridge)
     grants.grant(str(tmp_path / "f.txt"))
@@ -1381,8 +1430,8 @@ async def test_generic_tool_loop_never_offers_write_tools():
             seen["tools"] = tools
             yield {"content": "hi"}
 
-    bridge = FakeBridge(tools=(("list_events", {}), ("create_event", {}),
-                               ("gcal__create_event", {})))
+    bridge = FakeBridge(tools=(("list_events", "fs"), ("create_event", "fs"),
+                               ("gcal__create_event", "fs")))
     router = Router(CaptureLLM(), FakeStore(), bridge=bridge,
                     model_router=FakeModelRouter())
     await collect(router, "chat", {"message": "search my files"})
@@ -1815,8 +1864,8 @@ async def test_generic_tool_loop_never_offers_delete_event():
             seen["tools"] = tools
             yield {"content": "hi"}
 
-    bridge = FakeBridge(tools=(("list_events", {}), ("delete_event", {}),
-                               ("gcal__delete_event", {})))
+    bridge = FakeBridge(tools=(("list_events", "fs"), ("delete_event", "fs"),
+                               ("gcal__delete_event", "fs")))
     router = Router(CaptureLLM(), FakeStore(), bridge=bridge,
                     model_router=FakeModelRouter())
     await collect(router, "chat", {"message": "search my files"})
@@ -2728,7 +2777,7 @@ async def test_read_shaped_mail_request_enters_tool_loop_not_compose():
     # todo-fixes #1 routing half: the read shape lands in the tool loop
     # (search_email lives there), and no compose popup opens.
     from lumen.daemon.confirm import ConfirmBroker
-    bridge = FakeBridge(tools=(("search_email", {}),))
+    bridge = FakeBridge(tools=(("search_email", "mail"),))
     router = Router(ToolLLM(), FakeStore(), bridge=bridge,
                     mail=FakeMailSync(), mail_store=FakeMailStore(),
                     confirm=ConfirmBroker(), model_router=FakeModelRouter())
