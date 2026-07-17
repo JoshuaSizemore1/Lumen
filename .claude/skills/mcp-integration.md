@@ -22,6 +22,14 @@ Recommendation: start with (1) if open to the runtime swap — fewer moving part
 
 Read-only allowlist convention: each `[[mcp.servers]]` block's `tools` = the exposed set; `MCPBridge.load_tools()` drops any tool name not listed (omit `tools` to expose everything — avoid this for write-capable servers). One gotcha found during verification: if the allowlist excludes discovery tools like the filesystem server's `list_allowed_directories`, the model has no way to learn the real absolute root and guesses a relative path, which fails with ENOENT — include any "tell me the accessible paths" tool alongside the read tools.
 
+**Routing (2026-07-17):** tools attach by subject-matter group (= MCP server
+name), keyed off the same wide hints that inject context, unioned across
+subjects, mail riding along on every tool loop; a total regex miss runs one
+small classification call on the resident model (`daemon/llm/intent.py`)
+instead of a blind plain chat. Context that names a tool only rides when that
+tool is attached — the 2026-07-17 fabrication came from violating exactly
+that. Full design: docs/superpowers/specs/2026-07-17-hybrid-tool-routing-design.md.
+
 `lumen/mcp_servers/` is the template location for custom in-repo servers — `openlibrary.py` (built on `mcp.server.fastmcp.FastMCP`) is the reference shape for Phase 4's book catalog and later lookups: thin `@mcp.tool()` functions, no API key, graceful-degradation return strings on HTTP failure instead of raising.
 
 ## Model size reality check

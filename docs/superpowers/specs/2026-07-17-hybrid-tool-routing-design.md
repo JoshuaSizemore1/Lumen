@@ -1,7 +1,7 @@
 # Hybrid Tool Routing — Design
 
 **Date:** 2026-07-17
-**Status:** Approved (user, 2026-07-17)
+**Status:** Implemented 2026-07-17
 
 ## Problem
 
