@@ -642,6 +642,80 @@ async def test_multi_subject_message_gets_group_union():
     assert {"done": True} in out
 
 
+class RoutingLLM:
+    """chat() answers as the intent classifier; chat_with_tools records
+    what the router attached."""
+    def __init__(self, verdict="NONE"):
+        self._verdict = verdict
+        self.tools = None
+        self.chat_calls = 0
+
+    async def chat(self, messages):
+        self.chat_calls += 1
+        yield self._verdict
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.tools = tools
+        yield {"content": "ok"}
+
+
+async def test_regex_miss_classifier_attaches_labeled_group():
+    # "emals" matches no hint anywhere — the classifier fallback must land
+    # the mail tools instead of a blind plain chat.
+    llm = RoutingLLM(verdict="email")
+    router = Router(llm, FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore(),
+                    bridge=FakeBridge(tools=(("search_email", "mail"),)),
+                    model_router=FakeModelRouter())
+    await collect(router, "chat", {"message": "any emals from Ada?"})
+    assert {t["function"]["name"] for t in llm.tools} == {"search_email"}
+
+
+async def test_classifier_none_stays_plain_and_streams():
+    llm = RoutingLLM(verdict="NONE")
+    router = Router(llm, FakeStore(),
+                    bridge=FakeBridge(tools=(("search_email", "mail"),)),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "good morning!"})
+    assert llm.tools is None                      # never entered the tool loop
+    assert llm.chat_calls == 2                    # classify, then the answer
+    assert out[-1] == {"done": True}
+
+
+async def test_no_bridge_skips_classifier():
+    llm = RoutingLLM(verdict="email")
+    router = Router(llm, FakeStore())
+    await collect(router, "chat", {"message": "any emals from Ada?"})
+    assert llm.chat_calls == 1                    # just the plain answer
+
+
+async def test_classifier_send_email_routes_to_compose(monkeypatch):
+    llm = RoutingLLM(verdict="send_email")
+    router = Router(llm, FakeStore(), mail=FakeMailSync(),
+                    mail_store=FakeMailStore(), bridge=FakeBridge(),
+                    confirm=object(), model_router=FakeModelRouter())
+
+    async def fake_compose(message):
+        yield {"chunk": "compose opened"}
+        yield {"done": True}
+
+    monkeypatch.setattr(router, "_compose_email_chat", fake_compose)
+    out = await collect(router, "chat", {"message": "shoot sam a quick thanks"})
+    assert {"chunk": "compose opened"} in out
+
+
+async def test_classifier_labels_for_absent_subsystems_fall_to_plain():
+    # calendar label but no calendar wired: degrade to plain chat, no crash.
+    llm = RoutingLLM(verdict="calendar")
+    router = Router(llm, FakeStore(),
+                    bridge=FakeBridge(tools=(("search_email", "mail"),)),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {"message": "am I fre tmrw evening"})
+    assert llm.tools is None
+    assert out[-1] == {"done": True}
+
+
 async def test_chat_tool_error_fed_back_to_model():
     bridge = FakeBridge(fail=True)
     captured = {}

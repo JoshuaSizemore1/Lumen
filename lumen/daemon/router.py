@@ -16,8 +16,8 @@ from pathlib import Path
 
 from lumen.daemon.connectors import free_slots, mail_rules
 from lumen.daemon.connectors.capture import classify
-from lumen.daemon.llm import (commitments, label_suggest, meeting_prep,
-                              notes_qa, triage)
+from lumen.daemon.llm import (commitments, intent, label_suggest,
+                              meeting_prep, notes_qa, triage)
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -1080,7 +1080,42 @@ class Router:
                                         groups=frozenset(groups))
             subsystem = self._group_subsystem(groups)
         else:
-            sub, subsystem = self._plain_chat(message, conv_id), self._infer_subsystem(message)
+            sub, subsystem = None, self._infer_subsystem(message)
+            if self._bridge is not None:
+                # Total regex miss with tools available: one small classifier
+                # call on the resident model beats a blind plain chat that
+                # could get coached into role-playing a lookup.
+                labels = await intent.classify(self._llm, message)
+                if ("send_email" in labels and self._confirm is not None
+                        and self._mail is not None):
+                    sub, subsystem = self._compose_email_chat(message), "email"
+                elif ("create_event" in labels and self._confirm is not None
+                        and self._calendar is not None):
+                    sub, subsystem = self._create_event_chat(message), "calendar"
+                else:
+                    available = {
+                        "mail": self._mail_store is not None,
+                        "gcal": self._calendar is not None,
+                        "books": self._books is not None,
+                        "fs": True, "todos": True,
+                    }
+                    label_groups = {"email": "mail", "calendar": "gcal",
+                                    "files": "fs", "todos": "todos",
+                                    "books": "books"}
+                    groups = {label_groups[l] for l in labels
+                              if l in label_groups and available[label_groups[l]]}
+                    if groups & SERVER_GROUPS:
+                        if self._mail_store is not None:
+                            groups.add("mail")
+                        sub = self._chat_with_tools(message, conv_id,
+                                                    groups=frozenset(groups))
+                        subsystem = self._group_subsystem(groups)
+                    elif groups:   # todos-only: context ride, no tools
+                        sub = self._plain_chat(message, conv_id,
+                                               groups=frozenset(groups))
+                        subsystem = "todos"
+            if sub is None:
+                sub = self._plain_chat(message, conv_id)
 
         acc, tools = [], []
         async with aclosing(sub) as gen:
