@@ -77,6 +77,9 @@ class NotesConfig:
     # 2026-07-14 (see llm-serving.md): nomic-embed-text.
     folder: Path = field(default_factory=lambda: Path.home() / "Documents" / "Notes")
     embed_model: str = "nomic-embed-text"
+    # Where chat-written files land (new-features item 2). None = the Q&A
+    # folder above, so written notes are immediately searchable via notes Q&A.
+    write_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +261,8 @@ def load_config(path: Path | None = None) -> Config:
             n_kwargs["folder"] = Path(notes_raw["folder"]).expanduser()
         if "embed_model" in notes_raw:
             n_kwargs["embed_model"] = str(notes_raw["embed_model"])
+        if "write_dir" in notes_raw:
+            n_kwargs["write_dir"] = Path(notes_raw["write_dir"]).expanduser()
         kwargs["notes"] = NotesConfig(**n_kwargs)
     sched_raw = data.get("scheduling")
     if sched_raw is not None:

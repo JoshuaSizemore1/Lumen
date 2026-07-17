@@ -188,6 +188,11 @@ empty-state prompt box for a fresh chat.
 **Depends on:** the chat-session fixes (`todo-fixes` entries 5–6) — new-chat
 UX is meaningless until sessions actually isolate context.
 
+**Built 2026-07-17.** Launcher removed as a tab (`main.py`); the palette lives
+only in the frameless hotkey overlay (`app.py`). Chat is tab 1 with its existing
+sidebar / New chat / empty-state; tabs renumbered `1`–`5` = Chat/Dashboard/
+Calendar/Todos/Books, Mail keeps its unread badge and Settings the gear.
+
 ### 2. File writing — Lumen can create and edit .md / text files (todo #4)
 New capability: "write me a markdown file summarizing X" produces a real
 file. Treat file writes like email sends — a write action behind explicit
@@ -196,6 +201,21 @@ writes go to a configurable notes directory (e.g. `~/Documents/Lumen`);
 anything outside it needs a stronger confirmation. New router intent + prompt
 asset in `daemon/llm/`. Also resolves the markdown→calendar misroute
 (`todo-fixes` entry 3).
+
+**Built 2026-07-17.** Prompt asset `daemon/llm/file_write.py` (sentinel-line
+output — `FILENAME:` / optional `PATH:` / `---` / raw body — not JSON, since a
+4B loses newline-escaping inside JSON strings, same lesson as the triage
+batch); mechanical `validate_file` gate rejects traversal/folders/empty. Router
+`FILE_WRITE_HINT` fires a dedicated `_write_file_chat` (checked before COMPOSE,
+guarded off `RULE_HINT`) that authors the whole document in one local-model
+generation, then confirms through the existing write-gate payload — louder
+intro + ⚠ icon outside the notes folder, overwrite-aware title. Approving grants
+the exact path (`WriteGate.grant`) so a later fs-tool edit won't re-ask. Default
+target is the notes Q&A folder (`[notes] write_dir` overrides) so written files
+are immediately searchable. **Deviation:** a message naming an explicit path
+(`EXPLICIT_PATH`) still routes to the fs tool loop, which writes that exact
+path/content verbatim; the dedicated route owns only "author me a document"
+requests with no path — which is where the markdown→calendar misroute lived.
 
 ### 3. Web lookup (todo #5)
 Lumen can search online when local knowledge isn't enough. Via a search MCP
@@ -224,6 +244,12 @@ background poll should already cover the last one — verify rather than
 rebuild; the new work is the two open-triggered refreshes, a visible
 "synced <time>" status, and a debounce (min ~60s between syncs) so
 tab-flipping doesn't hammer Gmail.
+
+**Built 2026-07-17.** Confirmed the daemon's 5-min poll already covers the
+periodic case (verified, not rebuilt). Added launch- and Mail-tab-open Gmail
+delta-syncs (`AppState.sync_inbox`) sharing one 60s debounce window with the
+manual ↻; inside the window a tab-flip re-reads the local mirror instead. The
+Mail screen also re-queries the mirror every 5 min while visible.
 
 ### 6. File browser screen with context-aware prompting (todo #16)
 A new screen for browsing local directories, with a prompt box on the same

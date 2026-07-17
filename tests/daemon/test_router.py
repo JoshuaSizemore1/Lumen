@@ -857,22 +857,28 @@ async def test_write_shaped_message_enters_tool_loop():
     assert out[-1] == {"done": True}
 
 
-async def test_file_shaped_event_message_prefers_fs_loop():
-    # todo-fixes #3 (flips the pre-2026-07-16 precedence): "create a meeting
-    # note FILE" is a file request that merely mentions a meeting — it must
-    # reach the fs tool loop (write_file behind the write gate), never open
-    # a calendar-event confirm dialog.
+async def test_file_shaped_message_routes_to_dedicated_write(tmp_path):
+    # todo-fixes #3, resolved properly by new-features item 2: "create a
+    # meeting note FILE" is a document request that merely mentions a meeting.
+    # It reaches the dedicated author-a-document route (a write-gate confirm),
+    # never a calendar-event dialog and — since it names no explicit path —
+    # never the generic fs tool loop either.
     from lumen.daemon.confirm import ConfirmBroker
     from lumen.daemon.router import EVENT_HINT
     from lumen.daemon.llm.model_router import FS_WRITE_HINT
     msg = "create a meeting note file for Friday's call"
     assert EVENT_HINT.search(msg) and FS_WRITE_HINT.search(msg)
     bridge = FakeBridge()
-    router = Router(ToolLLM(), FakeStore(), bridge=bridge, calendar=FakeCal(),
-                    confirm=ConfirmBroker(), model_router=FakeModelRouter())
-    out = await collect(router, "chat", {"message": msg})
-    assert bridge.started is True
-    assert not any("confirm_request" in e for e in out)
+    broker = ConfirmBroker()
+    router = Router(
+        FakeLLM(("FILENAME: friday-call.md\n---\n# Friday call\n\nnotes",)),
+        FakeStore(), bridge=bridge, calendar=FakeCal(), confirm=broker,
+        write_dir=tmp_path, model_router=FakeModelRouter())
+    events = await drive(router, msg, broker, False)   # decline: write nothing
+    req = next(e for e in events if "confirm_request" in e)["confirm_request"]
+    assert req["title"] in ("Write file", "Overwrite file")
+    assert bridge.calls == []                     # no calendar event, no fs loop
+    assert not (tmp_path / "friday-call.md").exists()
 
 
 class GateLLM:
@@ -3057,3 +3063,95 @@ async def test_find_then_send_fallback_when_model_omits_to_hint():
         lambda ev: (seen.update(ev["compose_request"]),
                     router._confirm.resolve(ev["compose_id"], False)))
     assert seen["to"] == ["chris@szmr.com"]
+
+
+# ---- File writing (new-features item 2): dedicated write-a-document intent ----
+
+from lumen.daemon.router import FILE_WRITE_HINT
+
+FILE_REPLY = "FILENAME: recap.md\n---\n# Recap\n\n- one\n- two"
+
+
+def file_router(tmp_path, llm, gate=False):
+    from lumen.daemon.confirm import ConfirmBroker
+    from lumen.daemon.write_gate import GrantStore, WriteGate
+    broker = ConfirmBroker(timeout=5.0)
+    wg, grants = None, None
+    if gate:
+        grants = GrantStore(tmp_path / "grants.txt")
+        wg = WriteGate(grants, broker, {"write_file": ("path",)})
+    router = Router(llm, FakeStore(), confirm=broker, write_gate=wg,
+                    write_dir=tmp_path, model_router=FakeModelRouter())
+    return router, broker, grants
+
+
+async def test_write_file_approved_writes_to_notes_dir(tmp_path):
+    router, broker, _ = file_router(tmp_path, FakeLLM((FILE_REPLY,)))
+    events = await drive(router, "write me a markdown file with a short recap",
+                         broker, True)
+    target = tmp_path / "recap.md"
+    assert target.read_text() == "# Recap\n\n- one\n- two\n"
+    assert any(f"Written to {target}" in e.get("chunk", "") for e in events)
+    assert events[-1] == {"done": True}
+
+
+async def test_write_file_declined_writes_nothing(tmp_path):
+    router, broker, _ = file_router(tmp_path, FakeLLM((FILE_REPLY,)))
+    events = await drive(router, "create a markdown file summarizing my inbox",
+                         broker, False)
+    assert not (tmp_path / "recap.md").exists()
+    assert any("Cancelled" in e.get("chunk", "") for e in events)
+    assert events[-1] == {"done": True}
+
+
+async def test_write_file_grants_path_for_future_edits(tmp_path):
+    router, broker, grants = file_router(tmp_path, FakeLLM((FILE_REPLY,)),
+                                         gate=True)
+    await drive(router, "write a markdown file with my notes", broker, True)
+    assert grants.is_granted(str(tmp_path / "recap.md")) is True
+
+
+async def test_write_file_dialog_is_louder_outside_notes_dir(tmp_path):
+    outside = tmp_path.parent / "not_notes"
+    reply = f"FILENAME: x.md\nPATH: {outside}\n---\nbody text"
+    router, broker, _ = file_router(tmp_path, FakeLLM((reply,)))
+    events = await drive(router, "write a markdown file to that folder",
+                         broker, False)
+    req = next(e for e in events if "confirm_request" in e)["confirm_request"]
+    assert req["icon"] == "⚠"
+    assert "outside your notes folder" in req["intro"]
+    assert not (outside / "x.md").exists()
+
+
+async def test_write_file_overwrite_titles_the_dialog(tmp_path):
+    (tmp_path / "recap.md").write_text("old")
+    router, broker, _ = file_router(tmp_path, FakeLLM((FILE_REPLY,)))
+    events = await drive(router, "write a markdown file recap", broker, False)
+    req = next(e for e in events if "confirm_request" in e)["confirm_request"]
+    assert req["title"] == "Overwrite file"
+    assert "overwrites" in req["intro"]
+    assert (tmp_path / "recap.md").read_text() == "old"   # decline left it alone
+
+
+async def test_write_file_invalid_proposal_never_confirms(tmp_path):
+    router, broker, _ = file_router(tmp_path, FakeLLM(("no sentinel here",)))
+    out = await collect(router, "chat", {"message": "write me a markdown file"})
+    assert not any("confirm_request" in e for e in out)
+    assert any("couldn't turn that into a file" in e.get("chunk", "") for e in out)
+
+
+def test_file_write_hint_matches_document_requests():
+    for msg in ("write me a markdown file summarizing my messages",
+                "create a .md file with my notes",
+                "save a text file of today's todos",
+                "generate a document listing my meetings"):
+        assert FILE_WRITE_HINT.search(msg), msg
+    assert not FILE_WRITE_HINT.search("what files do I have in Documents?")
+
+
+def test_file_write_hint_yields_to_rule_hint():
+    # "make a rule to file emails as X" trips both; the dispatch guard
+    # (not RULE_HINT) — plus RULE being checked first — keeps it a rule.
+    from lumen.daemon.router import RULE_HINT
+    msg = "make a rule to file emails from scouting as BSA"
+    assert FILE_WRITE_HINT.search(msg) and RULE_HINT.search(msg)

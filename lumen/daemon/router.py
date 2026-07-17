@@ -25,10 +25,12 @@ from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
                                             revise_email)
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
                                            validate_proposal)
+from lumen.daemon.llm.file_write import propose_file
 from lumen.daemon.llm import memory as memory_mod
 from lumen.daemon.llm.mcp_bridge import ToolCallError
 from lumen.daemon.llm.model_router import FS_WRITE_HINT
 from lumen.daemon.llm.rule_author import propose_rule, validate_rule
+from lumen.daemon.write_gate import confirm_payload as write_confirm_payload
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +111,30 @@ FILE_TASK_HINT = re.compile(
     r"\b(?:files?|folders?|director(?:y|ies)|documents?|markdown|\.md|\.txt)\b",
     re.IGNORECASE,
 )
+
+# A dedicated "write me a document" intent (new-features item 2): an explicit
+# write verb aimed at a file noun. The local model authors the whole document
+# in one shot (llm/file_write.py) and it lands behind the write gate — nicer
+# than the fs tool loop's write_file for content the model must generate. Kept
+# ahead of COMPOSE ("write a markdown file about my inbox" also trips
+# COMPOSE's write-verb + message alternation) and guarded off RULE ("make a
+# rule to file emails…" stays a rule).
+FILE_WRITE_HINT = re.compile(
+    r"\b(?:write|create|make|save|generate|jot)\b"
+    r".{0,80}\b(?:\.md|\.txt|markdown\s+file|text\s+file|"
+    r"files?|documents?|notes?\s+file)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# An explicit filesystem path in the message (absolute, home-, or dot-relative,
+# or any dir/name.ext) means the user named a concrete destination. Those stay
+# on the fs tool loop, which writes that exact path + content verbatim; the
+# dedicated author-a-document route is for "write me a file about X" with no
+# path, where the local model invents the filename and body.
+EXPLICIT_PATH = re.compile(
+    r"(?:^|\s)(?:~|\.\.?)?/\S+"              # /abs, ~/home, ./rel, ../rel
+    r"|\b[\w.\-]+/[\w.\-/]*\.\w{1,5}\b",     # dir/name.ext
+    re.IGNORECASE)
 
 # Find-a-time shapes ("find 30 minutes...") — slot math is deterministic
 # daemon code; a booking request with a concrete time stays on EVENT_HINT.
@@ -402,7 +428,8 @@ class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
-                 suggestions=None, scheduling=None, notes=None, manabi=None,
+                 suggestions=None, scheduling=None, notes=None, write_dir=None,
+                 manabi=None,
                  memory=None, memory_path=None, memory_cap=4000,
                  procedures=None, distill_trigger=None,
                  config=None, rules=None,
@@ -422,6 +449,10 @@ class Router:
         self._suggestions = suggestions  # SuggestionStore — commitment tracking
         self._scheduling = scheduling    # SchedulingConfig — proposable hours
         self._notes = notes              # NotesStore — semantic notes index
+        # Where chat-authored files land (new-features item 2). Defaults to the
+        # notes Q&A folder so a written file is immediately searchable there.
+        self._write_dir = Path(write_dir) if write_dir else (
+            Path.home() / "Documents" / "Notes")
         self._manabi = manabi            # ManabiStatus — Japanese-study nudge
         self._memory = memory                # MemoryLog — tier-1 raw log
         self._memory_path = memory_path      # Path to memory.md
@@ -1043,6 +1074,10 @@ class Router:
                 and self._mail_store is not None and self._confirm is not None
                 and RULE_HINT.search(message)):
             sub, subsystem = self._create_rule_chat(message), "email"
+        elif (self._confirm is not None and FILE_WRITE_HINT.search(message)
+                and not RULE_HINT.search(message)
+                and not EXPLICIT_PATH.search(message)):
+            sub, subsystem = self._write_file_chat(message), "files"
         elif (self._confirm is not None and self._mail is not None
                 and COMPOSE_HINT.search(message)):
             sub, subsystem = self._compose_email_chat(message), "email"
@@ -1633,6 +1668,71 @@ class Router:
                             f"and leaves your inbox.{extra}"}
         else:
             yield {"chunk": "Cancelled — no rule was saved."}
+        yield {"done": True}
+
+    async def _write_file_chat(self, message: str):
+        """NL → whole document (local model) → write-gate confirm → save to
+        disk. The dialog is the write gate's own payload (louder when the
+        target sits outside the notes folder or overwrites an existing file);
+        approving also grants the exact path so a later fs-tool edit to the
+        same file doesn't re-ask, keeping that dialog's promise true."""
+        try:
+            prop, err = await propose_file(self._llm, message)
+        except LLMUnavailable as e:
+            yield {"error": str(e)}
+            return
+        if prop is None:
+            yield {"chunk": err}     # honest failure is an answer, not an IPC error
+            yield {"done": True}
+            return
+        base = self._write_dir
+        if prop["path"]:
+            p = Path(prop["path"]).expanduser()
+            base = p if p.is_absolute() else self._write_dir / p
+        target = base / prop["filename"]
+        content = prop["content"]
+
+        try:
+            target.resolve().relative_to(self._write_dir.resolve())
+            outside = False
+        except ValueError:
+            outside = True
+        exists = target.exists()
+        payload = write_confirm_payload(
+            "write_file", {"path": str(target), "content": content}, ("path",))
+        grant_note = ("Allowing also permits future writes to this exact file "
+                      "without asking.")
+        if outside:
+            payload["icon"] = "⚠"
+        if exists:
+            payload["title"] = "Overwrite file"
+            where = "outside your notes folder, " if outside else ""
+            payload["intro"] = (f"This overwrites the file already {where}at "
+                                f"{target}. {grant_note}")
+        elif outside:
+            payload["intro"] = (f"Heads up — this writes outside your notes "
+                                f"folder, to {target}. {grant_note}")
+
+        confirm_id = self._confirm.begin()
+        yield {"confirm_request": payload, "confirm_id": confirm_id}
+        if not await self._confirm.wait(confirm_id):
+            self._log("files", "correction",
+                      {"action": "declined_write", "path": str(target)})
+            yield {"chunk": "Cancelled — nothing was written."}
+            yield {"done": True}
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content + "\n")
+        except OSError as e:
+            log.exception("chat file write failed")
+            yield {"chunk": f"I couldn't write the file: {e}"}
+            yield {"done": True}
+            return
+        if self._write_gate is not None:
+            self._write_gate.grant(str(target))
+        self._log("files", "query", {"action": "wrote_file", "path": str(target)})
+        yield {"chunk": f"Written to {target}."}
         yield {"done": True}
 
     async def _compose_email_chat(self, message: str):

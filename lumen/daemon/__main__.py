@@ -62,6 +62,7 @@ async def run() -> None:
                         conn,
                         lambda texts: llm.embed(texts, cfg.notes.embed_model),
                         cfg.notes.folder, cfg.notes.embed_model),
+                    write_dir=cfg.notes.write_dir or cfg.notes.folder,
                     manabi=ManabiStatus(cfg.manabi.db_path),
                     memory=memory_log, memory_path=cfg.memory_path,
                     memory_cap=cfg.memory.blob_cap_chars,

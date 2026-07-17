@@ -84,6 +84,12 @@ class WriteGate:
         self._broker = broker
         self._write_tools = write_tools
 
+    def grant(self, path: str) -> None:
+        """Record an approval made outside the tool loop (the file-writing
+        chat route) so later fs-tool edits to the same file don't re-ask —
+        keeps the dialog's 'permits future writes' promise true."""
+        self._grants.grant(path)
+
     async def check(self, exposed_name: str, args: dict, emit) -> str | None:
         """None = proceed with the call; str = denial text for the model.
         `emit` pushes the confirm_request event onto the caller's stream."""
