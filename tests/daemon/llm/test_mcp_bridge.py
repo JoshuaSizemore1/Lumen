@@ -60,6 +60,27 @@ async def test_ollama_tools_filtered_by_allowlist():
     assert names == {"read_file", "list_directory"}       # write_file structurally excluded
 
 
+async def test_ollama_tools_filtered_by_server():
+    fs = FakeClient([T("read_file"), T("list_directory")])
+    mail = FakeClient([T("search_email"), T("get_email")])
+    bridge = MCPBridge({"fs": fs, "mail": mail}, {"fs": None, "mail": None})
+    await bridge.load_tools()
+    names = {t["function"]["name"] for t in bridge.ollama_tools(servers={"mail"})}
+    assert names == {"search_email", "get_email"}
+    assert len(bridge.ollama_tools()) == 4                 # None keeps everything
+    assert bridge.ollama_tools(servers=set()) == []
+
+
+async def test_server_filter_uses_registry_not_name_prefix():
+    # Names are only namespaced on collision — filtering must resolve the
+    # owning server through the registry, never by splitting the name.
+    a, b = FakeClient([T("search")]), FakeClient([T("search")])
+    bridge = MCPBridge({"fs": a, "books": b}, {"fs": None, "books": None})
+    await bridge.load_tools()
+    names = {t["function"]["name"] for t in bridge.ollama_tools(servers={"books"})}
+    assert names == {"books__search"}
+
+
 async def test_call_routes_and_flattens():
     client = FakeClient([T("read_file")], results={"read_file": R([Block("text", "file contents")])})
     bridge = MCPBridge({"fs": client}, {"fs": None})

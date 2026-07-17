@@ -70,8 +70,14 @@ class MCPBridge:
                 self._registry[exposed] = (server, name)
                 self._schemas.append(tool_to_ollama_schema(exposed, desc, schema))
 
-    def ollama_tools(self) -> list[dict]:
-        return list(self._schemas)
+    def ollama_tools(self, servers: set | None = None) -> list[dict]:
+        """All tool schemas, or only those owned by the named servers. Owner
+        comes from the registry — exposed names are only prefixed on collision,
+        so prefix-matching would be wrong."""
+        if servers is None:
+            return list(self._schemas)
+        return [s for s in self._schemas
+                if self._registry[s["function"]["name"]][0] in servers]
 
     async def call(self, name: str, arguments: dict) -> str:
         target = self._registry.get(name)
@@ -179,8 +185,8 @@ class LazyBridge:
                     raise result.get("error") or ToolCallError("MCP servers failed to start")
                 self._bridge = result["bridge"]
 
-    def ollama_tools(self) -> list[dict]:
-        return self._bridge.ollama_tools() if self._bridge else []
+    def ollama_tools(self, servers: set | None = None) -> list[dict]:
+        return self._bridge.ollama_tools(servers) if self._bridge else []
 
     async def call(self, name: str, arguments: dict) -> str:
         return await self._bridge.call(name, arguments)
