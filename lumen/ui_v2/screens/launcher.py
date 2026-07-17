@@ -1,8 +1,7 @@
-"""Quick-launcher: faux desktop canvas + the palette, which streams real answers
-from the daemon. The palette is shared by the full tab screen and the frameless
-hotkey overlay."""
-from PyQt6.QtCore import Qt, QPointF, QTimer
-from PyQt6.QtGui import QPainter, QRadialGradient
+"""Quick-launcher palette, which streams real answers
+from the daemon. Hotkey-only since new-features item 1: the palette lives in the
+frameless hotkey overlay (app.py) — there is no launcher tab."""
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 
 from .. import sample_data as S
@@ -277,62 +276,3 @@ class LauncherPalette(QFrame):
         self._eyebrow("⚠ error", T.WARN)
         self.resp_text.setText(msg)
 
-
-class LauncherScreen(QWidget):
-    """Full tab: faux desktop with the palette centered on it."""
-
-    def __init__(self, state: AppState, chat_client=None):
-        super().__init__()
-        self.state = state
-        chat = chat_client or state._chat
-
-        root = vbox(self)
-        content = QWidget()
-        cv = vbox(content, (0, 0, 0, 0), 0)
-
-        waybar = QFrame()
-        waybar.setObjectName("waybar")
-        waybar.setFixedHeight(T.WAYBAR_H)
-        wb = hbox(waybar, (12, 0, 12, 0), 0)
-        ws = hbox(s=10)
-        ws.addWidget(label("1", 10, T.ACCENT))
-        for n in "234":
-            ws.addWidget(label(n, 10, T.TEXT_DIM))
-        wb.addLayout(ws)
-        wb.addStretch(1)
-        rs = hbox(s=14)
-        for t in (T.MODEL_NAME, "local", "62%"):
-            rs.addWidget(label(t, 10, T.TEXT_DIM))
-        wb.addLayout(rs)
-        cv.addWidget(waybar)
-
-        cv.addSpacing(78)
-        row = hbox(s=0)
-        row.addStretch(1)
-        row.addWidget(LauncherPalette(state, chat))
-        row.addStretch(1)
-        cv.addLayout(row)
-
-        cap = label("centered overlay · summoned by global hotkey, dismisses on esc or focus loss",
-                    10, T.TEXT_GHOST)
-        cap.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        capw = QWidget()
-        cl = vbox(capw, (0, 26, 0, 40), 0)
-        cl.addWidget(cap)
-        cv.addWidget(capw)
-        cv.addStretch(1)
-
-        root.addWidget(scroll(content), 1)
-
-    def paintEvent(self, ev):
-        p = QPainter(self)
-        p.fillRect(self.rect(), qcolor(T.BG_OVERLAY))
-        w, h = self.width(), self.height()
-        for cx, cy, col, stop in ((0.20, 0.12, "#181a26", 0.38), (0.82, 0.78, "#161824", 0.40)):
-            fx = max(cx, 1 - cx) * w
-            fy = max(cy, 1 - cy) * h
-            radius = (fx * fx + fy * fy) ** 0.5 * stop
-            g = QRadialGradient(QPointF(cx * w, cy * h), radius)
-            g.setColorAt(0.0, qcolor(col))
-            g.setColorAt(1.0, qcolor(col, 0))
-            p.fillRect(self.rect(), g)

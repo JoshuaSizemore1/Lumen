@@ -179,3 +179,8 @@ assembly.
 - **d) Label pills aren't dynamic.** When a new label appears (created by a
   rule or an accepted suggestion), the chip row and row pills must pick it
   up on the next `emails.list` — no restart required.
+
+
+  ## 11. The local llm is no longer using tools like it is meant to and instead making up fake information, even sometimes saying it does not have access to my email
+
+  ## 12. The html rendering in the emails is not working properly with images which makes it look bad

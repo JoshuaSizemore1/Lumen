@@ -14,7 +14,6 @@ from .rule_dialog import RuleDialog
 from .state import AppState
 from .styles import build_qss
 from .widgets import Chip, Dot, font, hbox, label, vbox
-from .screens.launcher import LauncherScreen
 from .screens.dashboard import DashboardScreen
 from .screens.calendar import CalendarScreen
 from .screens.mail import MailScreen
@@ -23,7 +22,9 @@ from .screens.books import BooksScreen
 from .screens.chat import ChatScreen
 from .screens.settings import SettingsScreen
 
-TABS = ("launcher", "dashboard", "calendar", "mail", "todos", "books", "chat", "settings")
+# Chat leads (new-features item 1): the quick launcher is hotkey-only now —
+# its palette lives in the overlay (app.py), not in a tab.
+TABS = ("chat", "dashboard", "calendar", "mail", "todos", "books", "settings")
 
 _active_window = None  # keeps the rebuilt window alive after an accent switch
 
@@ -83,13 +84,12 @@ class LumenWindow(QWidget):
 
         self.stack = QStackedWidget()
         self.screens = {
-            "launcher": LauncherScreen(self.state),
+            "chat": ChatScreen(self.state),
             "dashboard": DashboardScreen(self.state),
             "calendar": CalendarScreen(self.state),
             "mail": MailScreen(self.state),
             "todos": TodosScreen(self.state),
             "books": BooksScreen(self.state),
-            "chat": ChatScreen(self.state),
             "settings": SettingsScreen(self.state),
         }
         for key in TABS:
@@ -112,7 +112,7 @@ class LumenWindow(QWidget):
         self.state.mails_changed.connect(self._update_mail_badge)
         self.state.accent_requested.connect(self._change_accent)
 
-        for i, key in enumerate(("launcher", "dashboard", "calendar", "todos", "books", "chat")):
+        for i, key in enumerate(("chat", "dashboard", "calendar", "todos", "books")):
             sc = QShortcut(QKeySequence(str(i + 1)), self)
             sc.activated.connect(lambda k=key: self.switch_to(k))
 
@@ -150,16 +150,16 @@ class LumenWindow(QWidget):
 
         self.mail_badge = Chip("4", T.ACCENT_ON, T.ACCENT, bg=T.ACCENT,
                                px=10, radius=8, hpad=5, vpad=1, weight=600)
-        names = {"launcher": "Launcher", "dashboard": "Dashboard", "calendar": "Calendar",
-                 "mail": "Mail", "todos": "Todos", "books": "Books", "chat": "Chat"}
-        kbd = {"launcher": "1", "dashboard": "2", "calendar": "3", "todos": "4",
-               "books": "5", "chat": "6"}
+        names = {"chat": "Chat", "dashboard": "Dashboard", "calendar": "Calendar",
+                 "mail": "Mail", "todos": "Todos", "books": "Books"}
+        kbd = {"chat": "1", "dashboard": "2", "calendar": "3", "todos": "4",
+               "books": "5"}
         self.tab_buttons: dict[str, QPushButton] = {}
         for i, key in enumerate(TABS[:-1]):
             badge = self.mail_badge if key == "mail" else Chip(
                 kbd[key], T.TEXT_FAINT, T.BORDER_STRONG, px=10, hpad=4, vpad=0)
             b = TabButton(names[key], badge)
-            b.setChecked(key == "launcher")
+            b.setChecked(key == "chat")
             self.tab_group.addButton(b, i)
             self.tab_buttons[key] = b
             lay.addWidget(b)
@@ -183,7 +183,7 @@ class LumenWindow(QWidget):
         idx = TABS.index(key)
         self.tab_buttons[key].setChecked(True)
         self.stack.setCurrentIndex(idx)
-        if key in ("launcher", "chat"):
+        if key == "chat":
             self.state.warm_model()   # user headed somewhere they'll chat → preload
 
     def _open_chat(self, conv_id: int):

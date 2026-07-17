@@ -24,7 +24,7 @@ from .state import AppState
 
 class LauncherOverlay(QDialog):
     """Frameless hotkey-summoned overlay wrapping its own launcher palette
-    (a dedicated chat client so it never collides with the tab launcher)."""
+    (a dedicated chat client so it never collides with the Chat tab)."""
 
     def __init__(self, state: AppState, chat_client):
         super().__init__()

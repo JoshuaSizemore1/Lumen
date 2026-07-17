@@ -441,7 +441,7 @@ def test_warm_model_sends_warm_on_chat_client(qtbot):
     AppState().warm_model()
 
 
-def test_switch_to_launcher_warms_but_other_tabs_do_not(qtbot):
+def test_switch_to_chat_warms_but_other_tabs_do_not(qtbot):
     from lumen.ui_v2.main import LumenWindow
     chat = FakeClient()
     win = LumenWindow(AppState(data=FakeClient(), chat=chat))
@@ -449,8 +449,19 @@ def test_switch_to_launcher_warms_but_other_tabs_do_not(qtbot):
     chat.sent.clear()
     win.switch_to("dashboard")
     assert ("warm", {}) not in chat.sent
-    win.switch_to("launcher")
+    win.switch_to("chat")
     assert ("warm", {}) in chat.sent
+
+
+def test_chat_is_first_tab_and_launcher_tab_is_gone(qtbot):
+    # new-features item 1: chat-first main window, launcher hotkey-only
+    from lumen.ui_v2.main import LumenWindow, TABS
+    assert TABS[0] == "chat" and "launcher" not in TABS
+    win = LumenWindow(AppState(data=FakeClient(), chat=FakeClient()))
+    qtbot.addWidget(win)
+    assert win.stack.currentWidget() is win.screens["chat"]
+    assert win.tab_buttons["chat"].isChecked()
+    assert "launcher" not in win.screens
 
 
 def test_ui_model_label_matches_daemon_default():

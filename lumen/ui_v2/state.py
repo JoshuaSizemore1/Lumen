@@ -131,7 +131,7 @@ class AppState(QObject):
     mails_changed = pyqtSignal()
     books_changed = pyqtSignal()
     recs_changed = pyqtSignal()
-    view_requested = pyqtSignal(str)      # tab key: launcher/dashboard/...
+    view_requested = pyqtSignal(str)      # tab key: chat/dashboard/...
     open_chat_requested = pyqtSignal(int)  # hand a conversation off to the full Chat screen
     confirm_requested = pyqtSignal(dict)  # confirm-dialog payload (may carry confirm_id)
     compose_requested = pyqtSignal(dict)  # compose-popup payload (may carry compose_id)
