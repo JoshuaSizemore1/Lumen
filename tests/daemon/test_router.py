@@ -3674,3 +3674,39 @@ async def test_push_due_dates_decline_writes_nothing(tmp_path):
     assert events[-1]["result"]["cancelled"] is True
     assert writer.created == []
     assert store.active_assignments()[0]["calendar_event_id"] is None
+
+
+async def test_add_announcement_todo_creates_and_links(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    store.upsert_announcements([{"id": 5, "course_id": 1, "title": "Exam",
+        "posted_at": "2026-08-20T00:00:00Z", "message": "m", "html_url": "a"}])
+    store.set_announcement_flag(5, 1, '{"text": "Study for exam", "due": "2026-08-28"}')
+    out = await collect(router, "canvas.add_announcement_todo", {"id": 5})
+    tid = out[-1]["result"]["todo_id"]
+    match = [t for t in todos.list_all() if t["text"] == "Study for exam"]
+    assert len(match) == 1 and match[0]["due_date"] == "2026-08-28"
+    assert store.get_announcement(5)["todo_id"] == tid
+    # idempotent
+    out2 = await collect(router, "canvas.add_announcement_todo", {"id": 5})
+    assert out2[-1]["result"]["todo_id"] == tid
+    assert len([t for t in todos.list_all() if t["text"] == "Study for exam"]) == 1
+
+
+async def test_canvas_assignments_route_flags_pending_marker(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)
+    out = await collect(router, "canvas.assignments", {})
+    items = out[-1]["result"]["assignments"]
+    assert items[0]["id"] == 10 and items[0]["pending_marker"] is True
+    assert items[0]["course_code"] == "CS3505"
+
+
+def test_state_canvas_seam_defaults_without_daemon():
+    from lumen.ui_v3.state import AppState
+    st = AppState()   # sample mode, no daemon (_data is None)
+    got = {}
+    st.canvas_assignments(lambda r: got.setdefault("a", r))
+    st.canvas_announcements(lambda r: got.setdefault("n", r))
+    assert got["a"] == {"assignments": []}
+    assert got["n"] == {"announcements": []}

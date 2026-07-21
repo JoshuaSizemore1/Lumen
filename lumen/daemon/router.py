@@ -5,6 +5,7 @@ the subject hints below plus a small-model classifier fallback on total regex
 miss (daemon/llm/intent.py)."""
 
 import asyncio
+import json
 import logging
 import re
 import sqlite3
@@ -875,6 +876,59 @@ class Router:
                     store.set_calendar_marker(p["id"], p["event_id"], p["due"])
                     updated += 1
             yield {"result": {"added": added, "updated": updated}}
+        elif type_ == "canvas.assignments":
+            # The Canvas tab's assignment list. pending_marker flags rows the
+            # user could push to the calendar (see canvas.pending_calendar).
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                store = self._canvas.store
+                courses = store.courses_by_id()
+                pending = {m["id"] for m in store.pending_markers(
+                    [c["id"] for c in store.active_courses()])}
+                items = []
+                for a in store.active_assignments():
+                    c = courses.get(a["course_id"], {})
+                    items.append({**a, "course_code": c.get("course_code"),
+                                  "pending_marker": a["id"] in pending})
+                yield {"result": {"assignments": items}}
+        elif type_ == "canvas.announcements":
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                store = self._canvas.store
+                courses = store.courses_by_id()
+                items = [{**a, "course_code":
+                          courses.get(a["course_id"], {}).get("course_code")}
+                         for a in store.announcements(limit=30)]
+                yield {"result": {"announcements": items}}
+        elif type_ == "canvas.add_announcement_todo":
+            # Ungated: turns an actionable announcement into a local todo the
+            # user tapped to accept. Idempotent — a second tap returns the same id.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+                return
+            store = self._canvas.store
+            ann = store.get_announcement(int(payload["id"]))
+            if ann is None:
+                yield {"error": "announcement not found"}
+                return
+            if ann["todo_id"] is not None:
+                yield {"result": {"todo_id": ann["todo_id"]}}
+                return
+            sug = {}
+            if ann["suggested_todo"]:
+                try:
+                    sug = json.loads(ann["suggested_todo"])
+                except ValueError:
+                    sug = {}
+            text = (sug.get("text") or ann["title"] or "Canvas announcement").strip()
+            due = sug.get("due") or None
+            code = store.courses_by_id().get(ann["course_id"], {}).get("course_code")
+            tags = ([code] if code else []) + ["canvas", "announcement"]
+            tid = self._todos.add_structured(text, due, tags)
+            store.link_announcement_todo(ann["id"], tid)
+            yield {"result": {"todo_id": tid}}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}

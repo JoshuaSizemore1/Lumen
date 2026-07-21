@@ -264,6 +264,32 @@ class AppState(QObject):
             return
         self._data.request("canvas.disconnect", {}, cb or (lambda _r: None))
 
+    def canvas_assignments(self, cb) -> None:
+        if self._data is None:
+            cb({"assignments": []}); return
+        self._data.request("canvas.assignments", {}, cb)
+
+    def canvas_announcements(self, cb) -> None:
+        if self._data is None:
+            cb({"announcements": []}); return
+        self._data.request("canvas.announcements", {}, cb)
+
+    def canvas_pending_calendar(self, cb) -> None:
+        if self._data is None:
+            cb({"markers": []}); return
+        self._data.request("canvas.pending_calendar", {}, cb)
+
+    def canvas_push_due_dates(self, cb) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.push_due_dates", {}, cb)
+
+    def canvas_add_announcement_todo(self, ann_id: int, cb=None) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.add_announcement_todo", {"id": ann_id},
+                           cb or (lambda _r: None))
+
     # ---- google (re-consent when the token expires) ----
     def google_reconnect(self, cb) -> None:
         """Kick off the browser consent flow in the daemon. cb(snapshot) fires
