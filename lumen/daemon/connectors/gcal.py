@@ -182,3 +182,52 @@ class CalendarSync:
             except Exception:
                 log.exception("calendar poll iteration failed")
             await asyncio.sleep(interval)
+
+
+class CalendarMarkerWriter:
+    """Confirmation-gated writer for thin all-day Canvas due markers on the
+    user's primary calendar. Separate from the read-only CalendarSync poller:
+    the daemon only calls this AFTER the UI's batch confirm resolves. Returns
+    the event id so reconciliation can later move/track the marker."""
+
+    def __init__(self, google_cfg, *, service_factory=None):
+        self._cfg = google_cfg
+        self._service_factory = service_factory or self._build_service
+
+    def _build_service(self):
+        creds = google_auth.load_credentials(self._cfg, google_auth.WRITE_SCOPES)
+        if creds is None:
+            return None
+        from googleapiclient.discovery import build
+        return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+    @staticmethod
+    def _span(day: str) -> dict:
+        end_excl = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+        return {"start": {"date": day}, "end": {"date": end_excl}}
+
+    def create_all_day(self, title: str, day: str) -> str | None:
+        service = self._service_factory()
+        if service is None:
+            return None
+        body = {"summary": title, **self._span(day)}
+        try:
+            created = service.events().insert(
+                calendarId="primary", body=body, sendUpdates="none").execute()
+        except Exception:
+            log.exception("canvas marker insert failed")
+            return None
+        return created.get("id")
+
+    def patch_all_day(self, event_id: str, day: str) -> bool:
+        service = self._service_factory()
+        if service is None:
+            return False
+        try:
+            service.events().patch(
+                calendarId="primary", eventId=event_id, body=self._span(day),
+                sendUpdates="none").execute()
+        except Exception:
+            log.exception("canvas marker patch failed")
+            return False
+        return True
