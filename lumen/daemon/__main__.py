@@ -55,7 +55,7 @@ async def run() -> None:
                             write_tools_map(cfg.mcp.servers))
                   if cfg.mcp.enabled else None)
     router = Router(llm, TodoStore(conn), BookStore(conn), calendar=calendar,
-                    mail=mail, mail_store=emails,
+                    mail=mail, mail_store=emails, canvas=canvas,
                     bridge=bridge, confirm=broker, write_gate=write_gate,
                     model_router=model_router, tool_log=tool_log,
                     conversations=ConversationStore(conn),

@@ -3524,3 +3524,56 @@ async def test_propose_edit_op_honest_failure_and_validation():
                         "files.propose_edit",
                         {"path": "a.md", "content": "x", "instruction": "y"})
     assert "error" in out[0]                     # LLM down → IPC error
+
+
+class FakeCanvas:
+    def __init__(self, connected=False, last_sync=None):
+        self._connected = connected
+        self._last = last_sync
+        self.session = None
+        self.cleared = False
+
+    def set_session(self, cookies):
+        self.session = cookies
+        self._connected = True
+
+    def clear_session(self):
+        self.cleared = True
+        self._connected = False
+
+    @property
+    def connected(self):
+        return self._connected
+
+    def last_sync(self):
+        return self._last
+
+
+async def test_canvas_set_session_hands_cookies_to_sync():
+    canvas = FakeCanvas()
+    out = await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
+                        "canvas.set_session", {"cookies": {"canvas_session": "x"}})
+    assert canvas.session == {"canvas_session": "x"}
+    assert canvas.connected is True
+    assert out[-1].get("done") is True
+
+
+async def test_canvas_status_reports_live_state():
+    canvas = FakeCanvas(connected=True, last_sync="2026-08-01T09:00:00")
+    out = await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
+                        "canvas.status", {})
+    assert out[-1]["result"]["connected"] is True
+    assert out[-1]["result"]["last_sync"] == "2026-08-01T09:00:00"
+
+
+async def test_canvas_disconnect_clears_session():
+    canvas = FakeCanvas(connected=True)
+    out = await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
+                        "canvas.disconnect", {})
+    assert canvas.cleared is True
+    assert out[-1].get("done") is True
+
+
+async def test_canvas_routes_without_canvas_are_safe():
+    out = await collect(Router(FakeLLM(), FakeStore()), "canvas.status", {})
+    assert out[-1]["result"]["connected"] is False

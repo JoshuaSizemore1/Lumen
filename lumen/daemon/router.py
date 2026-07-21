@@ -519,6 +519,7 @@ def todo_context(todos: list[dict], today: date, has_tool: bool = False) -> str:
 
 class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
+                 canvas=None,
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
                  suggestions=None, scheduling=None, notes=None, write_dir=None,
@@ -532,6 +533,7 @@ class Router:
         self._books = books
         self._calendar = calendar   # CalendarSync facade: list_range/last_sync/connected
         self._mail = mail           # GmailSync facade: poll_forever/connected
+        self._canvas = canvas       # CanvasSync: set_session/clear_session/connected/last_sync
         self._mail_store = mail_store   # EmailStore — local mirror the UI/chat read from
         self._bridge = bridge
         self._confirm = confirm     # ConfirmBroker — gates every external write
@@ -751,6 +753,29 @@ class Router:
             else:
                 from .settings_snapshot import build_settings_snapshot
                 yield {"result": build_settings_snapshot(self._config)}
+        elif type_ == "canvas.set_session":
+            # UI hands the browser session (cookies) to the in-memory poller.
+            # Never a password — the daemon only ever sees cookies.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                self._canvas.set_session(payload.get("cookies", {}))
+                yield {"done": True}
+        elif type_ == "canvas.status":
+            # Live poller state (not config) for the Settings connect row.
+            if self._canvas is None:
+                yield {"result": {"connected": False, "last_sync": None,
+                                  "enabled": False}}
+            else:
+                yield {"result": {
+                    "connected": self._canvas.connected,
+                    "last_sync": self._canvas.last_sync(),
+                    "enabled": (self._config.canvas.enabled
+                                if self._config is not None else False)}}
+        elif type_ == "canvas.disconnect":
+            if self._canvas is not None:
+                self._canvas.clear_session()
+            yield {"done": True}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
