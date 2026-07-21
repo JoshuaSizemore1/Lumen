@@ -1729,3 +1729,20 @@ def test_launcher_eyebrow_animates_then_goes_static(qtbot):
     pal.chat.chunk.emit("hello")
     assert not pal.resp_eyebrow._timer.isActive()   # answer arrived → freeze
     assert "answer" in pal.resp_eyebrow.text()
+
+
+def test_canvas_set_session_requests_route_with_cookies():
+    data = FakeClient()
+    AppState(data=data).canvas_set_session({"canvas_session": "abc"})
+    assert data.requests[-1][0] == "canvas.set_session"
+    assert data.requests[-1][1] == {"cookies": {"canvas_session": "abc"}}
+
+
+def test_canvas_status_stub_when_sample_mode():
+    got = []
+    AppState().canvas_status(got.append)          # no data client
+    assert got == [{"connected": False, "last_sync": None, "enabled": False}]
+
+
+def test_canvas_disconnect_is_safe_without_client():
+    AppState().canvas_disconnect()                # must not raise

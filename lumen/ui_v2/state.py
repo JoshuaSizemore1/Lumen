@@ -246,6 +246,24 @@ class AppState(QObject):
         if self._chat is not None:
             self._chat.send("warm", {})
 
+    # ---- canvas (session handoff + status; password never crosses here) ----
+    def canvas_set_session(self, cookies: dict, cb=None) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.set_session", {"cookies": cookies},
+                           cb or (lambda _r: None))
+
+    def canvas_status(self, cb) -> None:
+        if self._data is None:
+            cb({"connected": False, "last_sync": None, "enabled": False})
+            return
+        self._data.request("canvas.status", {}, cb)
+
+    def canvas_disconnect(self, cb=None) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.disconnect", {}, cb or (lambda _r: None))
+
     # ---- conversations (chat history) ----
     def list_conversations(self, cb) -> None:
         """cb(rows) with sidebar-shaped [{id, title, updated_at}], newest first."""
