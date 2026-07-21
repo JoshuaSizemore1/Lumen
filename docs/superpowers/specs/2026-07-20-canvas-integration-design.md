@@ -198,11 +198,20 @@ password** — only cookies.
 
 ## Build sequence (high level; detailed plan follows via writing-plans)
 
-1. `CanvasClient` + `CanvasStore` + schema (daemon; unit-testable against recorded
+1. ✅ `CanvasClient` + `CanvasStore` + schema (daemon; unit-testable against recorded
    JSON captured in the spike).
-2. Login window + cookie-handoff IPC + keyring credentials/autofill (UI).
-3. Sync poller + reconciliation into todos + batch calendar confirm.
-4. MCP read tools + briefing/chat wiring.
-5. Announcements feed + actionable-flag.
-6. Canvas screen + Settings section.
-7. Live verification on the real account (a current course, or fall-term data).
+2. ✅ Login window + cookie-handoff IPC + keyring credentials/autofill (UI).
+3. ✅ Sync poller + reconciliation into todos + batch calendar confirm.
+   (Detailed plan: `docs/superpowers/plans/2026-07-21-canvas-parts-4-5.md`.)
+4. ✅ MCP read tools (`lumen/mcp_servers/canvas.py`) + briefing/chat wiring.
+5. ✅ Announcements feed + actionable-flag (bounded small-model classify per new
+   announcement; "Add as todo?" offer, user-confirmed).
+6. ✅ Canvas screen content (assignments + announcements + confirm buttons).
+   Settings section pending polish; visual layout deferred to `ui-spec.md`.
+7. ⬜ Live verification on the real account (a current course, or fall-term data) —
+   owed by Josh (QtWebEngine + Duo login can only be driven on the real machine).
+
+**v1 note:** a due-date change re-lists the assignment in `pending_calendar` as an
+`update`, so its calendar marker moves only after the user re-taps confirm —
+deliberate, to honour "no silent external writes". The local todo's due date
+updates automatically (not an external write).

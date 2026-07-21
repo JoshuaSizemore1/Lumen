@@ -323,9 +323,18 @@ changed nothing; approve moved it to Trash and the mirror row vanished.
 
 ## 9. Look into a way to send text messages, and see messages?
 
-## 10. THE BIG ONE - be able to grab assignments and other information from my u of u canvas account, then add it to the todo, and calendar *WORKING ON*
+## 10. THE BIG ONE - be able to grab assignments and other information from my u of u canvas account, then add it to the todo, and calendar *DONE*
+Parts 1–5 built (2026-07-21). Sync mirrors active-course assignments +
+announcements; reconciliation auto-creates local todos (marks them done on
+submission, never recreates a deleted one); a one-tap batch confirm pushes
+all-day due-date markers to Google Calendar (gated, marker updates re-confirmed —
+no silent external writes); new announcements get a bounded small-model
+actionable-flag with an "Add as todo?" offer; a read-only `canvas` MCP server
+(list/get assignments + announcements) answers chat, and announcements fold into
+the morning briefing. Live web-view login (Part 3b) still owes Josh's real-account
+test (QtWebEngine + Duo).
 
-## 11. Add a way for it to brows the internet, and pull information from queries, so I can ask it more specific questions like the address of something, etc
+## 11. Add a way for it to browes the internet, and pull information from queries, so I can ask it more specific questions like the address of something, etc
 
 ---
 
