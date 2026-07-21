@@ -8,8 +8,8 @@ from .. import sample_data as S
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    Chip, ClickLabel, ClickRow, clear_layout, font, hbox, hline, label, qcolor,
-    scroll, vbox,
+    Chip, ClickLabel, ClickRow, TypingDots, clear_layout, font, hbox, hline,
+    label, scroll, vbox,
 )
 
 WAKE_THRESHOLD_MS = 1500
@@ -152,7 +152,9 @@ class LauncherPalette(QFrame):
 
         foot = QWidget()
         fv = hbox(foot, (18, 8, 18, 10), 10)
-        self.resp_eyebrow = label("◇ thinking…", 11, T.INFO)
+        # Animated while the model works; _eyebrow() freezes it to a fixed
+        # status (waking / answer / captured / error) as those states arrive.
+        self.resp_eyebrow = TypingDots("◇ thinking", 11, T.INFO)
         fv.addWidget(self.resp_eyebrow)
         fv.addStretch(1)
         self.open_chat_link = ClickLabel("open in Chat ↗", 10, T.ACCENT,
@@ -176,13 +178,11 @@ class LauncherPalette(QFrame):
         self.thread_lay.insertWidget(self.thread_lay.count() - 1, self.tool_lab)
         self.resp_text = label("", 14, T.TEXT_PRIMARY, sans=True, wrap=True)
         self.thread_lay.insertWidget(self.thread_lay.count() - 1, self.resp_text)
+        self.resp_eyebrow.start("◇ thinking")   # animate until the answer lands
 
     def _eyebrow(self, text: str, color: str):
         if getattr(self, "resp_eyebrow", None) is not None:
-            self.resp_eyebrow.setText(text)
-            pal = self.resp_eyebrow.palette()
-            pal.setColor(self.resp_eyebrow.foregroundRole(), qcolor(color))
-            self.resp_eyebrow.setPalette(pal)
+            self.resp_eyebrow.set_static(text, color)
 
     def _run(self, text: str):
         self.input.setText(text)

@@ -1,9 +1,10 @@
 """gcal MCP server: input validation, graceful degradation, event formatting.
 Fake service objects only — the live call is verified at the phase gate."""
 
+from datetime import date
 from types import SimpleNamespace
 
-from lumen.mcp_servers.gcal import NOT_CONNECTED, _list_events
+from lumen.mcp_servers.gcal import NOT_CONNECTED, _list_events, _search_events
 
 
 class FakeExec:
@@ -65,6 +66,83 @@ def test_no_events_is_an_explicit_answer():
     out = _list_events(FakeService([CALS[0]], {"primary": [{"items": []}]}),
                        "2026-09-01", "2026-09-30")
     assert "No events between 2026-09-01 and 2026-09-30" in out
+
+
+def test_list_events_sends_no_query_filter():
+    """list_events lists a range; the topic filter belongs to search_events."""
+    svc = RecordingService([CALS[0]], ITEMS)
+    _list_events(svc, "2026-09-01", "2026-09-30")
+    assert "q" not in svc.calls[0]
+
+
+# ---- search_events (topic lookup, no date known) ----
+
+class RecordingService(FakeService):
+    """Captures the kwargs handed to events().list so the tests can assert what
+    actually reaches Google — `q` is the whole point of search_events."""
+
+    def __init__(self, cals, payload):
+        super().__init__(cals, {})
+        self._payload = payload
+        self.calls: list[dict] = []
+
+    def events(self):
+        def _list(**kw):
+            self.calls.append(kw)
+            return FakeExec(self._payload)
+        return SimpleNamespace(list=_list)
+
+
+TODAY = date(2026, 7, 18)
+
+
+def test_search_passes_the_query_to_google_as_a_text_filter():
+    svc = RecordingService([CALS[0]], ITEMS)
+    out = _search_events(svc, "dentist", 1, 12, today=TODAY)
+    assert svc.calls[0]["q"] == "dentist"
+    assert "Dentist [Personal]" in out
+
+
+def test_search_defaults_span_a_year_ahead_and_a_month_back():
+    """The common question is 'when is my next X?'. The default window has to
+    reach far enough forward to answer it without the model doing date math.
+    Months are 31 days here — deliberately generous, so the window never
+    under-covers the range the description promises."""
+    svc = RecordingService([CALS[0]], {"items": []})
+    _search_events(svc, "dentist", 1, 12, today=TODAY)
+    assert svc.calls[0]["timeMin"].startswith("2026-06-17")   # 31 days back
+    assert svc.calls[0]["timeMax"].startswith("2027-07-25")   # 372 days on
+
+
+def test_search_clamps_absurd_windows():
+    """A 4B model can pass anything; Google should never be asked for a century."""
+    svc = RecordingService([CALS[0]], {"items": []})
+    _search_events(svc, "dentist", 9999, 9999, today=TODAY)
+    assert svc.calls[0]["timeMin"] > "2021-"      # 60 months back, not 9999
+    assert svc.calls[0]["timeMax"] < "2032-"
+
+
+def test_search_needs_a_query():
+    assert "query is required" in _search_events(FakeService(CALS, {}), "  ", 1, 12)
+
+
+def test_search_not_connected_message():
+    assert _search_events(None, "dentist", 1, 12) == NOT_CONNECTED
+
+
+def test_search_api_failure_degrades_gracefully():
+    svc = RecordingService([CALS[0]], RuntimeError("boom"))
+    assert "Couldn't reach" in _search_events(svc, "dentist", 1, 12, today=TODAY)
+
+
+def test_empty_search_reads_as_a_completed_search_not_missing_access():
+    """The refusal this whole tool exists to kill is 'I don't have access'. A
+    genuine no-match must hand the model language for 'you have nothing like
+    that', so it never reaches for the access excuse."""
+    svc = RecordingService([CALS[0]], {"items": []})
+    out = _search_events(svc, "therapy", 1, 12, today=TODAY)
+    assert "read successfully" in out and "no such event" in out
+    assert "therapy" in out
 
 
 # ---- create_event (write half) ----

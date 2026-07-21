@@ -81,6 +81,146 @@ def normalize_message(raw: dict) -> dict:
             "is_read": "UNREAD" not in labels, "attachments": attachments}
 
 
+# ---- mail query parsing (search_email tool + UI search box) ----------------
+# The local 4B model, trained on Gmail, emits operator queries (from:me,
+# subject:'x', on:2026-07-08, after:/before:, boolean ||) and asks for "the most
+# recent email". The old FTS-only search fed all of that to MATCH as literal
+# tokens, so operator queries returned nothing and "most recent" returned a
+# bm25-ranked hit from months ago (live fabrication 2026-07-17, todo-fixes
+# #11/#13). parse_mail_query meets the model where it is: it pulls the operators
+# out into structured filters (date filters are the USER's LOCAL day, converted
+# to the UTC received_at is stored in), leaves the rest as free text, and the
+# store orders every result newest-first so recency questions just work.
+_QUERY_OP = _re.compile(r"""(\w+):(?:"([^"]*)"|'([^']*)'|(\S+))""")
+_FIELD = {
+    "from": "sender", "sender": "sender",
+    "to": "recipients", "recipient": "recipients", "recipients": "recipients",
+    "cc": "recipients",
+    "subject": "subject", "title": "subject",
+    "body": "body",
+    "after": "after", "since": "after",
+    "before": "before", "until": "before",
+    "on": "on", "date": "on", "received": "on", "day": "on",
+    "newer_than": "newer", "older_than": "older",
+    "in": "scope", "label": "label", "is": "flag",
+}
+_ME = frozenset({"me", "myself", "i", "self"})
+_BOOL_JUNK = _re.compile(r"\|\||&&|[|&()]|\b(?:AND|OR|NOT)\b")
+_MONTHS = {m: i for i, names in enumerate(
+    [("jan", "january"), ("feb", "february"), ("mar", "march"),
+     ("apr", "april"), ("may",), ("jun", "june"), ("jul", "july"),
+     ("aug", "august"), ("sep", "sept", "september"), ("oct", "october"),
+     ("nov", "november"), ("dec", "december")], start=1) for m in names}
+
+
+def _parse_date(s: str, today: date) -> date | None:
+    """A date the model or user wrote → a calendar date. ISO/slash formats,
+    today/yesterday, and month-name shapes ('July 8', '8th of July')."""
+    s = s.strip().strip(",")
+    low = s.lower()
+    if low == "today":
+        return today
+    if low == "yesterday":
+        return today - timedelta(days=1)
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    month = day = year = None
+    for t in _re.findall(r"[a-z]+|\d+", low):
+        if t in _MONTHS:
+            month = _MONTHS[t]
+        elif t.isdigit():
+            n = int(t)
+            if n > 31:
+                year = n
+            elif day is None:
+                day = n
+    if month and day:
+        try:
+            return date(year or today.year, month, day)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_ndays(s: str) -> int | None:
+    m = _re.match(r"(\d+)\s*([dwmy]?)", s.strip().lower())
+    return int(m.group(1)) * {"": 1, "d": 1, "w": 7, "m": 30, "y": 365}[m.group(2)] \
+        if m else None
+
+
+def parse_mail_query(query: str, *, now_local: datetime) -> dict:
+    """A Gmail-ish query string → structured filters + free-text terms. Dates
+    are resolved in `now_local`'s timezone and returned as UTC ISO bounds (the
+    format received_at is stored in), so 'on:2026-07-08' matches the messages
+    the user saw on their July 8, not the UTC calendar day."""
+    tz, today = now_local.tzinfo, now_local.date()
+
+    def day_bounds(d: date) -> tuple[str, str]:
+        start = datetime(d.year, d.month, d.day, tzinfo=tz)
+        return (start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+                (start + timedelta(days=1)).astimezone(timezone.utc)
+                .isoformat(timespec="seconds"))
+
+    def rel(days: int) -> str:
+        return (now_local - timedelta(days=days)).astimezone(
+            timezone.utc).isoformat(timespec="seconds")
+
+    f: dict = {"terms": [], "sender": None, "recipients": None, "subject": None,
+               "after": None, "before": None, "scope": None, "unread": None}
+    leftover, pos = [], 0
+    for m in _QUERY_OP.finditer(query or ""):
+        leftover.append((query or "")[pos:m.start()])
+        pos = m.end()
+        field = _FIELD.get(m.group(1).lower())
+        val = (m.group(2) or m.group(3) or m.group(4) or "").strip("*").strip()
+        if field is None:
+            leftover.append(val)          # unknown operator → keep the value as free text
+            continue
+        if not val:
+            continue
+        if field == "sender":
+            f["scope"] = "sent" if val.lower() in _ME else f["scope"]
+            f["sender"] = None if val.lower() in _ME else val
+        elif field == "recipients":
+            f["recipients"] = None if val.lower() in _ME else val
+        elif field == "subject":
+            f["subject"] = val
+        elif field == "body":
+            leftover.append(val)          # body words are just free-text search
+        elif field in ("after", "before", "on"):
+            d = _parse_date(val, today)
+            if d is not None:
+                s, e = day_bounds(d)
+                if field == "on":
+                    f["after"], f["before"] = s, e
+                elif field == "after":
+                    f["after"] = s
+                else:
+                    f["before"] = s
+        elif field == "newer" and (n := _parse_ndays(val)) is not None:
+            f["after"] = rel(n)
+        elif field == "older" and (n := _parse_ndays(val)) is not None:
+            f["before"] = rel(n)
+        elif field == "scope":
+            f["scope"] = {"sent": "sent", "inbox": "inbox"}.get(val.lower(), f["scope"])
+        elif field == "flag":
+            f["unread"] = {"unread": True, "read": False}.get(val.lower(), f["unread"])
+        # label: is accepted (so it doesn't pollute FTS) but not filtered on
+    leftover.append((query or "")[pos:])
+    text = _BOOL_JUNK.sub(" ", " ".join(leftover)).replace('"', " ") \
+        .replace("'", " ").replace("*", " ")
+    f["terms"] = text.split()
+    return f
+
+
+def _like_arg(v: str) -> str:
+    esc = v.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    return f"%{esc}%"
+
+
 class EmailStore:
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
@@ -126,16 +266,50 @@ class EmailStore:
             f"LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
         return [self._to_dict(r) for r in rows]
 
-    def search(self, query: str, limit: int = 50) -> list[dict]:
-        # Quote each token so user input can't be parsed as FTS5 syntax.
-        q = " ".join(f'"{t}"' for t in (query or "").replace('"', " ").split())
-        if not q:
-            return []
+    def search(self, query: str, limit: int = 50,
+               now_local: datetime | None = None) -> list[dict]:
+        """Newest-first search over the mirror. Understands the operator/date
+        queries the model emits (from:/to:/subject:/on:/after:/before:/
+        newer_than:/in:/is:) as structured filters, resolving dates in the
+        user's local timezone; the rest is FTS free text. An empty query (or
+        one that is only filters) returns the most recent matching messages —
+        so 'most recent email' and 'email on the 8th' both work."""
+        p = parse_mail_query(query, now_local=now_local or datetime.now().astimezone())
+        where, params = [], []
+        if p["after"]:
+            where.append("e.received_at >= ?"); params.append(p["after"])
+        if p["before"]:
+            where.append("e.received_at < ?"); params.append(p["before"])
+        if p["sender"]:
+            where.append("e.sender LIKE ? ESCAPE '\\'"); params.append(_like_arg(p["sender"]))
+        if p["recipients"]:
+            where.append("e.recipients LIKE ? ESCAPE '\\'"); params.append(_like_arg(p["recipients"]))
+        if p["subject"]:
+            where.append("e.subject LIKE ? ESCAPE '\\'"); params.append(_like_arg(p["subject"]))
+        if p["scope"] == "sent":
+            where.append("(',' || e.labels || ',') LIKE '%,SENT,%'")
+        elif p["scope"] == "inbox":
+            where.append("(',' || e.labels || ',') LIKE '%,INBOX,%'")
+        if p["unread"] is True:
+            where.append("e.is_read = 0")
+        elif p["unread"] is False:
+            where.append("e.is_read = 1")
         cols = ", ".join(f"e.{c}" for c in _COLS if c != "body_html")
-        rows = self._conn.execute(
-            f"SELECT {cols} FROM emails_fts f JOIN emails e ON e.rowid = f.rowid "
-            "WHERE emails_fts MATCH ? ORDER BY bm25(emails_fts) LIMIT ?",
-            (q, limit)).fetchall()
+        if p["terms"]:
+            # FTS filters the candidate set; ORDER BY recency, not bm25 — an
+            # assistant answering "latest email from X" wants the newest match.
+            match = " ".join(f'"{t}"' for t in p["terms"])
+            clause = " AND ".join(["emails_fts MATCH ?", *where])
+            rows = self._conn.execute(
+                f"SELECT {cols} FROM emails_fts f JOIN emails e ON e.rowid = f.rowid "
+                f"WHERE {clause} ORDER BY e.received_at DESC, e.id LIMIT ?",
+                (match, *params, limit)).fetchall()
+        else:
+            clause = (" WHERE " + " AND ".join(where)) if where else ""
+            rows = self._conn.execute(
+                f"SELECT {cols} FROM emails e{clause} "
+                f"ORDER BY e.received_at DESC, e.id LIMIT ?",
+                (*params, limit)).fetchall()
         return [self._to_dict(r) for r in rows]
 
     def unread(self, limit: int = 10) -> list[dict]:
@@ -509,6 +683,29 @@ class GmailSync:
         if not await self._modify(mid, {"removeLabelIds": ["INBOX"]}):
             return False
         self._store.update_labels(mid, add=[], remove=["INBOX"])
+        return True
+
+    async def trash(self, mid: str) -> bool:
+        """Move to Gmail's Trash (recoverable there ~30 days) and drop the
+        mirror row — the mirror holds non-trash mail only, matching the bulk
+        pull's includeSpamTrash=False. Only ever called downstream of the
+        emails.delete confirm gate."""
+        try:
+            service = (self._service_factory() if self._injected
+                       else self._build_service(write=True))
+        except Exception:
+            log.exception("could not build gmail service")
+            return False
+        if service is None:
+            return False
+        try:
+            await asyncio.to_thread(
+                lambda: service.users().messages().trash(
+                    userId="me", id=mid).execute())
+        except Exception:
+            log.exception("gmail trash failed for %s", mid)
+            return False
+        self._store.delete([mid])
         return True
 
     async def refresh_labels(self, service=None) -> bool:

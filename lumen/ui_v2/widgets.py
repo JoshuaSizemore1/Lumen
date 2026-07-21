@@ -1,5 +1,5 @@
 """Shared building blocks: text helpers, chips, dots, switches, rows."""
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QRectF
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QRectF, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton, QFrame, QHBoxLayout, QLabel, QLayout, QPushButton,
@@ -41,6 +41,56 @@ def label(text: str, px: int, color: str, weight: int = 400, sans: bool = False,
     if wrap:
         w.setWordWrap(True)
     return w
+
+
+class TypingDots(QLabel):
+    """A 'prefix' with cycling trailing dots (., .., ...) — the 'thinking'
+    state shown while the model generates. The QTimer runs ONLY while
+    animating and is stopped on stop() / set_static() / hide, so no repaint
+    loop survives once the answer arrives (power/thermal discipline)."""
+
+    def __init__(self, prefix: str, px: int, color: str, weight: int = 400,
+                 sans: bool = False, ls: float = 0.0, period_ms: int = 400,
+                 max_dots: int = 3):
+        super().__init__()
+        self._prefix, self._n, self._max = prefix, 1, max_dots
+        self.setFont(font(px, weight, sans, ls))
+        self._recolor(color)
+        self._timer = QTimer(self)
+        self._timer.setInterval(period_ms)
+        self._timer.timeout.connect(self._tick)
+
+    def _recolor(self, color: str):
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.WindowText, qcolor(color))
+        self.setPalette(pal)
+
+    def start(self, prefix: str | None = None):
+        """Begin animating. Shows one dot immediately (never a bare prefix)."""
+        if prefix is not None:
+            self._prefix = prefix
+        self._n = 1
+        self.setText(f"{self._prefix}.")
+        self._timer.start()
+
+    def _tick(self):
+        self._n = self._n % self._max + 1
+        self.setText(self._prefix + "." * self._n)
+
+    def stop(self):
+        self._timer.stop()
+
+    def set_static(self, text: str, color: str | None = None):
+        """Freeze the animation and show fixed text — reused by the launcher's
+        status line for its non-thinking states (waking / answer / error)."""
+        self._timer.stop()
+        if color is not None:
+            self._recolor(color)
+        self.setText(text)
+
+    def hideEvent(self, ev):
+        self._timer.stop()
+        super().hideEvent(ev)
 
 
 class ElideLabel(QLabel):

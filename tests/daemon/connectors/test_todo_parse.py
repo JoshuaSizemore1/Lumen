@@ -123,3 +123,67 @@ def test_resolve_bails_on_ambiguity_and_absence():
 def test_resolve_returns_matched_phrase():
     d, phrase = resolve_relative_phrase("sync next wednesday 3pm", WED)
     assert d == date(2026, 7, 22) and "next wednesday" in phrase
+
+
+# ---- month / year arithmetic ------------------------------------------------
+# "March next year" came back from the 4B with the CURRENT year, so the event
+# gate rejected it as "that date is in the past" instead of booking 2027.
+
+from lumen.daemon.connectors.todo_parse import correct_year, resolve_year_hint
+
+
+def test_month_and_day_resolves_exactly():
+    assert resolve_relative_phrase("conference on march 5", WED)[0] == date(2027, 3, 5)
+    assert resolve_relative_phrase("dinner december 25th", WED)[0] == date(2026, 12, 25)
+    assert resolve_relative_phrase("lunch on 3rd of december", WED)[0] == date(2026, 12, 3)
+
+
+def test_next_year_pins_the_year():
+    assert resolve_relative_phrase("meeting on march 5th next year", WED)[0] == date(2027, 3, 5)
+    assert resolve_relative_phrase("the 5th of march next year", WED)[0] == date(2027, 3, 5)
+    assert resolve_relative_phrase("sync on jan 2 2028", WED)[0] == date(2028, 1, 2)
+
+
+def test_month_offsets():
+    assert resolve_relative_phrase("call next month", WED)[0] == date(2026, 8, 15)
+    assert resolve_relative_phrase("review in 3 months", WED)[0] == date(2026, 10, 15)
+    # day clamped into a shorter target month, never a ValueError
+    assert resolve_relative_phrase("next month", date(2026, 1, 31))[0] == date(2026, 2, 28)
+
+
+def test_ambiguous_month_words_need_a_date_cue():
+    # "may"/"march" are a modal and a verb far more often than months
+    assert resolve_relative_phrase("you may 5 minutes late", WED) is None
+    assert resolve_relative_phrase("remind me it may 3 times fail", WED) is None
+    assert resolve_relative_phrase("lunch with dec 5 people", WED) is None
+    # an ordinal or a preposition is cue enough
+    assert resolve_relative_phrase("may 5th offsite", WED)[0] == date(2027, 5, 5)
+    assert resolve_relative_phrase("offsite on may 5", WED)[0] == date(2027, 5, 5)
+
+
+def test_month_phrase_outranks_a_weekday_but_a_verb_does_not():
+    assert resolve_relative_phrase("standup wednesday december 2nd", WED)[0] == date(2026, 12, 2)
+    # "march" as a verb leaves the weekday to answer
+    assert resolve_relative_phrase("march 5 miles on saturday", WED)[0] == date(2026, 7, 18)
+
+
+def test_resolve_year_hint_only_for_explicit_phrases():
+    assert resolve_year_hint("march next year", WED) == 2027
+    assert resolve_year_hint("in 2028", WED) == 2028
+    assert resolve_year_hint("this year", WED) == 2026
+    assert resolve_year_hint("sometime in march", WED) is None
+
+
+def test_correct_year_fixes_the_models_year():
+    # the 4B answers "March next year" with the current year
+    assert correct_year(date(2026, 3, 10), "march next year", WED) == date(2027, 3, 10)
+    assert correct_year(date(2026, 3, 10), "a meeting in 2028", WED) == date(2028, 3, 10)
+
+
+def test_correct_year_rolls_a_past_year_less_month_forward():
+    assert correct_year(date(2026, 3, 10), "the conference in march", WED) == date(2027, 3, 10)
+
+
+def test_correct_year_leaves_unrelated_dates_alone():
+    assert correct_year(date(2026, 3, 10), "you may 5 be late", WED) == date(2026, 3, 10)
+    assert correct_year(date(2026, 8, 1), "lunch tomorrow", WED) == date(2026, 8, 1)

@@ -1,6 +1,36 @@
 """email_compose: extraction gate — editable-draft softness, no invented recipients."""
 from lumen.daemon.llm import writing_style
-from lumen.daemon.llm.email_compose import propose_email, revise_email, validate_draft
+from lumen.daemon.llm.email_compose import (propose_email, revise_email,
+                                            strip_em_dashes, validate_draft)
+
+
+def test_strip_em_dashes_replaces_with_comma():
+    # spaced em dash → clause comma; horizontal bar too
+    assert strip_em_dashes("I'll be there — see you then.") == \
+        "I'll be there, see you then."
+    assert strip_em_dashes("the report—which was late—arrived") == \
+        "the report, which was late, arrived"
+    assert strip_em_dashes("a ― b") == "a, b"
+
+
+def test_strip_em_dashes_tidies_punctuation_and_edges():
+    assert strip_em_dashes("done — .") == "done."          # no ", ." soup
+    assert strip_em_dashes("— Josh") == "Josh"             # leading dash line
+    assert strip_em_dashes("plain text, no dash") == "plain text, no dash"
+    assert strip_em_dashes("") == ""
+
+
+def test_validate_draft_strips_em_dashes_from_lumen_text():
+    d = validate_draft({"subject": "Update — Q3", "body": "Hi — thanks."},
+                       user_message="whatever")
+    assert d["subject"] == "Update, Q3"
+    assert d["body"] == "Hi, thanks."
+
+
+async def test_revise_email_strips_em_dashes():
+    got, err = await revise_email(FakeLLM('{"subject": "S", "body": "Sure — done."}'),
+                                  "s", "b", "i")
+    assert err is None and got["body"] == "Sure, done."
 
 
 class FakeLLM:

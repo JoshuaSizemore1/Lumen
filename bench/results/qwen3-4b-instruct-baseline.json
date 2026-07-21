@@ -1,0 +1,378 @@
+{
+  "label": "qwen3-4b-instruct-baseline",
+  "backend": "ollama",
+  "model": "qwen3:4b-instruct",
+  "url": "http://127.0.0.1:11434",
+  "extra": {},
+  "server_pids": [
+    1165,
+    92120,
+    92317,
+    92319,
+    92321,
+    92320
+  ],
+  "started": "2026-07-18T14:26:25",
+  "prefill": [
+    {
+      "target_tokens": 200,
+      "actual_prompt_tokens": 365,
+      "ttft_s": [
+        2.2281,
+        2.1086,
+        2.1109
+      ],
+      "ttft_median_s": 2.1109,
+      "native_prefill_s": 1.102905
+    },
+    {
+      "target_tokens": 1500,
+      "actual_prompt_tokens": 2328,
+      "ttft_s": [
+        14.0567,
+        14.5848,
+        15.9299
+      ],
+      "ttft_median_s": 14.5848,
+      "native_prefill_s": 11.546927
+    },
+    {
+      "target_tokens": 3000,
+      "actual_prompt_tokens": 4589,
+      "ttft_s": [
+        39.5943,
+        38.7743,
+        35.1598
+      ],
+      "ttft_median_s": 38.7743,
+      "native_prefill_s": 26.753859
+    }
+  ],
+  "throughput": {
+    "runs": [
+      {
+        "tokens_out": 256,
+        "decode_s": 24.431,
+        "tok_s": 10.44
+      },
+      {
+        "tokens_out": 256,
+        "decode_s": 24.085,
+        "tok_s": 10.59
+      },
+      {
+        "tokens_out": 256,
+        "decode_s": 24.555,
+        "tok_s": 10.38
+      }
+    ],
+    "median_tok_s": 10.44
+  },
+  "realistic_tool_call": {
+    "runs": [
+      {
+        "wall_s": 4.058,
+        "ttft_s": 4.058,
+        "prompt_tokens": 1642,
+        "tokens_out": 32,
+        "emitted_tool": true,
+        "tool": "search_email"
+      },
+      {
+        "wall_s": 3.565,
+        "ttft_s": 3.565,
+        "prompt_tokens": 1642,
+        "tokens_out": 28,
+        "emitted_tool": true,
+        "tool": "search_email"
+      },
+      {
+        "wall_s": 4.418,
+        "ttft_s": 4.418,
+        "prompt_tokens": 1641,
+        "tokens_out": 34,
+        "emitted_tool": true,
+        "tool": "search_email"
+      },
+      {
+        "wall_s": 4.155,
+        "ttft_s": 4.155,
+        "prompt_tokens": 1642,
+        "tokens_out": 32,
+        "emitted_tool": true,
+        "tool": "search_email"
+      },
+      {
+        "wall_s": 4.113,
+        "ttft_s": 4.112,
+        "prompt_tokens": 1642,
+        "tokens_out": 32,
+        "emitted_tool": true,
+        "tool": "search_email"
+      }
+    ],
+    "median_wall_s": 4.113,
+    "min_wall_s": 3.565,
+    "max_wall_s": 4.418
+  },
+  "tool_correctness": {
+    "n": 20,
+    "emitted_valid_json_args": 17,
+    "correct_tool": 17,
+    "correct_tool_and_args": 17,
+    "correctness_rate": 0.85,
+    "detail": [
+      {
+        "prompt": "What did Chris send me about the invoice?",
+        "expected": "search_email",
+        "got": "search_email",
+        "args": {
+          "query": "from:chris subject:invoice",
+          "limit": 5
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.865
+      },
+      {
+        "prompt": "Show me my unread email.",
+        "expected": "search_email",
+        "got": "search_email",
+        "args": {
+          "query": "is:unread",
+          "limit": 5
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.503
+      },
+      {
+        "prompt": "Any mail from yesterday?",
+        "expected": "search_email",
+        "got": "search_email",
+        "args": {
+          "query": "on:2026-07-17"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.837
+      },
+      {
+        "prompt": "Pull up the full text of message m_8812.",
+        "expected": "get_email",
+        "got": "get_email",
+        "args": {
+          "id": "m_8812"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.266
+      },
+      {
+        "prompt": "What's on my calendar next week?",
+        "expected": "list_events",
+        "got": "list_events",
+        "args": {
+          "start": "2026-07-19",
+          "end": "2026-07-26"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 5.177
+      },
+      {
+        "prompt": "Am I free on August 3rd?",
+        "expected": "list_events",
+        "got": null,
+        "args": "None",
+        "valid_json_args": false,
+        "correct_tool": false,
+        "correct_args": false,
+        "wall_s": 5.795
+      },
+      {
+        "prompt": "What meetings do I have between September 1 and September 30?",
+        "expected": "list_events",
+        "got": "list_events",
+        "args": {
+          "start": "2026-09-01",
+          "end": "2026-09-30"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 5.178
+      },
+      {
+        "prompt": "Add a todo to renew the car registration by Friday.",
+        "expected": "add_todo",
+        "got": "add_todo",
+        "args": {
+          "text": "Renew car registration",
+          "due": "2026-07-23"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 4.574
+      },
+      {
+        "prompt": "Remind me to call the dentist.",
+        "expected": "add_todo",
+        "got": null,
+        "args": "None",
+        "valid_json_args": false,
+        "correct_tool": false,
+        "correct_args": false,
+        "wall_s": 6.342
+      },
+      {
+        "prompt": "What's on my todo list?",
+        "expected": "list_todos",
+        "got": "list_todos",
+        "args": {
+          "status": "all",
+          "due_before": "2026-07-20"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 4.415
+      },
+      {
+        "prompt": "Show me everything I still have open.",
+        "expected": "list_todos",
+        "got": "list_todos",
+        "args": {
+          "status": "open",
+          "limit": 5
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 10.419
+      },
+      {
+        "prompt": "Mark todo 42 as done.",
+        "expected": "complete_todo",
+        "got": "complete_todo",
+        "args": {
+          "id": 42
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 2.828
+      },
+      {
+        "prompt": "Do I own anything by Ursula Le Guin?",
+        "expected": "search_books",
+        "got": "search_books",
+        "args": {
+          "query": "Ursula Le Guin",
+          "limit": 5
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.805
+      },
+      {
+        "prompt": "Look up the ISBN for Piranesi.",
+        "expected": "lookup_book",
+        "got": "lookup_book",
+        "args": {
+          "title": "Piranesi"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.013
+      },
+      {
+        "prompt": "Read /home/josh/notes/standup.md for me.",
+        "expected": "read_file",
+        "got": "read_file",
+        "args": {
+          "path": "/home/josh/notes/standup.md"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.567
+      },
+      {
+        "prompt": "Find the email where Dana mentioned the lease.",
+        "expected": "search_email",
+        "got": "search_email",
+        "args": {
+          "query": "from:dana subject:lease",
+          "limit": 5
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.767
+      },
+      {
+        "prompt": "What did I get on July 8th?",
+        "expected": "search_email",
+        "got": null,
+        "args": "None",
+        "valid_json_args": false,
+        "correct_tool": false,
+        "correct_args": false,
+        "wall_s": 4.808
+      },
+      {
+        "prompt": "List my events for tomorrow.",
+        "expected": "list_events",
+        "got": "list_events",
+        "args": {
+          "start": "2026-07-19",
+          "end": "2026-07-19"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 5.116
+      },
+      {
+        "prompt": "Add 'buy oat milk' to my list.",
+        "expected": "add_todo",
+        "got": "add_todo",
+        "args": {
+          "text": "buy oat milk"
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 2.873
+      },
+      {
+        "prompt": "Search my library for books about cartography.",
+        "expected": "search_books",
+        "got": "search_books",
+        "args": {
+          "query": "cartography",
+          "limit": 5
+        },
+        "valid_json_args": true,
+        "correct_tool": true,
+        "correct_args": true,
+        "wall_s": 3.24
+      }
+    ]
+  },
+  "total_bench_s": 422.4,
+  "memory": {
+    "peak_rss_mb": 4693.2,
+    "peak_sys_used_mb": 17997.0,
+    "sys_used_delta_mb": 5021.8
+  }
+}

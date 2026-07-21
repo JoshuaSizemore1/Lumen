@@ -20,7 +20,8 @@ The Settings screen renders a snapshot from the daemon, it does not store or wri
 
 ## Keyboard map (Phase 10 — `ui_v2`)
 Audited 2026-07-15 (renumbered 2026-07-17 when Chat became the first tab and the Launcher tab was removed — the palette is hotkey-overlay-only now, new-features item 1); the number keys match the muted hint chips rendered in each tab.
-- `1`–`5` — switch tabs: `1` Chat, `2` Dashboard, `3` Calendar, `4` Todos, `5` Books (wired in `main.py` from the same `kbd` map that draws the chips, so the badges are self-documenting).
+- `1`–`6` — switch tabs: `1` Chat, `2` Dashboard, `3` Calendar, `4` Todos, `5` Books, `6` Files (added 2026-07-19, new-features items 6–7; wired in `main.py` from the same `kbd` map that draws the chips, so the badges are self-documenting).
+- `Ctrl+S` — save the open file on the Files tab (widget-scoped shortcut).
 - **Mail** and **Settings** deliberately have no number key: Mail's badge slot shows the unread count instead, and Settings is the ⚙ gear. Both stay reachable — click the tab, the Dashboard "Open mail →" / gear, or `state.view_requested`.
 - `Esc` — dismiss the launcher overlay (also on focus loss), close the compose dialog, cancel the confirm dialog.
 - `Return`/`Enter` — submit the focused input (launcher query, chat message, todo add, compose revise) and accept the confirm dialog. Inputs are single-line `QLineEdit`s, so plain Return is the submit; there is no Ctrl+Return convention.

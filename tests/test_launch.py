@@ -85,7 +85,7 @@ def test_main_starts_ui_then_stops_spawned_daemon(monkeypatch):
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: True)
     monkeypatch.setattr(launch, "stop_daemon",
                         lambda pr: events.append(("stop", pr is proc)))
-    monkeypatch.setattr("lumen.ui_v2.app.main", lambda: events.append("ui"))
+    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("ui"))
     monkeypatch.delenv("LUMEN_UNIFIED", raising=False)
     launch.main()
     assert events == ["spawn", "ui", ("stop", True)]
@@ -100,7 +100,7 @@ def test_main_stops_daemon_even_when_ui_exits_nonzero(monkeypatch):
     monkeypatch.setattr(launch, "spawn_daemon", lambda: proc)
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: True)
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: stops.append(pr))
-    monkeypatch.setattr("lumen.ui_v2.app.main",
+    monkeypatch.setattr("lumen.ui_v3.app.main",
                         lambda: (_ for _ in ()).throw(SystemExit(3)))
     with pytest.raises(SystemExit):
         launch.main()
@@ -113,7 +113,7 @@ def test_main_leaves_external_daemon_alone(monkeypatch):
     monkeypatch.setattr(launch, "daemon_alive", lambda p: True)
     monkeypatch.setattr(launch, "spawn_daemon", lambda: events.append("spawn"))
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: events.append("stop"))
-    monkeypatch.setattr("lumen.ui_v2.app.main", lambda: events.append("ui"))
+    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("ui"))
     launch.main()
     assert events == ["ui"]
 
@@ -126,7 +126,7 @@ def test_main_aborts_when_daemon_never_comes_up(monkeypatch):
     monkeypatch.setattr(launch, "spawn_daemon", lambda: proc)
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: False)
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: stops.append(pr))
-    monkeypatch.setattr("lumen.ui_v2.app.main",
+    monkeypatch.setattr("lumen.ui_v3.app.main",
                         lambda: (_ for _ in ()).throw(AssertionError("UI must not start")))
     with pytest.raises(SystemExit, match="did not come up"):
         launch.main()

@@ -20,11 +20,13 @@ from .screens.mail import MailScreen
 from .screens.todos import TodosScreen
 from .screens.books import BooksScreen
 from .screens.chat import ChatScreen
+from .screens.files import FilesScreen
 from .screens.settings import SettingsScreen
 
 # Chat leads (new-features item 1): the quick launcher is hotkey-only now —
 # its palette lives in the overlay (app.py), not in a tab.
-TABS = ("chat", "dashboard", "calendar", "mail", "todos", "books", "settings")
+TABS = ("chat", "dashboard", "calendar", "mail", "todos", "books", "files",
+        "settings")
 
 _active_window = None  # keeps the rebuilt window alive after an accent switch
 
@@ -90,6 +92,7 @@ class LumenWindow(QWidget):
             "mail": MailScreen(self.state),
             "todos": TodosScreen(self.state),
             "books": BooksScreen(self.state),
+            "files": FilesScreen(self.state),
             "settings": SettingsScreen(self.state),
         }
         for key in TABS:
@@ -112,7 +115,8 @@ class LumenWindow(QWidget):
         self.state.mails_changed.connect(self._update_mail_badge)
         self.state.accent_requested.connect(self._change_accent)
 
-        for i, key in enumerate(("chat", "dashboard", "calendar", "todos", "books")):
+        for i, key in enumerate(("chat", "dashboard", "calendar", "todos", "books",
+                                 "files")):
             sc = QShortcut(QKeySequence(str(i + 1)), self)
             sc.activated.connect(lambda k=key: self.switch_to(k))
 
@@ -151,9 +155,10 @@ class LumenWindow(QWidget):
         self.mail_badge = Chip("4", T.ACCENT_ON, T.ACCENT, bg=T.ACCENT,
                                px=10, radius=8, hpad=5, vpad=1, weight=600)
         names = {"chat": "Chat", "dashboard": "Dashboard", "calendar": "Calendar",
-                 "mail": "Mail", "todos": "Todos", "books": "Books"}
+                 "mail": "Mail", "todos": "Todos", "books": "Books",
+                 "files": "Files"}
         kbd = {"chat": "1", "dashboard": "2", "calendar": "3", "todos": "4",
-               "books": "5"}
+               "books": "5", "files": "6"}
         self.tab_buttons: dict[str, QPushButton] = {}
         for i, key in enumerate(TABS[:-1]):
             badge = self.mail_badge if key == "mail" else Chip(

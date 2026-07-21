@@ -17,9 +17,13 @@ lumen/
     llm/          # Ollama client, model routing, idle/keep-alive config
     connectors/   # gmail.py, gcal.py, todos.py — thin sync + query interfaces
     router.py     # tool-call vs direct-answer decision, dispatch
-  ui_v2/
+  ui_v3/           # primary UI (Relay-styled) — `lumen`, `lumen-ui`, `python -m lumen.ui_v3`
     app.py         # PyQt6 entry: tray, single-instance guard, hotkey launcher overlay
     screens/       # chat, dashboard, calendar, todos, books, mail, settings
+    state.py       # thin wrapper over ui_v2's AppState — the daemon seam ui_v3 reuses
+  ui_v2/           # archived previous shell — still runnable via `lumen-ui-v2`; also the
+                   # home of the daemon-seam modules ui_v3 reuses (state, daemon_client,
+                   # single_instance, tray, mail_html) until they're moved into ui_v3
     daemon_client.py  # IPC client (moved here 2026-07-17 when the dead ui/ tree was removed)
   design/          # Claude Design output — HTML/React mockups, reference only
   config.toml
@@ -49,6 +53,7 @@ Read the relevant skill in `.claude/skills/` before touching that subsystem:
 - `book-catalog.md` — book catalog + lookup-grounded recommendations
 - `memory-system.md` — personalization memory that improves with use, capped and background-distilled
 - `email-menu.md` — full inbox view/manage/send, local DB caching and sync strategy
+- `file-workbench.md` — Files tab: browse/edit local files, ask-with-context, assisted edits
 - `writing-style.md` — derive-once/apply-often approach to writing in your own style
 - `project-scope.md` — full scope: what Lumen is and is not, in/out of scope, discussed-but-not-committed ideas
 

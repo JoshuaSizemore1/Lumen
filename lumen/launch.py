@@ -82,7 +82,8 @@ def stop_daemon(proc) -> None:
 
 
 def main() -> None:
-    from lumen.ui_v2.single_instance import SOCKET_NAME, try_send
+    from lumen.ui_v2.single_instance import try_send   # shared IPC plumbing
+    from lumen.ui_v3 import SOCKET_NAME                 # cheap: no UI stack imported
     toggle = "--toggle-launcher" in sys.argv
     if try_send(SOCKET_NAME, "toggle-launcher" if toggle else "show"):
         return   # already running — it handled the command; its daemon is its own
@@ -98,7 +99,7 @@ def main() -> None:
                 f"lumen: the daemon did not come up — see {daemon_log_path()}")
 
     os.environ["LUMEN_UNIFIED"] = "1"   # closing the window quits the app
-    from lumen.ui_v2.app import main as ui_main
+    from lumen.ui_v3.app import main as ui_main
     try:
         ui_main()   # blocks until quit; exits via SystemExit with the UI's code
     finally:

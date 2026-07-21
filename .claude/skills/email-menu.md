@@ -74,7 +74,12 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
   Programmatic selection (`_set_mails` picking the first row) never marks
   anything. Explicit mark read/unread is also ungated — consistency with the
   silent path.
-- Archive still confirms. Delete is still out of scope.
+- Archive still confirms. **Delete built 2026-07-19** (new-features item 8):
+  delete = Gmail **Trash** (recoverable ~30 days, dialog says so), behind the
+  same confirm gate as archive (`router.MAIL_GATES` drives both). A
+  successful trash drops the mirror row — the mirror holds non-trash mail
+  only (`includeSpamTrash=False` on bulk pulls). Permanent wipe deliberately
+  not built; delete is never a model tool (mail MCP server stays read-only).
 - **Labeling = moving** (Gmail semantics the user chose): applying a label
   also removes `INBOX`, locally and upstream. There is no keep-in-inbox+label
   variant.
@@ -99,7 +104,16 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
   Edits/toggles/deletes of existing rules are ungated.
 - **Suggest labels (✨)** runs the local model once per unlabeled message
   (per-message verdicts, not batched — the 2026-07-13 triage lesson), writes
-  NOTHING; each suggestion is a chip the user taps to apply.
+  NOTHING. **v2 (2026-07-19, new-features item 4):** the prompt grounds each
+  label with a one-line description derived mechanically from already-filed
+  mail (`describe_label`: sender domains + example subjects,
+  `router.LABEL_PROFILE_ROWS` rows via local SQL), prefers topic-specific
+  labels over generic buckets, and enforces a confidence floor — the model
+  rates each pick `strong`/`weak` and only strong survives `parse_verdict`
+  (below the floor: no suggestion, never a guess). Suggestions land in an
+  explicit review pass: per-row "→ label" with ✓ accept / ✕ reject, plus a
+  review bar with "Accept all <label> (n)" and "Dismiss all". Accepts run
+  the same `emails.apply_label` write as before; reject/dismiss are local.
 - **Unread is inbox-scoped everywhere** — labeled mail has left the inbox, so
   it no longer counts as unread anywhere the UI shows a count.
 - **Chips are separate inboxes (2026-07-16, user decision)** — there is no

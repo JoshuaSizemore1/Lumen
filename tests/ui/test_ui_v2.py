@@ -39,7 +39,10 @@ class FakeClient(QObject):
             else (confirm_id, approved, check))
 
     def cb_for(self, type_):
-        return next(cb for t, _p, cb in self.requests if t == type_)
+        # The LAST registration, not the first: AppState fires its own
+        # settings.get at startup, so a screen that asks later must still get
+        # the reply the test is delivering.
+        return next(cb for t, _p, cb in reversed(self.requests) if t == type_)
 
 
 TODAY = state_mod.date.today()
@@ -355,6 +358,44 @@ def test_suggestions_flow(qtbot):
     assert st.mail_suggestions == {}
     assert ("emails.apply_label", {"id": "m1", "label": "Bills"}) in [
         (t, p) for t, p, _cb in data.requests]
+
+
+def test_suggestion_review_reject_and_dismiss_write_nothing(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mail_suggestions = {"m1": "Bills", "m2": "Health"}
+    data.requests.clear()
+    st.reject_suggestion("m2")
+    assert st.mail_suggestions == {"m1": "Bills"} and not data.requests
+    st.dismiss_suggestions()
+    assert st.mail_suggestions == {} and not data.requests
+
+
+def test_accept_all_for_label_applies_each_then_toasts_once(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mail_suggestions = {"m1": "Bills", "m2": "Bills", "m3": "Health"}
+    data.requests.clear()
+    toasts = []
+    st.toast_requested.connect(toasts.append)
+    st.accept_all_for_label("Bills")
+    reqs = [(t, p) for t, p, _cb in data.requests]
+    assert ("emails.apply_label", {"id": "m1", "label": "Bills"}) in reqs
+    assert ("emails.apply_label", {"id": "m2", "label": "Bills"}) in reqs
+    assert st.mail_suggestions == {"m3": "Health"}   # other labels untouched
+    cbs = [cb for _t, _p, cb in data.requests[:2]]
+    cbs[0]({"ok": True})
+    assert not toasts                                # waits for the last accept
+    cbs[1]({"ok": True})
+    assert toasts and "Filed 2 under Bills" in toasts[0]
+
+
+def test_delete_mail_routes_to_gated_one_shot(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    data.requests.clear()
+    st.delete_mail("m1")
+    assert data.requests[0][:2] == ("emails.delete", {"id": "m1"})
 
 
 def test_rule_state_methods(qtbot):
@@ -879,10 +920,103 @@ def test_mail_pane_renders_html_body(qtbot):
     state = AppState()
     screen = MailScreen(state)
     qtbot.addWidget(screen)
-    assert not screen.findChildren(HtmlBody)   # sample mail: plain text
     state.sel_mail()["body_html"] = "<p>rich <b>text</b></p>"
     state.mails_changed.emit()
     assert screen.findChildren(HtmlBody)
+
+
+def test_plain_text_body_is_escaped_not_interpreted(qtbot):
+    # todo-fixes #16: a QLabel on AutoText renders "a < b and c > d" as "a d".
+    # Plain bodies go through plain_to_html and land on the same paper card as
+    # HTML mail (todo-fixes #17).
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import HtmlBody
+    state = AppState()
+    m = state.sel_mail()
+    m["body_html"] = ""
+    m["body"] = "a < b and c > d\n\n> quoted\n\nSee https://example.com"
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    state.mails_changed.emit()
+    bodies = screen.findChildren(HtmlBody)
+    assert bodies
+    shown = bodies[-1].toPlainText()
+    assert "a < b and c > d" in shown          # nothing swallowed as a tag
+    assert "quoted" in shown
+
+
+def _load_btns(screen):
+    from PyQt6.QtWidgets import QPushButton
+    return [b for b in screen.findChildren(QPushButton) if b.text() == "Load images"]
+
+
+REMOTE_BODY = ('<p>hi</p><img src="https://track.example/pixel.gif">'
+               '<img src="http://cdn.example/logo.png">')
+
+
+def test_remote_images_load_automatically_by_default(qtbot, monkeypatch):
+    # todo-fixes #18: the user chose always-load, so there is no bar to click
+    # and the fetch starts on its own (off the GUI thread).
+    from lumen.ui_v2.screens import mail as mail_screen
+    state = AppState()
+    started = []
+    monkeypatch.setattr(mail_screen.MailScreen, "_load_images",
+                        lambda self, m, auto=False: started.append((m["id"], auto)))
+    screen = mail_screen.MailScreen(state)
+    qtbot.addWidget(screen)
+    m = state.sel_mail()
+    m["body_html"] = REMOTE_BODY
+    state.mails_changed.emit()
+    assert not _load_btns(screen)
+    assert started and started[-1][1] is True
+
+
+def test_load_images_bar_returns_when_the_setting_is_off(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import HtmlBody
+    state = AppState()
+    state.load_remote_images = False
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    m = state.sel_mail()
+    m["body_html"] = REMOTE_BODY
+    state.mails_changed.emit()
+    assert _load_btns(screen) and screen.findChildren(HtmlBody)
+    # the fetch finishing (images inlined) re-renders the pane without the bar
+    screen._images_ready(m["id"], '<p>hi</p><img src="data:image/png;base64,AAAA">')
+    assert not _load_btns(screen)
+
+
+def test_auto_load_fires_once_per_message(qtbot, monkeypatch):
+    # _populate_pane runs on every repaint; the fetch must not restart each time.
+    from lumen.ui_v2.screens import mail as mail_screen
+    state = AppState()
+    started = []
+    monkeypatch.setattr(mail_screen, "_ImageLoader",
+                        lambda mid, html: started.append(mid) or _NullWorker())
+    screen = mail_screen.MailScreen(state)
+    qtbot.addWidget(screen)
+    m = state.sel_mail()
+    m["body_html"] = REMOTE_BODY
+    state.mails_changed.emit()
+    state.mails_changed.emit()
+    assert started == [m["id"]]
+
+
+class _NullWorker:
+    """Stands in for _ImageLoader: never touches the network or a thread."""
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    def start(self):
+        pass
+
+    class _Sig:
+        def connect(self, _cb):
+            pass
+
+    loaded = finished = _Sig()
 
 
 def test_mail_search_box_debounces_into_state(qtbot, monkeypatch):
@@ -994,20 +1128,65 @@ def test_mail_suggest_button_busy_state(qtbot, monkeypatch):
     assert screen.suggest_btn.isEnabled()
 
 
-def test_mail_suggestion_chip_applies_on_click(qtbot, monkeypatch):
+def test_mail_suggestion_review_accept_and_reject(qtbot, monkeypatch):
+    # v2 review pass: the row shows the proposed label with explicit ✓ / ✕
+    # (the old one-tap "＋ label" chip is gone).
     from PyQt6.QtCore import Qt
     from lumen.ui_v2.screens.mail import MailScreen
     from lumen.ui_v2.widgets import ClickChip
     state = AppState()
     state.mail_suggestions = {"m1": "Health"}
-    applied = []
+    applied, rejected = [], []
     monkeypatch.setattr(state, "apply_suggestion", applied.append)
+    monkeypatch.setattr(state, "reject_suggestion", rejected.append)
     screen = MailScreen(state)
     qtbot.addWidget(screen)
-    chip = next(c for c in screen.findChildren(ClickChip)
-                if c.text() == "＋ Health")
-    qtbot.mouseClick(chip, Qt.MouseButton.LeftButton)
+    accept = next(c for c in screen.findChildren(ClickChip) if c.text() == "✓")
+    qtbot.mouseClick(accept, Qt.MouseButton.LeftButton)
     assert applied == ["m1"]
+    reject = next(c for c in screen.findChildren(ClickChip) if c.text() == "✕")
+    qtbot.mouseClick(reject, Qt.MouseButton.LeftButton)
+    assert rejected == ["m1"]
+
+
+def test_mail_review_bar_groups_by_label(qtbot, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from lumen.ui_v2.screens.mail import MailScreen
+    from lumen.ui_v2.widgets import ClickChip
+    state = AppState()
+    state.mail_suggestions = {"m1": "Health", "m2": "Health", "m3": "Bills"}
+    accepted, dismissed = [], []
+    monkeypatch.setattr(state, "accept_all_for_label", accepted.append)
+    monkeypatch.setattr(state, "dismiss_suggestions",
+                        lambda: dismissed.append(1))
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    assert screen.review_host.isVisibleTo(screen)
+    chips = {c.text(): c for c in screen.review_host.findChildren(ClickChip)}
+    assert "Accept all Health (2)" in chips and "Accept all Bills (1)" in chips
+    qtbot.mouseClick(chips["Accept all Health (2)"], Qt.MouseButton.LeftButton)
+    assert accepted == ["Health"]
+    qtbot.mouseClick(chips["✕ Dismiss all"], Qt.MouseButton.LeftButton)
+    assert dismissed == [1]
+
+
+def test_mail_review_bar_hidden_without_suggestions(qtbot):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    assert not screen.review_host.isVisibleTo(screen)
+
+
+def test_mail_delete_button_requests_delete(qtbot, monkeypatch):
+    from lumen.ui_v2.screens.mail import MailScreen
+    state = AppState()
+    seen = []
+    monkeypatch.setattr(state, "delete_mail", seen.append)
+    screen = MailScreen(state)
+    qtbot.addWidget(screen)
+    screen.delete_btn.click()
+    assert seen == [state.sel_mail()["id"]]
 
 
 def test_mail_rule_button_prefills_sender(qtbot, monkeypatch):
@@ -1463,3 +1642,90 @@ def test_mail_screen_requery_timer_follows_visibility(qtbot):
     assert sc._auto_requery.interval() == 5 * 60 * 1000
     sc.hide()
     assert not sc._auto_requery.isActive()
+
+
+# ---- "thinking…" indicator while the model generates (2026-07-17) ---------
+
+def test_typing_dots_cycles_prefix_and_stops(qtbot):
+    from lumen.ui_v2 import theme as T
+    from lumen.ui_v2.widgets import TypingDots
+    d = TypingDots("Thinking", 14, T.INFO)
+    qtbot.addWidget(d)
+    d.start()
+    assert d.text() == "Thinking."          # never a bare "Thinking" flash
+    assert d._timer.isActive()
+    d._tick(); assert d.text() == "Thinking.."
+    d._tick(); assert d.text() == "Thinking..."
+    d._tick(); assert d.text() == "Thinking."   # wraps back to one dot
+    d.stop()
+    assert not d._timer.isActive()              # no repaint loop left running
+
+
+def test_typing_dots_set_static_freezes_and_relabels(qtbot):
+    from lumen.ui_v2 import theme as T
+    from lumen.ui_v2.widgets import TypingDots
+    d = TypingDots("◇ thinking", 11, T.INFO)
+    qtbot.addWidget(d)
+    d.start()
+    d.set_static("◇ answer · generated locally", T.OK)
+    assert d.text() == "◇ answer · generated locally"
+    assert not d._timer.isActive()
+
+
+def test_typing_dots_stops_timer_when_hidden(qtbot):
+    from lumen.ui_v2 import theme as T
+    from lumen.ui_v2.widgets import TypingDots
+    d = TypingDots("Thinking", 14, T.INFO)
+    qtbot.addWidget(d)
+    d.show()
+    d.start()
+    assert d._timer.isActive()
+    d.hide()
+    assert not d._timer.isActive()             # power/thermal: no loop while unseen
+
+
+def test_chat_shows_thinking_until_first_chunk(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    from lumen.ui_v2.widgets import TypingDots
+    data, chat = FakeClient(), FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=chat)
+    qtbot.addWidget(sc)
+    sc.input.setText("hello")
+    sc._submit()
+    dots = sc.thread.findChildren(TypingDots)
+    assert dots and dots[0]._timer.isActive()   # animating while the model works
+    chat.chunk.emit("hi ")
+    assert not dots[0]._timer.isActive()         # first token stops the animation
+    assert dots[0].isHidden()                    # and the real answer takes its place
+    chat.chunk.emit("there")
+    assert sc.resp_text.text() == "hi there"
+
+
+def test_chat_thinking_stops_when_answer_is_empty(qtbot):
+    from lumen.ui_v2.screens.chat import ChatScreen
+    from lumen.ui_v2.widgets import TypingDots
+    data, chat = FakeClient(), FakeClient()
+    sc = ChatScreen(AppState(data=data), chat_client=chat)
+    qtbot.addWidget(sc)
+    sc.input.setText("hello")
+    sc._submit()
+    dots = sc.thread.findChildren(TypingDots)[0]
+    chat.done.emit()                             # done before any chunk arrived
+    assert not dots._timer.isActive()
+    assert dots.isHidden()
+    assert sc.resp_text.text() == "(no answer)"
+
+
+def test_launcher_eyebrow_animates_then_goes_static(qtbot):
+    from lumen.ui_v2.screens.launcher import LauncherPalette
+    from lumen.ui_v2.widgets import TypingDots
+    pal = LauncherPalette(AppState(), FakeClient())
+    qtbot.addWidget(pal)
+    pal.input.setText("hi")
+    pal._submit()
+    assert isinstance(pal.resp_eyebrow, TypingDots)
+    assert pal.resp_eyebrow._timer.isActive()
+    assert pal.resp_eyebrow.text() == "◇ thinking."
+    pal.chat.chunk.emit("hello")
+    assert not pal.resp_eyebrow._timer.isActive()   # answer arrived → freeze
+    assert "answer" in pal.resp_eyebrow.text()

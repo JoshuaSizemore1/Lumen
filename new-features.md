@@ -237,6 +237,21 @@ Two halves:
   specific user labels above generic buckets like TODO when both fit, and
   add a confidence floor — below it, suggest nothing rather than guess.
 
+**Built 2026-07-19.** Accuracy: each label now carries a one-line
+description derived **mechanically** from mail already filed under it
+(sender domains + example subjects via `label_suggest.describe_label`, 3
+rows per label from the local mirror — no extra model cost); the prompt
+tells the model to prefer topic-specific labels over generic buckets; and
+the verdict format is `{"label", "fit": "strong"|"weak"}` where only a
+**strong** fit survives `parse_verdict` — weak, missing, unknown, or null
+all suggest nothing rather than guess. UI: per-row "→ label" pill with
+✓ accept / ✕ reject, plus a review bar ("✨ N suggestions") with one
+"Accept all <label> (n)" chip per proposed label and "✕ Dismiss all";
+reject/dismiss are purely local. Live-verified against the real inbox:
+both observed misses are gone — the Troop 148 packing-list mail now gets
+BSA, the Lumen test email gets no suggestion, and 13 of 15 scanned
+messages honestly stayed unsuggested instead of being guessed into TODO.
+
 ### 5. Auto-refresh mail on open + while open (todo #13)
 Three triggers: app launch → immediate `mail.refresh`; opening the Mail tab
 → refresh; every 5 minutes while the app is open. The daemon's 5-minute
@@ -258,6 +273,15 @@ screen. Asking a question there auto-loads the current directory as context
 answers with real knowledge of what's in front of you. Read-only in v1 —
 browsing and asking, no file operations. Stepping stone to item 7.
 
+**Built 2026-07-19** together with item 7 as one **Files** tab (key `6`) —
+spec: `docs/superpowers/specs/2026-07-19-files-workbench-design.md`, skill:
+`file-workbench.md`. Browser column (path bar + ⌂/↑, folders-first listing)
+is UI-local via `daemon/connectors/local_files.py`; asks ride the normal
+`chat` op with `cwd`/`open_file` payload keys → the router grounds the turn
+in the live directory listing (+ open file, capped) and attaches fs+todo
+tools. Live-verified: "which of these files mentions a flashlight, and is
+anything misspelled?" answered correctly from a real folder.
+
 ### 7. Built-in text/code editor with Lumen assist (todo #17)
 Open text, markdown, and code files (py, cpp, html, …) in an editor tab for
 manual editing, with a prompt panel that auto-includes the open file + its
@@ -265,6 +289,41 @@ directory as context — summarize this file, make this change, write a
 section. LLM-proposed edits appear as a preview/diff and apply only on
 accept (write-gate, same as item 2). Largest item in this backlog — stage it:
 browse (item 6) → ask-about-file → manual editing → assisted edits.
+
+**Built 2026-07-19** (same Files tab). Manual editing: monospace editor,
+dirty marker, Save/Ctrl+S (the user's own direct-manipulation write — no
+gate); binary/oversized/non-UTF-8 files get honest placeholders. Assisted:
+✎ Edit sends the current buffer + instruction to `files.propose_edit`
+(`llm/file_edit.py`); the reply leads with a forced `CHANGES:` sentinel line
+— without that find-it-first step the 4B reproducibly copied the file
+verbatim on "fix the spelling mistake" (live 2026-07-19); with it the same
+request fixes flashlite→flashlight and an inapplicable request honestly
+proposes nothing. The proposal renders as a colored diff with
+Apply / Discard — the preview is the confirmation (compose precedent);
+nothing touches disk until Apply. **Deviation from the sketch:** no
+write-grant is recorded on Apply — grants stay tied to dialogs that
+explicitly promise "future writes without asking".
+
+
+## 8. Add a way to archive and delete emails
+
+**Built 2026-07-19** (archive already existed end-to-end — reading-pane
+button → confirm dialog → Gmail; verified, not rebuilt). New: **Delete**,
+implemented as Gmail's **Trash** (recoverable there for ~30 days — the
+confirm dialog says so honestly; a permanent wipe was deliberately not
+built). `GmailSync.trash` calls the Gmail API then drops the mirror row
+(the mirror only holds non-trash mail, matching the bulk pull's
+`includeSpamTrash=False`); router `emails.delete` rides the same confirm
+gate as archive (generalized into a `MAIL_GATES` table); a Delete button
+sits beside Archive in the reading pane. The mail MCP server stays
+read-only — delete is a UI-confirmed one-shot, never a model tool.
+Live-verified against real Gmail with a self-sent test mail: decline
+changed nothing; approve moved it to Trash and the mirror row vanished.
+
+
+## 9. Look into a way to send text messages, and see messages?
+
+## 10. THE BIG ONE - be able to grab assignments and other information from my u of u canvas account, then add it to the todo, and calendar
 
 ---
 

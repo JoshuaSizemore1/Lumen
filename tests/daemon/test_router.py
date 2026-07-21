@@ -41,7 +41,7 @@ class FakeStore:
         self.rows = rows or []
         self.calls = []
 
-    def add(self, raw, today=None):
+    def add(self, raw, today=None, source="manual"):
         self.calls.append(("add", raw))
         if not raw.strip():
             raise ValueError("empty todo text")
@@ -104,7 +104,7 @@ class FakeMailSync:
 
     def __init__(self):
         self.archived, self.marked, self.synced = [], [], 0
-        self.labeled, self.html_fetched = [], []
+        self.labeled, self.html_fetched, self.trashed = [], [], []
 
     async def apply_label(self, mid, label_name):
         self.labeled.append((mid, label_name))
@@ -119,6 +119,10 @@ class FakeMailSync:
 
     async def archive(self, mid):
         self.archived.append(mid)
+        return True
+
+    async def trash(self, mid):
+        self.trashed.append(mid)
         return True
 
     async def mark_read(self, mid, read):
@@ -749,15 +753,45 @@ async def test_chat_capped_yields_stopped_message():
     assert out[-1] == {"done": True}
 
 
-async def test_chat_empty_tools_falls_back_and_injects_todo_context():
+TODO_ROW = {"id": 1, "text": "call dentist", "due_date": "2026-07-09",
+            "completed": False, "created_at": "2026-07-09T09:00:00",
+            "source": "manual", "tags": []}
+
+
+async def test_chat_empty_tools_falls_back_to_plain_chat():
     llm = FakeLLM()
-    store = FakeStore(rows=[{"id": 1, "text": "call dentist", "due_date": "2026-07-09",
-                             "completed": False, "created_at": "2026-07-09T09:00:00",
-                             "source": "manual", "tags": []}])
-    out = await collect(Router(llm, store, bridge=FakeBridge(tools=()), model_router=FakeModelRouter()),
-                        "chat", {"message": "what todos are due, and look up a file"})
-    assert llm.messages[0]["role"] == "system" and "call dentist" in llm.messages[0]["content"]
+    out = await collect(
+        Router(llm, FakeStore(rows=[TODO_ROW]), bridge=FakeBridge(tools=()),
+               model_router=FakeModelRouter()),
+        "chat", {"message": "look up a file"})
+    assert llm.messages[0]["role"] == "system"
     assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+class RecordingToolLLM:
+    """Records the schemas and system message it was handed, then answers."""
+
+    def __init__(self):
+        self.model, self.tools, self.messages = None, [], []
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.messages, self.tools = messages, tools
+        yield {"content": "ok"}
+
+
+async def test_todo_tools_survive_a_bridge_with_no_tools():
+    # Todos are in-process, so a dead MCP bridge must not strand a todo
+    # request on the filesystem group with nothing that can act on it.
+    llm = RecordingToolLLM()
+    out = await collect(
+        Router(llm, FakeStore(rows=[TODO_ROW]), bridge=FakeBridge(tools=()),
+               model_router=FakeModelRouter()),
+        "chat", {"message": "what todos are due, and look up a file"})
+    names = {t["function"]["name"] for t in llm.tools}
+    assert {"add_todo", "complete_todo", "list_todos"} <= names
+    assert "call dentist" in llm.messages[0]["content"]
+    assert out[-1] == {"done": True}
 
 
 async def test_chat_bridge_start_failure_falls_back_to_plain_chat():
@@ -1234,10 +1268,22 @@ def test_calendar_context_lines_bounds_and_tz():
     now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone(_td(hours=2)))
     ctx = calendar_context([CAL_ROW, ALLDAY_ROW], now, date(2026, 7, 24))
     assert "2026-07-10 14:32" in ctx and "Friday" in ctx
-    assert "through 2026-07-24" in ctx and "say so" in ctx
+    assert "through 2026-07-24" in ctx and "this window only" in ctx
     assert "09:30" in ctx and "Standup" in ctx and "[Personal]" in ctx
     assert "Priya" in ctx and "Meet" in ctx
     assert "(all day)" in ctx and "PTO" in ctx
+
+
+def test_calendar_context_out_of_window_routes_to_tool_when_attached():
+    """The window edge must become a list_events call, not a dead end — but
+    only when the tool actually rides along (mail_context's fabrication guard)."""
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone.utc)
+    with_tool = calendar_context([CAL_ROW], now, date(2026, 7, 24), has_tool=True)
+    assert "list_events" in with_tool
+    assert "not shown" not in with_tool
+
+    without = calendar_context([CAL_ROW], now, date(2026, 7, 24))
+    assert "list_events" not in without
 
 
 def test_calendar_context_empty_marker():
@@ -1773,6 +1819,49 @@ async def test_mark_done_no_match_is_honest():
     assert any("match" in e.get("chunk", "").lower() for e in out)
 
 
+async def test_delete_phrased_as_already_done_completes_the_todo():
+    """'Delete todo 7, I already did it' used to match neither todo route and
+    fall through to context-only chat, where nothing can touch a todo — the
+    user got an acknowledgement and the todo silently stayed open."""
+    store = done_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "Delete todo 2, I already did it."})
+    assert ("toggle", 2, True) in store.calls
+    assert any("call the dentist" in e.get("chunk", "") for e in out)
+
+
+async def test_already_done_without_a_delete_verb_also_completes():
+    store = done_store()
+    await collect(Router(FakeLLM(), store), "chat",
+                  {"message": "I've already done buy milk"})
+    assert ("toggle", 1, True) in store.calls
+
+
+async def test_cited_id_beats_word_matching():
+    """'#3' names the bank todo; nothing in the text says 'bank'."""
+    store = done_store()
+    await collect(Router(FakeLLM(), store), "chat",
+                  {"message": "mark #3 as done"})
+    assert ("toggle", 3, True) in store.calls
+
+
+async def test_a_bare_number_is_not_read_as_an_id():
+    """'mark 3 eggs done' is text, not a reference to todo 3. Matching it as an
+    id would complete an unrelated todo — the failure mode worth avoiding."""
+    store = done_store()
+    await collect(Router(FakeLLM(), store), "chat",
+                  {"message": "mark 3 eggs done"})
+    assert not any(c[0] == "toggle" for c in store.calls)
+
+
+async def test_cited_id_that_is_not_open_changes_nothing():
+    store = done_store()
+    out = await collect(Router(FakeLLM(), store), "chat",
+                        {"message": "Delete todo 99, I already did it."})
+    assert not any(c[0] == "toggle" for c in store.calls)
+    assert any("match" in e.get("chunk", "").lower() for e in out)
+
+
 # ---- commitment tracking (Phase 8 feature 3) ----
 
 def sugg_router(tmp_path, llm=None, sent_rows=None):
@@ -2022,6 +2111,35 @@ async def test_emails_archive_confirm_approve_and_decline():
     assert events[-1]["result"]["ok"] is False and sync.archived == []
 
 
+async def test_emails_delete_confirms_names_trash_and_executes():
+    # Delete = Gmail's Trash (recoverable), behind the same confirm gate as
+    # archive — and the dialog must say Trash, not imply a permanent wipe.
+    store, sync = FakeMailStore(), FakeMailSync()
+    broker = ConfirmBroker()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store,
+                    confirm=broker)
+
+    async def drive(approved):
+        events = []
+        async for ev in router.handle("emails.delete", {"id": "m1"}):
+            events.append(ev)
+            if "confirm_request" in ev:
+                broker.resolve(ev["confirm_id"], approved)
+        return events
+
+    events = await drive(True)
+    req = events[0]["confirm_request"]
+    assert req["title"] == "Delete email" and "Trash" in req["intro"]
+    assert events[-1]["result"]["ok"] is True and sync.trashed == ["m1"]
+
+    sync.trashed.clear()
+    events = await drive(False)
+    assert events[-1]["result"]["ok"] is False and sync.trashed == []
+
+    out = await collect(router, "emails.delete", {"id": "nope"})
+    assert "error" in out[-1]
+
+
 async def test_emails_mark_read_no_longer_confirms():
     # Read-state writes stopped confirming 2026-07-15: opening a message
     # auto-marks it read, so the explicit button can't rank a dialog above
@@ -2184,11 +2302,25 @@ async def test_mail_suggest_labels_classifies_unlabeled_inbox_only():
     store.rows.append({**store.rows[0], "id": "m2",
                        "labels": ["INBOX", "Label_7"]})   # already labeled: skip
     store.rows.append({**store.rows[0], "id": "m3", "labels": ["SENT"]})
-    router = Router(FakeLLM(chunks=('{"label": "Bills"}',)), FakeStore(),
-                    mail=sync, mail_store=store)
+    llm = FakeLLM(chunks=('{"label": "Bills", "fit": "strong"}',))
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
     out = await collect(router, "mail.suggest_labels", {})
     res = out[-1]["result"]
     assert res["suggestions"] == {"m1": "Bills"} and res["scanned"] == 1
+    # v2 grounding: the system turn carries each label's profile derived from
+    # mail already filed under it (m2 is the one Bills message: sender a@x.com).
+    assert "- Bills: mail from x.com" in llm.messages[0]["content"]
+
+
+async def test_mail_suggest_labels_weak_fit_below_floor():
+    # The confidence floor is enforced end-to-end: a weak verdict yields no
+    # suggestion for that message rather than a guess.
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(chunks=('{"label": "Bills", "fit": "weak"}',)),
+                    FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "mail.suggest_labels", {})
+    res = out[-1]["result"]
+    assert res["suggestions"] == {} and res["scanned"] == 1
 
 
 async def test_mail_suggest_labels_needs_labels():
@@ -3155,3 +3287,240 @@ def test_file_write_hint_yields_to_rule_hint():
     from lumen.daemon.router import RULE_HINT
     msg = "make a rule to file emails from scouting as BSA"
     assert FILE_WRITE_HINT.search(msg) and RULE_HINT.search(msg)
+
+
+# ---- find-then-send: the recipient named in the of-form (audit 2026-07-19) ---
+# TO_HINT_FALLBACK only understood the possessive ("Chris's address"), so the
+# user's own phrasing — "send ... to the address of Chris Sizemore" — left the
+# compose popup with an empty To whenever the 4B also omitted to_hint.
+
+class ContactMailStore(FakeMailStore):
+    """Two senders whose names overlap, so a sloppy match is visible."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows = [
+            {"id": "c1", "sender": "Chris Sizemore <chris.sizemore@x.com>",
+             "subject": "Roof quote", "snippet": "s", "body": "b",
+             "labels": ["INBOX"], "received_at": "2026-07-02T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "t1",
+             "recipients": "me"},
+            {"id": "c2", "sender": "Chris Sizemore <chris.sizemore@x.com>",
+             "subject": "Roof quote v2", "snippet": "s", "body": "b",
+             "labels": ["INBOX"], "received_at": "2026-07-11T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "t1",
+             "recipients": "me"},
+            {"id": "c3", "sender": "Preston Todd <preston@y.com>",
+             "subject": "Unrelated", "snippet": "s", "body": "b",
+             "labels": ["INBOX"], "received_at": "2026-07-18T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "t2",
+             "recipients": "me"},
+        ]
+
+    def search(self, query, limit=50):
+        terms = [t for t in query.lower().removeprefix("from:").split() if t]
+        return [r for r in self.rows
+                if all(t in r["sender"].lower() for t in terms)]
+
+
+NO_HINT_DRAFT = ('{"to": [], "cc": [], "subject": "Roof", "body": "Hi Chris", '
+                 '"reply_hint": null, "to_hint": null}')
+
+
+async def test_find_then_send_resolves_address_of_form():
+    router = compose_router(FakeLLM((NO_HINT_DRAFT,)), store=ContactMailStore())
+    seen = {}
+    await _drive_compose(
+        router,
+        "Look for all email addresses from Chris Sizemore, and send an email "
+        "about the roof quote to the address of Chris Sizemore from his most "
+        "recent email to me",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen["to"] == ["chris.sizemore@x.com"]
+
+
+async def test_find_then_send_still_resolves_possessive_form():
+    router = compose_router(FakeLLM((NO_HINT_DRAFT,)), store=ContactMailStore())
+    seen = {}
+    await _drive_compose(
+        router, "send a note about the roof to Chris Sizemore's email address",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen["to"] == ["chris.sizemore@x.com"]
+
+
+def test_lookup_address_matches_on_word_boundaries():
+    router = compose_router(FakeLLM(), store=ContactMailStore())
+    # "to" is filler, not a name: it must not match inside "Preston".
+    assert router._lookup_address("to Chris Sizemore") == "chris.sizemore@x.com"
+    assert router._lookup_address("the address of") is None
+    assert router._lookup_address("Nobody Here") is None
+
+
+# ---- todo-fixes #19: "add X to my todo list" wrote a file called TODO -------
+# TOOL_HINT matches the "list" in "todo list", so the request arrived carrying
+# the filesystem group and nothing that could touch a todo. The model picked
+# the nearest capable tool and wrote a file.
+
+async def test_todo_request_attaches_todo_tools_alongside_files():
+    llm = RecordingToolLLM()
+    await collect(
+        Router(llm, FakeStore(rows=[TODO_ROW]), bridge=FakeBridge(),
+               model_router=FakeModelRouter()),
+        "chat", {"message": "add buy milk to my todo list"})
+    names = {t["function"]["name"] for t in llm.tools}
+    assert "add_todo" in names
+
+
+async def test_todo_context_names_the_tools_and_forbids_a_todo_file():
+    llm = RecordingToolLLM()
+    await collect(
+        Router(llm, FakeStore(rows=[TODO_ROW]), bridge=FakeBridge(),
+               model_router=FakeModelRouter()),
+        "chat", {"message": "add buy milk to my todo list"})
+    system = llm.messages[0]["content"]
+    assert "id=1" in system                       # complete_todo needs the id
+    assert "never by writing or editing a file" in system
+
+
+async def test_todo_ids_stay_out_of_context_without_the_tools():
+    # Ids are only useful with complete_todo attached; without it they are
+    # noise the model can quote at the user.
+    llm = FakeLLM()
+    await collect(Router(llm, FakeStore(rows=[TODO_ROW])),
+                  "chat", {"message": "what's still open?"})
+    assert "id=1" not in llm.messages[0]["content"]
+
+
+async def test_add_todo_tool_writes_to_the_store():
+    from lumen.daemon import local_tools
+    store = FakeStore(rows=[])
+    assert "buy milk" in local_tools.dispatch("add_todo", {"text": "buy milk"}, store)
+    assert store.calls == [("add", "buy milk")]
+    # a due date becomes the @date token parse_todo_input already understands
+    local_tools.dispatch("add_todo", {"text": "file taxes",
+                                      "due_date": "2026-08-01"}, store)
+    assert store.calls[-1] == ("add", "file taxes @2026-08-01")
+
+
+def test_complete_todo_tool_needs_a_real_open_id():
+    from lumen.daemon import local_tools
+    store = FakeStore(rows=[TODO_ROW])
+    assert "Marked todo 1" in local_tools.dispatch("complete_todo", {"id": 1}, store)
+    assert store.calls == [("toggle", 1, True)]
+    # a made-up id is reported back, not silently applied to something else
+    store.calls.clear()
+    assert "No open todo with id 99" in local_tools.dispatch(
+        "complete_todo", {"id": 99}, store)
+    assert store.calls == []
+
+
+def test_list_todos_tool_renders_ids():
+    from lumen.daemon import local_tools
+    assert "id=1 call dentist" in local_tools.dispatch(
+        "list_todos", {}, FakeStore(rows=[TODO_ROW]))
+    assert "no open todos" in local_tools.dispatch("list_todos", {}, FakeStore(rows=[]))
+
+
+# ---- audit 2026-07-19: capability gaps where the nearest tool won ----------
+
+def test_task_wording_does_not_become_a_calendar_event():
+    from lumen.daemon.router import EVENT_HINT, TODO_TASK_HINT
+    msg = "can you add a task to call the plumber"
+    assert EVENT_HINT.search(msg)                 # add + call still matches
+    assert TODO_TASK_HINT.search(msg)             # but the guard blocks it
+    # a real event that merely mentions an overdue thing must NOT be blocked
+    assert not TODO_TASK_HINT.search("book a meeting about the overdue invoice")
+
+
+def test_book_questions_reach_the_books_group():
+    from lumen.daemon.router import BOOK_HINT
+    for msg in ("who wrote dune", "who is the author of dune",
+                "what was Neuromancer written by", "look up the isbn"):
+        assert BOOK_HINT.search(msg), msg
+
+
+def test_month_names_reach_the_calendar_group():
+    from lumen.daemon.router import CAL_HINT
+    for msg in ("what do I have on in september", "am I busy in december",
+                "anything on march 5th", "what's on in may 3"):
+        assert CAL_HINT.search(msg), msg
+    # bare verb/modal uses stay out
+    assert not CAL_HINT.search("you may be late")
+    assert not CAL_HINT.search("we should march on")
+
+
+# ---- Files workbench (new-features items 6-7, 2026-07-19) ------------------
+
+class CaptureToolsLLM:
+    """Fake tool LLM recording both the messages and the tool schemas."""
+    model = None
+
+    def __init__(self):
+        self.messages = None
+        self.tools = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.messages = messages
+        self.tools = tools
+        yield {"content": "ok"}
+
+
+async def test_files_screen_ask_grounds_in_cwd_and_open_file(tmp_path):
+    (tmp_path / "recipe.md").write_text("use two eggs")
+    (tmp_path / "sub").mkdir()
+    llm = CaptureToolsLLM()
+    router = Router(llm, FakeStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    out = await collect(router, "chat", {
+        "message": "hmm, which of these should I keep?",   # no hint matches
+        "cwd": str(tmp_path), "open_file": str(tmp_path / "recipe.md")})
+    assert any("chunk" in ev for ev in out)
+    system = llm.messages[0]
+    assert system["role"] == "system"
+    assert str(tmp_path) in system["content"]
+    assert "recipe.md" in system["content"]      # the listing
+    assert "sub/ (folder)" in system["content"]
+    assert "use two eggs" in system["content"]   # the open file's content
+    # fs tools AND the in-process todo tools are attached (todo-fixes #19)
+    names = {t["function"]["name"] for t in llm.tools}
+    assert "list_directory" in names and "add_todo" in names
+
+
+async def test_files_screen_ask_without_open_file(tmp_path):
+    (tmp_path / "a.txt").write_text("x")
+    llm = CaptureToolsLLM()
+    router = Router(llm, FakeStore(), bridge=FakeBridge(),
+                    model_router=FakeModelRouter())
+    await collect(router, "chat",
+                  {"message": "what's here?", "cwd": str(tmp_path)})
+    assert "a.txt" in llm.messages[0]["content"]
+    assert "open in the editor" not in llm.messages[0]["content"]
+
+
+async def test_propose_edit_op_roundtrip():
+    router = Router(FakeLLM(chunks=("revised", " body")), FakeStore())
+    out = await collect(router, "files.propose_edit", {
+        "path": "/home/u/notes.md", "content": "old body",
+        "instruction": "revise it"})
+    assert out == [{"result": {"ok": True, "content": "revised body"}}]
+
+
+async def test_propose_edit_op_honest_failure_and_validation():
+    # unchanged proposal → ok: False with a reason, not a no-op diff
+    router = Router(FakeLLM(chunks=("same",)), FakeStore())
+    out = await collect(router, "files.propose_edit", {
+        "path": "a.md", "content": "same", "instruction": "change"})
+    assert out[0]["result"]["ok"] is False
+    assert "no changes" in out[0]["result"]["message"]
+
+    out = await collect(router, "files.propose_edit",
+                        {"path": "a.md", "content": "x"})
+    assert "error" in out[0]                     # missing instruction
+
+    out = await collect(Router(FakeLLM(fail=True), FakeStore()),
+                        "files.propose_edit",
+                        {"path": "a.md", "content": "x", "instruction": "y"})
+    assert "error" in out[0]                     # LLM down → IPC error

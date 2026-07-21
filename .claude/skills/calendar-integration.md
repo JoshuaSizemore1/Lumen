@@ -5,7 +5,23 @@
   the community `mcp-google-workspace`: the poller already uses the Google API
   client directly (bulk-sync constraint), so the custom server shares one OAuth
   stack via `daemon/connectors/google_auth.py` — one consent, one token file.
-  Tools: `list_events` (model-visible), `create_event`/`delete_event` (daemon-gated; see below).
+  Tools: `list_events` + `search_events` (model-visible), `create_event`/`delete_event`
+  (daemon-gated; see below).
+- **`search_events` (added 2026-07-19) is the topic-lookup path**, and the split from
+  `list_events` is load-bearing: *range known* → `list_events`, *topic known / date unknown* →
+  `search_events`. It passes Google's `q=` parameter (full-text over title, description,
+  location, attendees) with a default window of 1 month back / 12 months ahead, clamped to 60.
+  - **Why it exists:** "when is my next dentist appointment?" has no date in it, so `list_events`
+    could not answer it, and the model verbalised being stuck as *"I don't have access to your
+    medical appointments."* The interim fix was prose telling it to list a wide range and scan
+    titles — persuasion, which left a measured ~3–4% residual refusal. `q=` had been available on
+    the API the whole time. **Prefer an affordance the model can call over prose talking it
+    around a missing one.**
+  - It also removes relative-year arithmetic from topic questions — searching `dentist` needs no
+    year, which is the thing a 4B model gets wrong about half the time.
+  - **A new tool must be added to `config.toml`'s per-server `tools` allowlist too**, or it exists
+    on the server and is invisible to the model. `tests/eval/test_tool_surface.py` fails loudly
+    when config and the servers disagree.
 - **Auth**: installed-app flow via `uv run lumen-google-auth`
   (`docs/google-oauth-setup.md` is the user walkthrough). Token at
   `~/.local/share/lumen/google/token.json`, chmod 600. `google_auth.SCOPES`

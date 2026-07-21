@@ -10,8 +10,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
-    ClickLabel, ClickRow, ElideLabel, button, clear_layout, hbox, hline,
-    label, scroll, vbox, vline,
+    ClickLabel, ClickRow, ElideLabel, TypingDots, button, clear_layout, hbox,
+    hline, label, scroll, vbox, vline,
 )
 
 # Shared with the launcher's "TRY" hints so both surfaces suggest the same thing.
@@ -34,6 +34,7 @@ class ChatScreen(QWidget):
         self._busy = False
         self._acc = ""
         self.resp_text = None      # current assistant bubble
+        self.thinking = None       # animated "Thinking…" until the first token
         self._empty = None         # empty-state block when the thread has no turns
 
         root = hbox(self, (0, 0, 0, 0), 0)
@@ -185,7 +186,26 @@ class ChatScreen(QWidget):
         self.tool_lab = label("", 10, T.TEXT_FAINT)
         self.tool_lab.hide()
         self.thread_lay.insertWidget(self.thread_lay.count() - 1, self.tool_lab)
-        self.resp_text = self._turn("LUMEN", T.ACCENT, "", T.TEXT_PRIMARY)
+        # LUMEN bubble: an animated "Thinking…" holds the answer's spot until
+        # the first token lands, then hands off to the real (hidden) body.
+        w = QWidget()
+        lay = vbox(w, (0, 0, 0, 0), 4)
+        lay.addWidget(label("LUMEN", 10, T.ACCENT, ls=1))
+        self.thinking = TypingDots("Thinking", 14, T.INFO, sans=True)
+        lay.addWidget(self.thinking)
+        self.resp_text = label("", 14, T.TEXT_PRIMARY, sans=True, wrap=True)
+        self.resp_text.hide()
+        lay.addWidget(self.resp_text)
+        self.thread_lay.insertWidget(self.thread_lay.count() - 1, w)
+        self.thinking.start()
+
+    def _end_thinking(self):
+        """Stop the animation and reveal the real body (idempotent)."""
+        if self.thinking is not None:
+            self.thinking.stop()
+            self.thinking.hide()
+            self.thinking = None
+            self.resp_text.show()
 
     # ---- conversation lifecycle -----------------------------------------
     def new_chat(self):
@@ -193,6 +213,7 @@ class ChatScreen(QWidget):
         self._rendered_conv = None
         self._busy = False
         self.resp_text = None
+        self.thinking = None            # clear_layout below drops the old widget
         self._empty = None              # clear_layout below drops the old widget
         clear_layout(self.thread_lay)
         self.thread_lay.addStretch(1)   # clear_layout drops the stretch too
@@ -225,6 +246,7 @@ class ChatScreen(QWidget):
         clear_layout(self.thread_lay)
         self.thread_lay.addStretch(1)   # clear_layout drops the stretch too
         self.resp_text = None
+        self.thinking = None
         messages = got.get("messages", [])
         for m in messages:
             if m["role"] == "user":
@@ -265,6 +287,7 @@ class ChatScreen(QWidget):
     def _on_chunk(self, text: str):
         if not self._busy:
             return
+        self._end_thinking()
         self._acc += text
         self.resp_text.setText(self._acc)
 
@@ -272,6 +295,7 @@ class ChatScreen(QWidget):
         if not self._busy:
             return
         self._busy = False
+        self._end_thinking()
         if not self._acc:
             self.resp_text.setText("(no answer)")
         self.refresh_list()      # a newly created thread now shows in the sidebar
@@ -280,5 +304,6 @@ class ChatScreen(QWidget):
         if not self._busy:
             return
         self._busy = False
+        self._end_thinking()
         if self.resp_text is not None:
             self.resp_text.setText(msg)

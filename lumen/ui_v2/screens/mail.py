@@ -1,7 +1,8 @@
 """Mail screen: 334px message list | reading pane."""
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QFrame, QLabel, QLineEdit, QWidget
 
+from .. import mail_html
 from .. import theme as T
 from ..state import AppState
 from ..widgets import (
@@ -10,10 +11,27 @@ from ..widgets import (
 )
 
 
+class _ImageLoader(QThread):
+    """Fetches an email's remote images off the GUI thread (todo-fixes #12) and
+    hands back the HTML with them inlined as data: URIs."""
+
+    loaded = pyqtSignal(str, str)   # (message_id, inlined_html)
+
+    def __init__(self, mid: str, html: str):
+        super().__init__()
+        self._mid, self._html = mid, html
+
+    def run(self):
+        self.loaded.emit(self._mid, mail_html.inline_remote_images(self._html))
+
+
 class MailScreen(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
+        self._loaded_images: dict[str, str] = {}   # msg id -> HTML with images inlined
+        self._img_workers: set[_ImageLoader] = set()
+        self._auto_loading: set[str] = set()       # in-flight auto-loads
 
         root = hbox(self)
 
@@ -65,6 +83,13 @@ class MailScreen(QWidget):
         chips_host = QWidget()
         self.chips_lay = FlowLayout(chips_host)
         hv.addWidget(chips_host)
+
+        # review bar (suggest-labels v2): per-label bulk accepts + dismiss-all,
+        # visible only while suggestions are pending
+        self.review_host = QWidget()
+        self.review_lay = FlowLayout(self.review_host)
+        self.review_host.setVisible(False)
+        hv.addWidget(self.review_host)
 
         cv.addWidget(head)
         sep = QFrame()
@@ -121,6 +146,7 @@ class MailScreen(QWidget):
         self.unread_lab.setText(f"{self.state.unread_count()} unread")
         self.status_lab.setText(self._status_text())
         self._build_chips()
+        self._build_review()
         clear_layout(self.rows_lay)
         if not self.state.mails:
             if not self.state.mail_connected:
@@ -158,10 +184,18 @@ class MailScreen(QWidget):
                     c = T.label_color(n)
                     pills.addWidget(Chip(n, c, c, px=9, radius=7, hpad=6, vpad=1))
                 if sug:
+                    # review pass (v2): proposed label + explicit accept/reject
+                    c = T.label_color(sug)
+                    pills.addWidget(Chip(f"→ {sug}", c, c, px=9, radius=7,
+                                         hpad=6, vpad=1))
                     pills.addWidget(ClickChip(
-                        f"＋ {sug}", T.ACCENT, T.ACCENT, px=9,
+                        "✓", T.OK, T.OK, px=9,
                         on_click=lambda mid=m["id"]: self.state.apply_suggestion(mid),
-                        tooltip="Suggested label — click to file it (leaves the inbox)"))
+                        tooltip=f"Accept — file under {sug} (leaves the inbox)"))
+                    pills.addWidget(ClickChip(
+                        "✕", T.TEXT_DIM, T.TEXT_DIM, px=9,
+                        on_click=lambda mid=m["id"]: self.state.reject_suggestion(mid),
+                        tooltip="Reject this suggestion — nothing is written"))
                 pills.addStretch(1)
                 body.addSpacing(3)
                 body.addLayout(pills)
@@ -173,6 +207,33 @@ class MailScreen(QWidget):
             self.rows_lay.addWidget(sep)
         self.rows_lay.addStretch(1)
         self._populate_pane()
+
+    def _build_review(self):
+        """Suggest-labels v2 review bar: '✨ N suggestions' + one 'Accept all
+        <label> (n)' chip per proposed label + dismiss-all. Nothing writes
+        until an accept — dismiss/reject are purely local."""
+        clear_layout(self.review_lay)
+        sugg = self.state.mail_suggestions
+        self.review_host.setVisible(bool(sugg))
+        if not sugg:
+            return
+        counts: dict[str, int] = {}
+        for name in sugg.values():
+            counts[name] = counts.get(name, 0) + 1
+        n = len(sugg)
+        self.review_lay.addWidget(
+            label(f"✨ {n} suggestion{'s' if n != 1 else ''}:", 11, T.TEXT_DIM))
+        for name in sorted(counts, key=str.casefold):
+            c = T.label_color(name)
+            self.review_lay.addWidget(ClickChip(
+                f"Accept all {name} ({counts[name]})", c, c, px=10,
+                on_click=lambda l=name: self.state.accept_all_for_label(l),
+                tooltip=f"File all {counts[name]} under {name} — "
+                        "they leave the inbox"))
+        self.review_lay.addWidget(ClickChip(
+            "✕ Dismiss all", T.TEXT_DIM, T.TEXT_DIM, px=10,
+            on_click=self.state.dismiss_suggestions,
+            tooltip="Clear all suggestions — nothing has been written"))
 
     def _build_chips(self):
         # No "All": each chip is its own inbox — "Inbox" is unlabeled INBOX
@@ -241,6 +302,11 @@ class MailScreen(QWidget):
         self.archive_btn.setFixedHeight(29)
         self.archive_btn.clicked.connect(lambda: self.state.archive_mail(m["id"]))
         sl.addWidget(self.archive_btn)
+        self.delete_btn = button("Delete", "outline", px=11)
+        self.delete_btn.setFixedHeight(29)
+        self.delete_btn.setToolTip("Move to Gmail's Trash (recoverable ~30 days)")
+        self.delete_btn.clicked.connect(lambda: self.state.delete_mail(m["id"]))
+        sl.addWidget(self.delete_btn)
         self.read_btn = button("Mark read" if m["unread"] else "Mark unread", "outline", px=11)
         self.read_btn.setFixedHeight(29)
         self.read_btn.clicked.connect(
@@ -274,10 +340,67 @@ class MailScreen(QWidget):
 
         # HTML when the mirror has it; plain text otherwise (older rows get
         # their HTML lazily via emails.get the first time they're opened).
-        body = (HtmlBody(m["body_html"]) if m.get("body_html")
-                else label(m["body"], 13, T.TEXT_PRIMARY, sans=True, wrap=True))
+        raw_html = m.get("body_html")
         bw = QWidget()
         bl = vbox(bw, (0, 16, 0, 16), 0)
+        if raw_html:
+            loaded = self._loaded_images.get(m["id"])
+            if loaded is not None:
+                body = HtmlBody(mail_html.prepare_html(loaded))
+            else:
+                hidden = mail_html.remote_image_count(raw_html)
+                if hidden and self.state.load_remote_images:
+                    # Always-load (todo-fixes #18): fetch in the background and
+                    # repaint; the stripped view shows meanwhile so the text is
+                    # readable immediately instead of after the network.
+                    self._load_images(m, auto=True)
+                elif hidden:
+                    bl.addWidget(self._image_bar(m, hidden))
+                body = HtmlBody(mail_html.prepare_html(
+                    mail_html.strip_remote_images(raw_html)))
+        else:
+            # Plain text is NEVER handed to a rich-text widget raw: QLabel's
+            # AutoText heuristic renders "a < b and c > d" as "a d"
+            # (todo-fixes #16). plain_to_html escapes it and lays it out like a
+            # mail reader — same paper card as HTML mail (todo-fixes #17).
+            body = HtmlBody(mail_html.plain_to_html(m["body"]))
         bl.addWidget(body)
         self.pane_lay.addWidget(bw)
         self.pane_lay.addStretch(1)
+
+    def _image_bar(self, m: dict, hidden: int) -> QWidget:
+        """Privacy notice + 'Load images' button shown above a message whose
+        remote images are hidden by default (todo-fixes #12)."""
+        bar = QWidget()
+        bl = hbox(bar, (10, 8, 10, 8), 8)
+        bar.setStyleSheet(
+            f"background: {T.ACCENT_SOFT_QSS}; border: 1px solid {T.BORDER_SOFT}; "
+            "border-radius: 8px;")
+        noun = "image" if hidden == 1 else "images"
+        bl.addWidget(label(f"🖼  {hidden} {noun} hidden for privacy", 11, T.TEXT_DIM))
+        bl.addStretch(1)
+        self._img_btn = button("Load images", "outline", px=11)
+        self._img_btn.setFixedHeight(26)
+        self._img_btn.clicked.connect(lambda: self._load_images(m))
+        bl.addWidget(self._img_btn)
+        return bar
+
+    def _load_images(self, m: dict, auto: bool = False):
+        if auto:
+            if m["id"] in self._auto_loading:   # one fetch per message, not per repaint
+                return
+            self._auto_loading.add(m["id"])
+        else:
+            self._img_btn.setEnabled(False)
+            self._img_btn.setText("Loading…")
+        worker = _ImageLoader(m["id"], m["body_html"])
+        self._img_workers.add(worker)
+        worker.loaded.connect(self._images_ready)
+        worker.finished.connect(lambda w=worker: self._img_workers.discard(w))
+        worker.start()
+
+    def _images_ready(self, mid: str, html: str):
+        self._loaded_images[mid] = html
+        cur = self.state.sel_mail()
+        if cur is not None and cur["id"] == mid:   # still the open message
+            self._populate_pane()

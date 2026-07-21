@@ -14,7 +14,8 @@ from contextlib import aclosing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from lumen.daemon.connectors import free_slots, mail_rules
+from lumen.daemon.connectors import free_slots, local_files, mail_rules
+from lumen.daemon import local_tools
 from lumen.daemon.connectors.capture import classify
 from lumen.daemon.llm import (commitments, intent, label_suggest,
                               meeting_prep, notes_qa, triage)
@@ -25,6 +26,7 @@ from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
                                             revise_email)
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
                                            validate_proposal)
+from lumen.daemon.llm.file_edit import propose_edit
 from lumen.daemon.llm.file_write import propose_file
 from lumen.daemon.llm import memory as memory_mod
 from lumen.daemon.llm.mcp_bridge import ToolCallError
@@ -34,7 +36,16 @@ from lumen.daemon.write_gate import confirm_payload as write_confirm_payload
 
 log = logging.getLogger(__name__)
 
-TODO_HINT = re.compile(r"\b(?:todos?|tasks?|due|overdue)\b", re.IGNORECASE)
+# "still have open" / "outstanding" / "left to do" say todo without the word:
+# "Show me everything I still have open" used to depend on the intent
+# classifier guessing right, where a regex is deterministic and free (eval gap,
+# 2026-07-18). Bare "open" stays out — it belongs to files and mail far more
+# often than to todos.
+TODO_HINT = re.compile(
+    r"\b(?:todos?|tasks?|due|overdue|outstanding)\b"
+    r"|\bstill\s+(?:have\s+)?(?:open|to\s*-?\s*do)\b"
+    r"|\bleft\s+to\s+do\b",
+    re.IGNORECASE)
 
 # Deliberately wide net: a false positive just rides the tool schemas along on
 # one request; a miss answers "I can't access your files" (live bug 2026-07-11,
@@ -50,7 +61,14 @@ TOOL_HINT = re.compile(
     re.IGNORECASE,
 )
 
-BOOK_HINT = re.compile(r"\b(books?|novels?|reading|read|rated?|author)\b", re.IGNORECASE)
+# "who wrote X" / "author of X" live in TOOL_HINT (they always have), so a book
+# question that never says "book" used to attach the FILESYSTEM group and not
+# the books one — the model got file tools for a bibliographic question
+# (audit 2026-07-19).
+BOOK_HINT = re.compile(
+    r"\b(books?|novels?|reading|read|rated?|authors?)\b"
+    r"|\bwho\s+wrote\b|\bwritten\s+by\b|\bauthor\s+of\b|\bisbn\b",
+    re.IGNORECASE)
 
 REC_HINT = re.compile(
     r"\b(?:recommend|suggest(?:ion)?s?)\b.*\b(?:books?|novels?|read(?:ing)?)\b"
@@ -63,9 +81,16 @@ REC_HINT = re.compile(
 # calendar check (live bug 2026-07-12, "anything on my calender this coming
 # week" — misspelling matched nothing). cal[ae]nd\w* covers the common
 # calendar misspellings; bare time-of-week words are schedule-shaped enough.
+# Month names are in here for the same reason: "what do I have on in September"
+# named a period and a subject but matched nothing, so it fell through to the
+# intent classifier with no calendar tools attached (audit 2026-07-19).
 CAL_HINT = re.compile(
     r"\b(cal[ae]nd\w*|meetings?|events?|schedule|agenda|appointments?|free|busy|"
-    r"weeks?|weekends?|today|tomorrow|tonight|upcoming|plans?)\b",
+    r"weeks?|weekends?|today|tomorrow|tonight|upcoming|plans?|"
+    r"january|february|april|june|july|august|september|october|november|"
+    r"december|next\s+(?:month|year))\b"
+    # "march"/"may" only next to a date cue — bare, they are a verb and a modal
+    r"|\b(?:on|in)\s+(?:march|may)\b|\b(?:march|may)\s+\d{1,2}\b",
     re.IGNORECASE,
 )
 
@@ -80,9 +105,23 @@ TODO_ADD = re.compile(r"^\s*(?:add\s+(?:a\s+)?todo:?|remind me to)\s+(.+)$",
                       re.IGNORECASE | re.DOTALL)
 MARK_DONE = re.compile(r"^\s*(?:mark|check\s*off|tick)\b(.+?)(?:\bas\s+)?"
                        r"\b(?:done|completed?|finished)\b", re.IGNORECASE)
+# "Delete todo 7, I already did it." — the user's intent is completion, stated
+# as a removal. It matched neither route and fell through to context-only chat,
+# where nothing can touch a todo, so the todo silently stayed open (eval gap,
+# 2026-07-18). Completion rather than deletion is deliberate: it is the
+# recoverable reading, and "I already did it" is completion language.
+ALREADY_DONE = re.compile(
+    r"^\s*(?:delete|remove|drop|clear)\b(.+?)[,;.]?\s*"
+    r"(?:because\s+)?i(?:'ve|\s+have)?\s+already\s+"
+    r"\b(?:did|done|finished|completed)\b|"
+    r"^\s*i(?:'ve|\s+have)?\s+already\s+(?:did|done|finished|completed)\s+(.+)$",
+    re.IGNORECASE)
 _MATCH_STOP = frozenset(
     "the a an my that this one todo task to as off done complete completed "
     "finished it mark please".split())
+# "todo 7", "task #7", "#7", or a query that is nothing but the number.
+_ID_REF = re.compile(r"\b(?:todos?|tasks?|items?)\s*#?\s*(\d+)\b|#(\d+)\b|^\s*(\d+)\s*$",
+                     re.IGNORECASE)
 
 # Meeting prep: "prep (me) for X" shapes. Bare "prepare" stays out so
 # "prepare a speech" doesn't run the pipeline; a matched request with no
@@ -111,6 +150,12 @@ FILE_TASK_HINT = re.compile(
     r"\b(?:files?|folders?|director(?:y|ies)|documents?|markdown|\.md|\.txt)\b",
     re.IGNORECASE,
 )
+
+# Same guard, for todos: "add a task to call the plumber" hit EVENT_HINT's
+# add + call and became a CALENDAR EVENT (audit 2026-07-19). Deliberately
+# narrower than TODO_HINT — that one also matches "due"/"overdue", which would
+# wrongly block "book a meeting about the overdue invoice".
+TODO_TASK_HINT = re.compile(r"\b(?:todos?|to-?do list|tasks?)\b", re.IGNORECASE)
 
 # A dedicated "write me a document" intent (new-features item 2): an explicit
 # write verb aimed at a file noun. The local model authors the whole document
@@ -191,14 +236,24 @@ MAIL_READ_HINT = re.compile(
 COMPOSE_TIMEOUT_S = 1800.0
 
 # Deterministic fallback for the find-then-send recipient (todo-fixes #2):
-# the 4B often leaves to_hint null, but "<Name>'s address" names the person
-# right in the message. Captured span is stop-word-filtered before the mirror
-# lookup, so an over-wide capture just misses instead of mis-addressing.
+# the 4B often leaves to_hint null, but the message names the person outright.
+# Both orders are covered — possessive ("Chris Sizemore's address") and the
+# of-form ("the address of Chris Sizemore", "an address for Chris Sizemore"),
+# which the possessive-only version missed on the user's own phrasing (audit
+# 2026-07-19). Captured spans are stop-word-filtered before the mirror lookup,
+# so an over-wide capture just misses instead of mis-addressing.
 TO_HINT_FALLBACK = re.compile(
-    r"\b([\w'-]+(?:\s+[\w'-]+){0,2})[’']s\s+(?:e-?mail\s+)?address\b",
+    r"\b([\w'-]+(?:\s+[\w'-]+){0,2})[’']s\s+(?:e-?mail\s*)?(?:address|addresses)\b"
+    r"|\b(?:e-?mail\s*)?(?:address|addresses)\s+(?:of|for|belonging\s+to)\s+"
+    r"(?:the\s+)?([\w'-]+(?:\s+[\w'-]+){0,2})\b",
     re.IGNORECASE)
+# Words that are never part of a person's name. "to"/"all"/"address" matter:
+# the capture deliberately runs wide, and an unfiltered filler word would be
+# matched as a substring inside a real sender line ("to" inside "Preston").
 _ADDR_STOP = frozenset(
-    "find get grab look up the of for from his her their my email".split())
+    "find get grab look up send use the of for from to all his her him them "
+    "their my email e-mail address addresses recent most latest last "
+    "and then so that please about regarding re a an".split())
 
 # Triage is a pull ("what needs a reply?"), never a push. Checked after
 # COMPOSE so "reply to X saying thanks" still opens the compose popup.
@@ -247,6 +302,24 @@ RULE_SCAN_LIMIT = 500
 # waiting; a bigger cap would stall other one-shots behind it.
 SUGGEST_SCAN_LIMIT = 200
 SUGGEST_LIMIT = 15
+# How many filed messages ground each label's one-line description
+# (suggest-labels v2) — local SQL per label, no model cost.
+LABEL_PROFILE_ROWS = 3
+
+# Confirm-gated mail writes (title, intro, confirm label, GmailSync verb,
+# success message). Delete is Gmail's Trash, not a permanent wipe — the
+# dialog says so honestly.
+MAIL_GATES = {
+    "emails.archive": (
+        "Archive email",
+        "Lumen will archive this message in your Gmail account.",
+        "Archive", "archive", "Archived."),
+    "emails.delete": (
+        "Delete email",
+        "Lumen will move this message to Gmail's Trash — recoverable "
+        "there for about 30 days.",
+        "Delete", "trash", "Deleted — recoverable in Gmail's Trash."),
+}
 
 # In-context conversation history is a fixed size, not unbounded: only the most
 # recent N turns ride in the prompt (older turns stay on disk). A turn count is
@@ -339,15 +412,24 @@ def _sender_address(sender: str) -> str | None:
     return s if EMAIL.match(s) else None
 
 
-def calendar_context(events: list[dict], now: datetime, window_end: date) -> str:
-    """System-message context: current local time, a hard bounds statement so the
+def calendar_context(events: list[dict], now: datetime, window_end: date,
+                     has_tool: bool = False) -> str:
+    """System-message context: current local time, a bounds statement so the
     model can't guess outside the window, one compact line per event, and an
-    explicit empty marker."""
+    explicit empty marker. `has_tool` marks that the gcal tools are attached to
+    THIS request; only then may the text name them, and only then does an
+    out-of-window date become a tool call instead of a dead end. Without it the
+    bounds line stays honest but must not license "not shown" as a final answer
+    when the tools are in fact attached (same fabrication guard as
+    mail_context)."""
+    beyond = ("for another date call list_events over that range; to find an "
+              "event by topic when you do not know its date call search_events"
+              if has_tool else
+              "events outside it are not in this listing")
     lines = [f"Now: {now.strftime('%Y-%m-%d %H:%M')} ({now.strftime('%A')}), "
              f"local timezone UTC{now.strftime('%z')[:3]}:{now.strftime('%z')[3:]}.",
              f"The user's calendar from {now.date().isoformat()} through "
-             f"{window_end.isoformat()} (events outside this range are not shown — "
-             "say so if asked about them):"]
+             f"{window_end.isoformat()} — this window only ({beyond}):"]
     if not events:
         lines.append("No events in this range.")
         return "\n".join(lines)
@@ -409,9 +491,12 @@ def mail_context(unread: list[dict], counts: dict, connected: bool,
     return "\n".join(lines)
 
 
-def todo_context(todos: list[dict], today: date) -> str:
+def todo_context(todos: list[dict], today: date, has_tool: bool = False) -> str:
     """System-message context: today's date + one line per open todo, or an
-    explicit empty marker so the model can't hallucinate around a blank list."""
+    explicit empty marker so the model can't hallucinate around a blank list.
+    `has_tool` marks that the todo tools are attached to THIS request; only
+    then do the ids ride (complete_todo needs them) and only then may the text
+    name a tool — same fabrication guard as mail_context/calendar_context."""
     lines = [f"Today is {today.isoformat()} ({today.strftime('%A')})."]
     if not todos:
         lines.append("The user has no open todos.")
@@ -420,7 +505,15 @@ def todo_context(todos: list[dict], today: date) -> str:
         for t in todos:
             due = f"(due {t['due_date']})" if t["due_date"] else "(no due date)"
             tags = f" [{', '.join(t['tags'])}]" if t["tags"] else ""
-            lines.append(f"- {t['text']} {due}{tags}")
+            ident = f"id={t['id']} " if has_tool else ""
+            lines.append(f"- {ident}{t['text']} {due}{tags}")
+    if has_tool:
+        # Stated here as well as in the tool descriptions: the filesystem
+        # tools ride along on the same requests, and a TODO file is the wrong
+        # answer every time (todo-fixes #19).
+        lines.append("This list is the user's real todo list. Add to it with "
+                     "add_todo and close items with complete_todo — never by "
+                     "writing or editing a file.")
     return "\n".join(lines)
 
 
@@ -484,7 +577,8 @@ class Router:
                 {"role": "user", "content": "hi"}]
 
     def _build_messages(self, message: str, history: list[dict],
-                        groups: frozenset[str] = frozenset()) -> list[dict]:
+                        groups: frozenset[str] = frozenset(),
+                        extra: str | None = None) -> list[dict]:
         """A constant identity block + keyword-gated per-query context as the
         system message, then the conversation history (which ends with the
         current user turn). Context is keyed on the current message's subject
@@ -505,7 +599,8 @@ class Router:
                     "The user has a saved routine that matches this request. "
                     "Follow its steps in order:\n" + proc["text"])
         if TODO_HINT.search(message) or "todos" in groups:
-            context.append(todo_context(self._todos.open_todos(), date.today()))
+            context.append(todo_context(self._todos.open_todos(), date.today(),
+                                        has_tool="todos" in groups))
         if self._books is not None and (BOOK_HINT.search(message)
                                         or "books" in groups):
             context.append(self._books.catalog_context())
@@ -515,7 +610,7 @@ class Router:
             end = now.date() + timedelta(days=CAL_CONTEXT_DAYS)
             context.append(calendar_context(
                 self._calendar.list_range(now.date().isoformat(), end.isoformat()),
-                now, end))
+                now, end, has_tool="gcal" in groups))
         mail_shaped = bool(MAIL_HINT.search(message))
         if self._mail_store is not None and (mail_shaped or "mail" in groups):
             # Non-mail-shaped tool loops still get the counts as grounding;
@@ -527,10 +622,15 @@ class Router:
                 brief=not mail_shaped, has_tool="mail" in groups))
         if self._bridge is not None and "fs" in groups:
             context.append(fs_context(Path.home()))
+        if extra:
+            # Per-surface grounding (the Files screen's cwd/open-file block) —
+            # last, so it sits closest to the conversation it grounds.
+            context.append(extra)
         return [{"role": "system", "content": "\n\n".join(context)}] + history
 
     def _messages_for(self, message: str, conv_id: int | None,
-                      groups: frozenset[str] = frozenset()) -> list[dict]:
+                      groups: frozenset[str] = frozenset(),
+                      extra: str | None = None) -> list[dict]:
         """Prompt messages for a chat turn: the current user message is already
         persisted, so the store's (capped) history ends with it. Without a store
         this degrades to a single stateless user turn."""
@@ -538,7 +638,7 @@ class Router:
             history = self._conv.history(conv_id, limit=HISTORY_TURNS)
         else:
             history = [{"role": "user", "content": message}]
-        return self._build_messages(message, history, groups)
+        return self._build_messages(message, history, groups, extra)
 
     def _subject_groups(self, message: str) -> set[str]:
         """Which tool groups this message's subject matter wants — the same
@@ -552,6 +652,8 @@ class Router:
             groups.add("books")
         if TOOL_HINT.search(message) or FS_WRITE_HINT.search(message):
             groups.add("fs")
+        if TODO_HINT.search(message):
+            groups.add("todos")
         return groups
 
     def _engaged_groups(self, conv_id: int | None) -> set[str]:
@@ -559,7 +661,7 @@ class Router:
         ('and delete it') — same all-tools behavior as before groups existed."""
         if (self._conv is not None and conv_id is not None
                 and self._conv.is_tool_engaged(conv_id)):
-            return set(SERVER_GROUPS)
+            return set(SERVER_GROUPS) | {"todos"}
         return set()
 
     @staticmethod
@@ -596,7 +698,9 @@ class Router:
                 self._conv.add_message(conv_id, "user", message)   # write-through on arrival
             # aclosing: closing this generator must synchronously close whatever
             # sub-path it drives (the tool loop owns a pump task), not defer to GC.
-            async with aclosing(self._chat(message, conv_id)) as gen:
+            async with aclosing(self._chat(
+                    message, conv_id, cwd=payload.get("cwd"),
+                    open_file=payload.get("open_file"))) as gen:
                 async for ev in gen:
                     yield ev
         elif type_ == "conversations.list":
@@ -883,7 +987,7 @@ class Router:
                 yield {"result": {
                     "emails": self._mail_store.unread(int(payload.get("limit", 10))),
                     "connected": self._mail.connected}}
-            elif type_ == "emails.archive":
+            elif type_ in MAIL_GATES:   # emails.archive / emails.delete
                 async for ev in self._gated_mail_action(type_, payload):
                     yield ev
             elif type_ == "emails.mark_read":
@@ -914,13 +1018,21 @@ class Router:
                     return
                 names = [l["name"] for l in user]
                 ids = {l["id"] for l in user}
+                # v2 grounding: one deterministic description per label from
+                # mail already filed under it — local SQL, no model cost.
+                profiles = {l["name"]: label_suggest.describe_label(
+                                l["name"], self._mail_store.list_page(
+                                    "label", limit=LABEL_PROFILE_ROWS,
+                                    label_id=l["id"]))
+                            for l in user}
                 rows = [r for r in self._mail_store.list_page(
                             "inbox", limit=SUGGEST_SCAN_LIMIT)
                         if not ids.intersection(r["labels"])][:SUGGEST_LIMIT]
                 suggestions = {}
                 try:
                     for r in rows:
-                        name = await label_suggest.suggest(self._llm, r, names)
+                        name = await label_suggest.suggest(self._llm, r, names,
+                                                           profiles)
                         if name:
                             suggestions[r["id"]] = name
                 except LLMUnavailable as e:
@@ -1006,6 +1118,30 @@ class Router:
                 yield {"result": {"ok": True, "rules": self._rules.list_all()}}
             else:
                 yield {"error": f"unknown request type: {type_}"}
+        elif type_ == "files.propose_edit":
+            # Files-screen ✎ Edit (new-features item 7): one generation over
+            # the current EDITOR BUFFER (not disk — the edit applies to what
+            # the user sees). Nothing is written here; the UI shows the diff
+            # and the user's Apply performs the save.
+            path = str(payload.get("path") or "")
+            content = payload.get("content")
+            instruction = str(payload.get("instruction") or "").strip()
+            if content is None or not instruction:
+                yield {"error": "files.propose_edit needs {path, content, instruction}"}
+                return
+            try:
+                revised, err = await propose_edit(
+                    self._llm, Path(path).name or "file", str(content),
+                    instruction)
+            except LLMUnavailable as e:
+                yield {"error": str(e)}
+                return
+            if revised is None:
+                yield {"result": {"ok": False, "message": err}}
+            else:
+                self._log("files", "query",
+                          {"action": "propose_edit", "path": path})
+                yield {"result": {"ok": True, "content": revised}}
         elif type_ == "memory.learned":
             # Settings "what Lumen has learned": the distilled memory.md
             # verbatim + its last-updated stamp — the view reads exactly the
@@ -1049,12 +1185,26 @@ class Router:
         else:
             yield {"error": f"unknown request type: {type_}"}
 
-    async def _chat(self, message: str, conv_id: int | None):
+    async def _chat(self, message: str, conv_id: int | None,
+                    cwd: str | None = None, open_file: str | None = None):
         """Pick the chat sub-path, stream it through, write-through the
         assistant turn, and log the interaction for the memory system."""
         subsystem = "chat"
         skip_log = False
-        if (self._memory_path is not None and self._memory is not None
+        if cwd:
+            # Files-screen ask (new-features item 6): the prompt box is
+            # file-scoped by construction, so it skips the regex routing and
+            # goes straight to the tool loop grounded in what the user is
+            # looking at. todos always ride — fs tools without todo tools is
+            # how "add a todo" became a TODO file (todo-fixes #19). Rebuilt
+            # per turn, so navigating and re-asking reflects the new folder.
+            sub = self._chat_with_tools(
+                message, conv_id,
+                groups=frozenset({"fs", "todos"}
+                                 | self._subject_groups(message)),
+                extra_context=local_files.ask_context(cwd, open_file))
+            subsystem = "files"
+        elif (self._memory_path is not None and self._memory is not None
                 and FORGET_HINT.search(message)):
             # The forget turn must not be logged — its own text names the topic
             # and would re-seed what was just pruned.
@@ -1063,6 +1213,8 @@ class Router:
             sub, subsystem = self._nl_add_chat(m.group(1).strip()), "todos"
         elif m := MARK_DONE.match(message):
             sub, subsystem = self._mark_done_chat(m.group(1)), "todos"
+        elif m := ALREADY_DONE.match(message):
+            sub, subsystem = self._mark_done_chat(m.group(1) or m.group(2) or ""), "todos"
         elif self._calendar is not None and PREP_HINT.search(message):
             sub, subsystem = self._prep_chat(message), "calendar"
         elif (self._suggestions is not None and self._mail_store is not None
@@ -1099,7 +1251,8 @@ class Router:
             sub, subsystem = self._create_event_chat(message, context=slot_ctx), "calendar"
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and EVENT_HINT.search(message)
-                and not FILE_TASK_HINT.search(message)):
+                and not FILE_TASK_HINT.search(message)
+                and not TODO_TASK_HINT.search(message)):
             sub, subsystem = self._create_event_chat(message), "calendar"
         elif self._notes is not None and NOTES_HINT.search(message):
             sub, subsystem = self._notes_chat(message), "chat"
@@ -1139,16 +1292,12 @@ class Router:
                                     "books": "books"}
                     groups = {label_groups[l] for l in labels
                               if l in label_groups and available[label_groups[l]]}
-                    if groups & SERVER_GROUPS:
+                    if groups & (SERVER_GROUPS | {"todos"}):
                         if self._mail_store is not None:
                             groups.add("mail")
                         sub = self._chat_with_tools(message, conv_id,
                                                     groups=frozenset(groups))
                         subsystem = self._group_subsystem(groups)
-                    elif groups:   # todos-only: context ride, no tools
-                        sub = self._plain_chat(message, conv_id,
-                                               groups=frozenset(groups))
-                        subsystem = "todos"
             if sub is None:
                 sub = self._plain_chat(message, conv_id)
 
@@ -1295,16 +1444,25 @@ class Router:
         yield {"done": True}
 
     async def _mark_done_chat(self, query: str):
-        """'mark X done': fuzzy-match open todos; one match toggles, several
-        list themselves instead of guessing, none answers honestly."""
-        words = [w for w in re.findall(r"[\w']+", query.lower())
-                 if w not in _MATCH_STOP]
+        """'mark X done': match open todos by id when the user cites one
+        ('todo 7', '#7'), otherwise fuzzy-match on words; one match toggles,
+        several list themselves instead of guessing, none answers honestly."""
+        open_todos = self._todos.open_todos()
         matches = []
-        if words:
-            for t in self._todos.open_todos():
-                todo_words = set(re.findall(r"[\w']+", t["text"].lower()))
-                if all(w in todo_words for w in words):
-                    matches.append(t)
+        # An id reference has to be marked as one — a bare number is far more
+        # likely to be part of the text ("mark 3 eggs done") than an id.
+        ref = _ID_REF.search(query)
+        cited = next((g for g in ref.groups() if g), None) if ref else None
+        if cited is not None:
+            matches = [t for t in open_todos if str(t["id"]) == cited]
+        if not matches and cited is None:
+            words = [w for w in re.findall(r"[\w']+", query.lower())
+                     if w not in _MATCH_STOP]
+            if words:
+                for t in open_todos:
+                    todo_words = set(re.findall(r"[\w']+", t["text"].lower()))
+                    if all(w in todo_words for w in words):
+                        matches.append(t)
         if len(matches) == 1:
             self._todos.toggle(matches[0]["id"], True)
             yield {"chunk": f"Marked done: {matches[0]['text']}"}
@@ -1767,7 +1925,7 @@ class Router:
         # Send click stays the confirmation either way.
         hint = draft.get("to_hint")
         if not hint and (m := TO_HINT_FALLBACK.search(message)):
-            hint = m.group(1)
+            hint = m.group(1) or m.group(2)   # possessive form | of-form
         if not draft["to"] and hint and self._mail_store is not None:
             addr = self._lookup_address(hint)
             if addr:
@@ -1789,18 +1947,24 @@ class Router:
         yield {"done": True}
 
     def _lookup_address(self, name: str) -> str | None:
-        """Newest mirrored message whose SENDER line contains every word of
-        `name` -> that sender's address. Sender-only on purpose: prefilling a
-        recipient from a body mention could email the wrong person."""
+        """Newest mirrored message whose SENDER line names `name` -> that
+        sender's address. Sender-only on purpose: prefilling a recipient from a
+        body mention could email the wrong person. Matching is per-word and
+        anchored at word boundaries — a bare substring test let a filler word
+        match inside an unrelated sender ("to" inside "Preston") and address
+        the draft to the wrong human (audit 2026-07-19)."""
         words = [w for w in re.findall(r"[\w']+", name.lower())
                  if w not in _ADDR_STOP]
         if not words:
             return None
-        hits = sorted(self._mail_store.search(" ".join(words), limit=8),
+        # from: scopes the search to senders, so the newest message actually
+        # FROM this person wins over one that merely mentions them.
+        hits = sorted(self._mail_store.search(f"from:{' '.join(words)}", limit=8)
+                      or self._mail_store.search(" ".join(words), limit=8),
                       key=lambda r: r.get("received_at") or "", reverse=True)
         for r in hits:
             sender = (r.get("sender") or "").lower()
-            if all(w in sender for w in words):
+            if all(re.search(rf"\b{re.escape(w)}", sender) for w in words):
                 addr = _sender_address(r.get("sender", ""))
                 if addr:
                     return addr
@@ -1887,9 +2051,10 @@ class Router:
         return sorted((m[i] for i in present if i in m), key=str.casefold)
 
     async def _gated_mail_action(self, type_: str, payload: dict):
-        """Confirm-over-IPC then execute an archive against Gmail. Read-state
-        writes stopped confirming 2026-07-15 (dwell auto-read design), so
-        archive is the last mail action behind this gate."""
+        """Confirm-over-IPC then execute a mail write against Gmail. Read-state
+        writes stopped confirming 2026-07-15 (dwell auto-read design); archive
+        and delete (→ Trash) are the mail actions behind this gate."""
+        title, intro, confirm_label, verb, ok_msg = MAIL_GATES[type_]
         if self._confirm is None:
             yield {"error": "email actions unavailable"}
             return
@@ -1899,20 +2064,21 @@ class Router:
             return
         confirm_id = self._confirm.begin()
         yield {"confirm_request": {
-                   "icon": "✉", "title": "Archive email",
-                   "intro": "Lumen will archive this message in your Gmail account.",
+                   "icon": "✉", "title": title,
+                   "intro": intro,
                    "rows": [("From", row["sender"]), ("Subject", row["subject"])],
-                   "confirm_label": "Archive"},
+                   "confirm_label": confirm_label},
                "confirm_id": confirm_id}
         if not await self._confirm.wait(confirm_id):
             yield {"result": {"ok": False, "message": "Cancelled — nothing was changed."}}
             return
-        ok = await self._mail.archive(row["id"])
-        yield {"result": {"ok": ok, "message": "Archived." if ok else
+        ok = await getattr(self._mail, verb)(row["id"])
+        yield {"result": {"ok": ok, "message": ok_msg if ok else
                           "Couldn't reach Gmail — nothing was changed."}}
 
     async def _chat_with_tools(self, message: str, conv_id: int | None = None,
-                               groups: frozenset[str] = SERVER_GROUPS):
+                               groups: frozenset[str] = SERVER_GROUPS,
+                               extra_context: str | None = None):
         try:
             await self._bridge.ensure_started()
             tools = [t for t in self._bridge.ollama_tools(
@@ -1922,8 +2088,13 @@ class Router:
         except Exception:
             log.exception("MCP bridge unavailable — answering without tools")
             tools = []
+        # Todos are in-process, so they survive an MCP bridge that never came
+        # up — and they must be attached whenever the filesystem group is, or
+        # a todo request lands on write_file again (todo-fixes #19).
+        if "todos" in groups:
+            tools = tools + list(local_tools.TODO_TOOLS)
         if not tools:   # no servers came up → plain chat, honest context only
-            messages = self._messages_for(message, conv_id)
+            messages = self._messages_for(message, conv_id, extra=extra_context)
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
@@ -1944,6 +2115,13 @@ class Router:
 
         async def executor(name, args):
             start = time.monotonic()
+            if name.split("__")[-1] in local_tools.LOCAL_TOOL_NAMES:
+                text = local_tools.dispatch(name.split("__")[-1], args,
+                                            self._todos)
+                if self._tool_log is not None:
+                    self._tool_log.write(name, args, True, text,
+                                         int((time.monotonic() - start) * 1000))
+                return text
             if self._write_gate is not None:
                 denial = await self._write_gate.check(name, args, emit)
                 if denial is not None:
@@ -1971,7 +2149,7 @@ class Router:
                 text = text[:TOOL_RESULT_MAX_CHARS] + TRUNCATION_NOTE
             return text
 
-        messages = self._messages_for(message, conv_id, groups)
+        messages = self._messages_for(message, conv_id, groups, extra_context)
         model = self._pick_model(message)
 
         async def pump():

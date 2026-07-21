@@ -37,6 +37,9 @@ def build_settings_snapshot(cfg) -> dict:
             "calendar_window_past_days": cfg.sync.calendar_window_past_days,
             "calendar_window_future_days": cfg.sync.calendar_window_future_days,
         },
+        "mail": {
+            "load_remote_images": cfg.mail.load_remote_images,
+        },
         "accounts": {
             "gmail": {"connected": google_auth.connected(
                 cfg.google, google_auth.GMAIL_READ_SCOPES)},

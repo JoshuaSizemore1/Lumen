@@ -12,6 +12,23 @@ from lumen.daemon.llm.event_create import parse_proposal
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# The 4B loves em dashes; the user doesn't want them in mail Lumen writes
+# (todo-fixes #14). Replace an em dash / horizontal bar (with any spaces hugging
+# it) with a comma — the clause-joining role it usually plays reads naturally as
+# one. Only for Lumen-authored draft text, never the user's own typing.
+_EM_DASH = re.compile(r"\s*[—―]\s*")
+
+
+def strip_em_dashes(text: str) -> str:
+    if not text:
+        return text
+    text = _EM_DASH.sub(", ", text)
+    text = re.sub(r",\s*,", ", ", text)               # collapse doubled commas
+    text = re.sub(r"\s+,", ",", text)                 # no space before a comma
+    text = re.sub(r",\s*([.!?;:])", r"\1", text)      # drop a comma before other punctuation
+    text = re.sub(r"(^|\n)\s*,\s*", r"\1", text)      # a line that started with the dash
+    return text
+
 DRAFT_SYSTEM = (
     "You draft an email from the user's request. Reply with ONLY a JSON "
     "object, no prose, shaped exactly:\n"
@@ -47,8 +64,8 @@ def validate_draft(p: dict, *, user_message: str) -> dict:
                 ok.append(a)
         return ok
     return {"to": addresses(p.get("to")), "cc": addresses(p.get("cc")),
-            "subject": str(p.get("subject") or "").strip(),
-            "body": str(p.get("body") or "").strip(),
+            "subject": strip_em_dashes(str(p.get("subject") or "").strip()),
+            "body": strip_em_dashes(str(p.get("body") or "").strip()),
             "reply_hint": str(p.get("reply_hint") or "").strip() or None,
             "to_hint": str(p.get("to_hint") or "").strip() or None}
 
@@ -76,5 +93,5 @@ async def revise_email(llm, subject: str, body: str,
                           f"Subject: {subject}\n\n{body}\n\nInstruction: {instruction}")
     if raw is None or not str(raw.get("body") or "").strip():
         return None, "revision failed — try rephrasing the instruction"
-    return {"subject": str(raw.get("subject") or subject).strip(),
-            "body": str(raw["body"]).strip()}, None
+    return {"subject": strip_em_dashes(str(raw.get("subject") or subject).strip()),
+            "body": strip_em_dashes(str(raw["body"]).strip())}, None

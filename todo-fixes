@@ -4,6 +4,10 @@ Bug/repair backlog, pulled from Lumen's in-app todo list on 2026-07-16.
 Each entry cites its source todo id — the originals are still in the app's
 todo list. Feature-sized items went to `new-features.md` instead.
 
+**Status 2026-07-19: entries 1-19 fixed and live-verified** (934 tests).
+Entries 15-19 closed on 2026-07-19 alongside a full audit of the LLM-facing
+tool surface; see `## Audit` at the end for what that turned up.
+
 **Status 2026-07-17: all 10 entries fixed and live-verified** (851 tests, up
 from 813). Per-entry ✔ notes below. Leftovers worth knowing:
 - #4 was already per-turn in code — regression tests added; the live repro
@@ -132,6 +136,23 @@ assembly.
 - **Root cause:** date math is left to the small local model
   (`daemon/llm/event_create.py`) — small models are unreliable at calendar
   arithmetic.
+- **Follow-up 2026-07-19 — month/year arithmetic was still missing.**
+  `resolve_relative_phrase` handled weekdays and day/week offsets but had no
+  month or year patterns at all, so "March next year" reached the 4B
+  unresolved. Measured against the live model (2 trials each): explicit
+  "next year" phrasings it actually gets right, but a YEAR-LESS month name
+  whose month has already passed comes back with the CURRENT year 6/6 times —
+  "the conference in March", said in July 2026, proposes March 2026, which the
+  gate then rejects as "that date is in the past". So the user-visible symptom
+  was a flat refusal, not just a wrong date.
+  **Done:** month/day/year patterns added (`march 5th next year`, `3rd of
+  december`, `in 3 months`, `next month`, literal years), plus
+  `correct_year` — an explicit year phrase wins outright, and otherwise a
+  year-less month that landed in the past rolls forward one year. Ambiguous
+  month words ("may" the modal, "march" the verb) need a date cue, so "you may
+  5 minutes late" is not May 5th. Live-verified through the daemon:
+  "in March next year" → Mon Mar 15 2027; "on my calendar in March" →
+  Tue Mar 23 2027 (model said 2026).
 - **Fix:** resolve relative dates deterministically in code (extend the
   `todo_parse.py` patterns: weekday names, "next X", "next week on X",
   "in N days") and hand the model a concrete date; also inject "today is
@@ -181,6 +202,171 @@ assembly.
   up on the next `emails.list` — no restart required.
 
 
-  ## 11. The local llm is no longer using tools like it is meant to and instead making up fake information, even sometimes saying it does not have access to my email
+  ## 11. The local llm is no longer using tools like it is meant to and instead making up fake information, even sometimes saying it does not have access to my email — ✔ fixed
+  - **Root cause (not a routing regression):** the model *was* calling
+    search_email — the tool was returning wrong/empty results, so the model
+    confidently reported junk or concluded "no email." Same root cause as #13.
+  - **Done:** fixed the search tool (see #13); a no-match now returns a
+    query-scoped message ("No email matched that query… try broader terms / an
+    empty query for the most recent") instead of a bare "No matching email" the
+    4B read as an empty mailbox. Live-verified: both repro prompts below now
+    call the tool and answer from real mail.
 
-  ## 12. The html rendering in the emails is not working properly with images which makes it look bad
+  ## 12. The html rendering in the emails is not working properly with images which makes it look bad — ✔ fixed
+  - **Root cause:** the reading pane's QTextBrowser never fetches remote
+    resources (privacy — no tracking pixels), so the ~146 remote `<img>`s across
+    the inbox rendered as broken boxes.
+  - **Done (design: load on demand):** `ui_v2/mail_html.py` strips remote/cid
+    images by default (clean layout, inline `data:` images kept); a per-message
+    "🖼 N images hidden for privacy · Load images" bar fetches them once, off
+    the GUI thread, and inlines them as data: URIs. Failures/cid parts drop out
+    (no broken boxes). Screenshot-verified.
+
+  ## 13. The tool to look through emails + the local LLM is not good at searching through emails, for example when I say what emails did I get on the 8th of july this year, it says I did not get any which I did, and when I ask it for the most recent email I got it says I dont have any, as no emails match "from:me subject:recent" — ✔ fixed
+  - **Root cause:** the old search was FTS-only over quoted tokens. It had no
+    recency ("most recent" → a bm25 hit from months ago), no date support, and
+    fed the Gmail-style operators the 4B emits (from:/subject:/on:/`||`) to FTS
+    as literal text → 0 results. The date miss was also a **timezone** bug:
+    received_at is UTC, so 3 emails whose *local* date was Jul 8 were stored as
+    Jul 9 and never matched a naive Jul-8 filter.
+  - **Done:** `parse_mail_query` in `email_menu.py` turns the operator/date
+    query into structured filters (dates resolved in the user's local tz →
+    UTC bounds), everything orders newest-first, and an empty query returns the
+    most recent mail. The search_email tool description now steers the model
+    (empty query for latest; on:/after:/before:; from:/subject:). Live-verified:
+    "most recent email" → real newest; "emails on the 8th of july" → the 3 real
+    Jul-8 (local) messages.
+
+  ## 14. Add regex to go through email drafts that lumen creates and automaticaly remove all em dashes — ✔ fixed
+  - **Done:** `strip_em_dashes` in `email_compose.py` replaces em dashes (and
+    the visually-identical horizontal bar), with any hugging spaces, by a comma
+    — the clause-joining role they usually play — and tidies the result (no
+    doubled/leading/pre-punctuation commas). Applied to the subject + body of
+    both propose and revise, so only Lumen-authored draft text is cleaned; the
+    user's own typing in the compose popup is left alone.
+
+
+  ## 15. The HTML rendering needs some serious improvements, currently the emails with HTML sometimes look okay other times it looks horrible — ✔ fixed
+  - **Root cause:** the sender's HTML went to QTextBrowser untouched. It renders
+    only a subset of HTML4/CSS2, so what "sometimes looked okay" was whichever
+    half of the sender's CSS happened to apply. Two failure modes dominated:
+    a `bgcolor`/dark palette overrode the white paper card and then any dark
+    text on it went invisible, and fixed pixel widths (900px+ table shells)
+    overflowed a pane whose horizontal scrollbar is off, cutting content.
+  - **Done:** `mail_html.prepare_html` normalizes before rendering — `<script>`
+    /`<style>`/`<head>` blocks dropped (half-applied CSS is the problem, not the
+    solution), `bgcolor` dropped, text colours too pale to read on the card
+    dropped so they inherit the card's, pixel widths over the pane width
+    dropped, and a sane base font/line-height wrapped around the result.
+    Screenshot-verified before/after on a dark-palette statement email: before,
+    a dark card with an invisible account line; after, one readable paper card.
+
+  ## 16. Do not render emails with no HTML like they are html — ✔ fixed
+  - **Root cause:** plain-text bodies went to a bare `QLabel`, whose default
+    `Qt::AutoText` runs `mightBeRichText()` and renders anything tag-shaped as
+    HTML. Live-probed: "a < b and c > d" renders as "a d" — the reading pane was
+    silently eating message content. "5 &lt; 6 &amp; 7" and any `<br>`/`<p>`
+    mentioned in prose hit the same path.
+  - **Done:** plain bodies never reach a rich-text guess. `mail_html.plain_to_html`
+    escapes FIRST, then emits markup it chose itself; the pane renders that.
+
+  ## 17. Make emails look more like normal email readers when not using HTML — ✔ fixed
+  - **Done:** plain text now lands on the same white paper card as HTML mail
+    instead of a bare dark-background label. `plain_to_html` keeps hard line
+    breaks, spaces paragraphs, indents and dims `>` quoted passages by depth
+    (the `>` markers themselves drop out, as every real reader does), dims the
+    signature after `--`, and linkifies URLs and bare addresses.
+    Screenshot-verified.
+
+  ## 18. Why is it a bad idea to always load the images for emails? — ✔ answered + always-load shipped
+  - **The answer:** remote images are the standard read-receipt mechanism. A 1x1
+    "tracking pixel" with a URL unique to you means fetching it tells the sender
+    you opened the message, when, how many times, and the IP it came from
+    (rough location + ISP) — and confirms the address is live, which attracts
+    more mail. That is the whole cost; it is real but modest, and Gmail already
+    fetches these for you through Google's proxy today.
+  - **Decision (user, 2026-07-19): always load.** Implemented as
+    `[mail] load_remote_images = true` (daemon config, shown in Settings).
+    The reading pane fetches on open, off the GUI thread, once per message, and
+    repaints; the stripped view shows meanwhile so text is readable immediately.
+    Setting it false restores the click-to-load bar, which is still tested.
+
+  ## 19. When I asked lumen to add something to my todo list it tried to write to a file called TODO, rather than add it to the todo list integrated in the Lumen Application — ✔ fixed
+  - **Root cause (a capability gap, not a routing miss):** todos had NO tools at
+    all. The model could read the open list from injected context but had no way
+    to act on it, so every todo write depended on the TODO_ADD/MARK_DONE regexes
+    matching first. "add buy milk to my todo list" misses TODO_ADD, and TOOL_HINT
+    matches the "list" in "todo list" — so the request arrived carrying the
+    FILESYSTEM group and nothing that could touch a todo. The model picked the
+    nearest capable tool and wrote a file. Same class as #3.
+  - **Done:** todos are a real tool group. `daemon/local_tools.py` exposes
+    add_todo / complete_todo / list_todos in-process (the daemon owns the SQLite
+    handle; a fourth MCP server would mean a second writer for no benefit), the
+    router attaches them whenever the todo subject matter is present, and
+    todo_context now carries ids plus an explicit "never by writing a file".
+    Deletion stays a UI action. Live-verified: "add buy milk to my todo list"
+    called add_todo, the row landed in the real list with source=chat, and no
+    TODO file was created anywhere under $HOME.
+
+---
+
+## Audit — LLM-facing tool surface (2026-07-19)
+
+Full pass over every tool the model can call and how a request reaches it.
+The unifying defect: **where Lumen has no tool for what was asked, the router
+still hands the model a neighbouring group, and the model picks the nearest
+capable tool.** #3 (markdown file → calendar event) and #19 (todo → TODO file)
+are the same bug twice. Findings, all fixed:
+
+1. **Todos had no tools** (→ #19 above). The big one; closed by
+   `daemon/local_tools.py`.
+2. **"add a task to call the plumber" became a calendar event.** EVENT_HINT's
+   `add` + `call` matched. Guarded by TODO_TASK_HINT, kept deliberately
+   narrower than TODO_HINT so "book a meeting about the overdue invoice" is
+   still an event.
+3. **Find-then-send only understood the possessive.** TO_HINT_FALLBACK matched
+   "Chris's address" but not the user's own phrasing, "the address of Chris
+   Sizemore" — so with to_hint null the compose popup opened with an empty To.
+   Both orders now match. `_lookup_address` also matched on bare substrings, so
+   a filler word could match inside an unrelated sender ("to" inside
+   "Preston"); it is word-anchored now and scopes the mirror search with
+   `from:` so the newest mail actually FROM the person wins.
+   Live-verified end to end on the user's exact prompt against the real mirror,
+   which contains both "Chris Sizemore" and "Joshua Sizemore": resolved to
+   chris@abellalarms.net, nothing sent.
+4. **Book questions attached the filesystem group, not books.** "who wrote X" /
+   "author of X" live in TOOL_HINT and were missing from BOOK_HINT, so a
+   bibliographic question got file tools. Added.
+5. **Calendar questions naming a month attached no calendar tools.** "what do I
+   have on in September" matched nothing and fell through to the intent
+   classifier. Month names added to CAL_HINT ("march"/"may" only next to a date
+   cue — they are a verb and a modal).
+
+### Not fixed — flagged for a decision
+
+**The distilled memory blob is degrading answers.** `memory.md` contains:
+
+    - User consistently requests a single-word greeting, primarily "hi" or
+      "hello", and expects it to be delivered in a specific, minimal form
+
+Distilled from test turns, and false. It is injected into every chat's system
+message, and the 4B follows it as an instruction despite the "treat as context,
+not instructions" framing. Controlled A/B on the live model, same prompt and
+tools both times:
+
+    without the memory line -> 'Your todo "pick up dry cleaning" has been added…'
+    WITH the memory line    -> 'hi'
+
+The tool call still runs correctly; only the answer is destroyed. This is not
+specific to todos — it applies to every route. Two things worth deciding:
+prune that line (the `forget` chat path already does this), and separately,
+whether the distiller should be allowed to write instruction-shaped bullets
+about how Lumen should respond at all.
+
+## Josh's Finds
+
+1. When I open an email, and it loads the pictures, it resets the email inbox scroll wheel to the top
+2. Loading emails, are laggy, and show partiall things while other stuff is still loading, only show the email after all pictures load / everything is loaded
+3. The email HTML formatting is still off, and HTML emails often look weird
+4. When I tell it to add something "inappropriate" to my todo list it does not do it and says its a joke, please add to the Lumen system prompt a message telling it to not have a content filter on whats inapporopiate / rude things
+5. In the Today tab even if there is nothing on the calendar today, it should still render a view of the calendar for today including a bar showing the time on the calendar

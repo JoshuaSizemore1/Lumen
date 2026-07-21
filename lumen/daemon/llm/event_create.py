@@ -7,7 +7,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
-from lumen.daemon.connectors.todo_parse import resolve_relative_phrase
+from lumen.daemon.connectors.todo_parse import correct_year, resolve_relative_phrase
 
 MAX_DURATION_H = 12
 DEFAULT_DURATION_MIN = 30
@@ -147,6 +147,34 @@ def apply_resolved_date(raw: dict, target: date) -> dict:
     return out
 
 
+def apply_year_correction(raw: dict, text: str, today: date) -> dict:
+    """Re-year the model's proposal from the user's own words when no exact
+    relative date was resolvable ("March next year" pins a year, not a day).
+    Shifts start and end by the same number of years so a span stays intact."""
+    try:
+        start = date.fromisoformat(str(raw.get("start") or "")[:10])
+    except ValueError:
+        return raw
+    fixed = correct_year(start, text, today)
+    if fixed.year == start.year:
+        return raw
+    shift = fixed.year - start.year
+    out = dict(raw)
+    for key in ("start", "end"):
+        v = str(raw.get(key) or "")
+        try:
+            if len(v) == 10:
+                d = date.fromisoformat(v)
+                out[key] = d.replace(year=d.year + shift).isoformat()
+            elif v:
+                dt = datetime.fromisoformat(v)
+                out[key] = dt.replace(year=dt.year + shift).isoformat(
+                    timespec="minutes")
+        except ValueError:
+            pass
+    return out
+
+
 def _when(p: dict) -> str:
     if p["all_day"]:
         s, e = date.fromisoformat(p["start"]), date.fromisoformat(p["end"])
@@ -217,5 +245,10 @@ async def propose_event(llm, message: str, *, now: datetime, model=None,
                       "day and a time, like 'call with Sam Friday 2pm'.")
     if resolved is not None:
         raw = apply_resolved_date(raw, resolved[0])
+    elif not context:
+        # No exact date to pin, but the words may still pin the year — the 4B
+        # answers "March next year" with the CURRENT year, which then dies at
+        # the gate as "that date is in the past".
+        raw = apply_year_correction(raw, message, now.date())
     return validate_proposal(raw, now=now, user_message=message,
                              context=context or "")

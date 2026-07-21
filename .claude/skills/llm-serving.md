@@ -54,7 +54,29 @@ Zenbook Duo, Core Ultra 9 285H, 32GB shared, **iGPU-only — Ollama runs the mod
 - **Sustained mixed session** (~6.4 min, briefing + a dozen chats + tool calls, model resident throughout): peak package temp **65°C** (idle baseline 44–47°C; 0 samples ≥70°C); fans ramp from **0 RPM idle to ~4000–4100 RPM** under load (audible but far from max); RAM **+4.2 GB** under load (3.9 GB model + KV cache at num_ctx 8192 + MCP subprocs). Thermals sit comfortably inside the envelope (crit 105°C) — no throttle, no thermal alarm.
 - **Verdict:** thermals and idle behavior pass cleanly. The one real gap is interactive **cold-start (~11s)**, which is inherent to CPU-only prompt-eval of the identity prompt under the non-negotiable idle-unload — not a thermal problem. Warm latency (~0.7s) is the everyday experience.
 
+## llama.cpp direct: evaluated 2026-07-18, reverted 2026-07-19 — don't re-derive this
+A `llm.backend = "llamacpp"` path (daemon-supervised `llama-server`, OpenAI-compatible client,
+`--sleep-idle-seconds` for idle-unload) was built, measured, and then deleted. Recording it here
+so the next benchmark that shows llama.cpp "beating" Ollama doesn't restart the cycle.
+
+- **Ollama *is* llama.cpp** — it ships `/usr/lib/ollama/llama-server` and runs the model in it.
+  A "llama.cpp vs Ollama" benchmark is not two engines; it is one engine with and without a
+  wrapper. Treat any framing of it as a migration between runtimes as a category error.
+- **The measured delta is wrapper overhead: a fixed ~0.5–0.7 s per request**, not a multiplier —
+  1.53× at 2 tool schemas, 1.29× at 5, 1.23× at 16 (real production prompt, both arms warmed,
+  alternating reps). The ratio *shrinks* as the request gets heavier. An earlier "2.03×" came
+  from timing a 13-schema surface production never sends.
+- **The cost is structural, not the line count**: a subprocess supervisor on the critical path, a
+  *second* idle-unload mechanism to keep correct alongside `keep_alive` (two ways to violate the
+  non-negotiable constraint), embeddings permanently split across two servers (llama-server holds
+  one model per process), and a hardcoded GGUF blob path that rots on the next `ollama pull`.
+- **Verdict: not worth it, and it violated the rule directly below.** If per-request latency
+  matters later, attack Ollama's own overhead — don't add a process. Full workings in
+  `docs/research/local-inference-eval.md` and the 2026-07-18 tool-accuracy spec.
+
 ## What NOT to do
 - Don't run a second model server "just in case" — one Ollama instance, one idle-unload policy.
+  (This rule pre-dated the llama.cpp experiment above and was correct; the experiment cost a day
+  to arrive back at it. Check this list *before* benchmarking an alternative runtime.)
 - Don't disable idle-unload to shave latency — the point of this app is it's always available *and* doesn't cook the laptop.
 - Don't "fix" cold-start by trimming the IDENTITY prompt without weighing it against the anti-fabrication behavior it encodes — that's a product/behavior call, not a free optimization (Phase 11 finding).

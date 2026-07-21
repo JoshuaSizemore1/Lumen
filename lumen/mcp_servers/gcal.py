@@ -1,7 +1,8 @@
-"""Google Calendar MCP server: list_events for what the local cache can't
-answer, plus create_event / delete_event — which the daemon only ever calls
-after the user approved the exact event in a confirm dialog. Shares the
-poller's OAuth token via google_auth. Run: python -m lumen.mcp_servers.gcal"""
+"""Google Calendar MCP server: list_events (a date range) and search_events (a
+topic, when the date is the unknown) for what the local cache can't answer,
+plus create_event / delete_event — which the daemon only ever calls after the
+user approved the exact event in a confirm dialog. Shares the poller's OAuth
+token via google_auth. Run: python -m lumen.mcp_servers.gcal"""
 
 from datetime import date, datetime, time, timedelta
 
@@ -38,6 +39,29 @@ def _format_event(item: dict, calendar_name: str) -> str:
     return f"- {when}: {item.get('summary', 'Untitled')} [{calendar_name}]{loc}"
 
 
+def _collect(service, time_min: str, time_max: str, q: str | None) -> list[str]:
+    """Every visible calendar's events in the window, optionally filtered by
+    Google's own full-text search (`q` covers title, description, location and
+    attendees)."""
+    lines: list[str] = []
+    cals = service.calendarList().list().execute().get("items", [])
+    for cal in cals:
+        if cal.get("hidden") or cal.get("deleted"):
+            continue
+        page_token = None
+        while True:
+            resp = service.events().list(
+                calendarId=cal["id"], singleEvents=True, orderBy="startTime",
+                timeMin=time_min, timeMax=time_max, maxResults=100,
+                pageToken=page_token, **({"q": q} if q else {})).execute()
+            lines.extend(_format_event(item, cal.get("summary", cal["id"]))
+                         for item in resp.get("items", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    return lines
+
+
 def _list_events(service, start: str, end: str) -> str:
     try:
         s, e = date.fromisoformat(start), date.fromisoformat(end)
@@ -45,29 +69,47 @@ def _list_events(service, start: str, end: str) -> str:
         return "start and end must be ISO dates like 2026-07-14."
     if service is None:
         return NOT_CONNECTED
-    time_min = datetime.combine(s, time.min).astimezone().isoformat()
-    time_max = datetime.combine(e, time.max).astimezone().isoformat()
-    lines: list[str] = []
     try:
-        cals = service.calendarList().list().execute().get("items", [])
-        for cal in cals:
-            if cal.get("hidden") or cal.get("deleted"):
-                continue
-            page_token = None
-            while True:
-                resp = service.events().list(
-                    calendarId=cal["id"], singleEvents=True, orderBy="startTime",
-                    timeMin=time_min, timeMax=time_max, maxResults=100,
-                    pageToken=page_token).execute()
-                lines.extend(_format_event(item, cal.get("summary", cal["id"]))
-                             for item in resp.get("items", []))
-                page_token = resp.get("nextPageToken")
-                if not page_token:
-                    break
+        lines = _collect(service,
+                         datetime.combine(s, time.min).astimezone().isoformat(),
+                         datetime.combine(e, time.max).astimezone().isoformat(),
+                         None)
     except Exception:
         return FAILED
     if not lines:
         return f"No events between {start} and {end}."
+    return "\n".join(sorted(lines))
+
+
+def _search_events(service, query: str, months_back: int, months_ahead: int,
+                   today: date | None = None) -> str:
+    query = (query or "").strip()
+    if not query:
+        return "query is required — the word or phrase to look for."
+    if service is None:
+        return NOT_CONNECTED
+    # Clamped so a model that passes something wild can't ask Google for a
+    # century of events.
+    months_back = max(0, min(int(months_back), 60))
+    months_ahead = max(0, min(int(months_ahead), 60))
+    today = today or date.today()
+    s = today - timedelta(days=31 * months_back)
+    e = today + timedelta(days=31 * months_ahead)
+    try:
+        lines = _collect(service,
+                         datetime.combine(s, time.min).astimezone().isoformat(),
+                         datetime.combine(e, time.max).astimezone().isoformat(),
+                         query)
+    except Exception:
+        return FAILED
+    if not lines:
+        # Phrased as a completed search, not as missing information: the model
+        # must be able to tell the user "you have nothing matching that"
+        # without reaching for "I don't have access".
+        return (f"Searched the user's whole calendar from {s.isoformat()} to "
+                f"{e.isoformat()} and found no event matching {query!r}. "
+                f"The calendar was read successfully — there is simply no such "
+                f"event in that range.")
     return "\n".join(sorted(lines))
 
 
@@ -120,10 +162,44 @@ def _delete_event(service, event_id: str, calendar_id: str,
 
 @mcp.tool()
 def list_events(start: str, end: str) -> str:
-    """List the user's Google Calendar events between two ISO dates (inclusive),
-    e.g. start='2026-09-01' end='2026-09-30'. Use this only for dates the
-    assistant's calendar context doesn't already cover."""
+    """List everything on the user's own calendar between two ISO dates
+    (inclusive), e.g. start='2026-09-01' end='2026-09-30'. Access is already
+    set up and handled for you — this reads the user's own data, so never
+    decline for lack of permission, credentials, or account access.
+
+    Use this when the user names a period and wants to see what is in it
+    ('what's on next week?', 'am I busy in September?'). Call it for ANY date
+    range, including dates months or years out and dates in the past. The
+    calendar listing in your system message covers only a short window around
+    today; when the user asks about a date outside that window, call this tool
+    with that range instead of telling them the event isn't shown.
+
+    If you know WHAT the user is asking about but not WHEN, use search_events
+    instead — do not scan a wide range with this tool."""
     return _list_events(_service(), start, end)
+
+
+@mcp.tool()
+def search_events(query: str, months_back: int = 1, months_ahead: int = 12) -> str:
+    """Find an event on the user's own calendar by what it is about, when you
+    do not know its date. Searches title, description, location and attendees
+    across every one of the user's calendars. Access is already set up and
+    handled for you — this reads the user's own data, so never decline for lack
+    of permission, credentials, or account access.
+
+    This is the right tool for 'when is my next dentist appointment?', 'when is
+    the parent-teacher conference?', 'do I have therapy this month?', 'when am I
+    seeing the lawyer?'. Pass the distinguishing word as `query` — 'dentist',
+    'parent-teacher', 'therapy'. The defaults already reach a year ahead and a
+    month back, which covers the ordinary question; widen them for the distant
+    past or the far future.
+
+    Every one of those is an ordinary entry on the user's own calendar, and
+    looking one up for them is exactly what you are for. What an event is about
+    never makes it off-limits. An event missing from the listing in your system
+    message has NOT been ruled out — it was merely outside that short window.
+    Search here before ever saying you don't know when something is."""
+    return _search_events(_service(), query, months_back, months_ahead)
 
 
 @mcp.tool()

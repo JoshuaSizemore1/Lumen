@@ -26,7 +26,35 @@ def test_search_email_hits_and_empty(tmp_path):
     EmailStore(conn).upsert([msg(1, subject="Budget forecast", sender="Ada <ada@x.com>")])
     out = mail._search_email(conn, "budget", 5)
     assert "m1" in out and "Budget forecast" in out
-    assert mail._search_email(conn, "zzzz", 5) == "No matching email."
+    # empty result is query-scoped, never "you have no email" (todo-fixes #11)
+    miss = mail._search_email(conn, "zzzz", 5)
+    assert "No email matched" in miss and "most recent" in miss
+
+
+def test_search_email_empty_query_returns_recent(tmp_path):
+    # 'most recent email' → the model calls with an empty query (todo-fixes #13)
+    conn = make_conn(tmp_path)
+    EmailStore(conn).upsert([msg(1), msg(9), msg(4)])
+    out = mail._search_email(conn, "", 5)
+    assert out.index("id=m9") < out.index("id=m4") < out.index("id=m1")   # newest first
+
+
+def test_search_email_renders_local_date():
+    # UTC 07-09T02:00 shows as the user's local date, not the UTC calendar day
+    import os
+    import time
+    prev = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"          # CDT = UTC-05:00 in July
+    time.tzset()
+    try:
+        assert mail._local_dt("2026-07-09T02:00:00+00:00").startswith("2026-07-08")
+        assert mail._local_dt("garbage") == "garbage"     # bad input → graceful
+    finally:
+        if prev is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prev
+        time.tzset()
 
 
 def test_get_email_renders_from_to_date_subject_and_body(tmp_path):

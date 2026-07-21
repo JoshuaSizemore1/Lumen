@@ -161,6 +161,10 @@ class AppState(QObject):
         self.mail_scope = "inbox"      # "inbox" | "unread" | a label name
         self.mail_labels: list[str] = []
         self.mail_suggestions: dict[str, str] = {}
+        # Remote images load on open (todo-fixes #18). Mirrors
+        # [mail] load_remote_images; refreshed from the daemon on startup so a
+        # user who turns it off gets the click-to-load bar back.
+        self.load_remote_images = True
 
         self.suggestions: list[dict] = []
         self.proposed_procedures: list[dict] = []
@@ -177,6 +181,7 @@ class AppState(QObject):
                 self.attach_compose_source(chat)
             self.refresh_todos()
             self.refresh_books()
+            self.fetch_settings(self._apply_mail_settings)
             self.sync_inbox()    # launch → immediate Gmail delta-sync
             self.refresh_suggestions()
             self.refresh_procedures()
@@ -354,6 +359,13 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("settings.get", {}, cb)
 
+    def _apply_mail_settings(self, snapshot) -> None:
+        """Cache the image-loading preference so the reading pane can decide
+        synchronously while painting. Defaults stay on if the read fails."""
+        if isinstance(snapshot, dict):
+            mail = snapshot.get("mail") or {}
+            self.load_remote_images = bool(mail.get("load_remote_images", True))
+
     def approve_procedure(self, slug: str) -> None:
         if self._data is not None:
             self._data.request("memory.approve_procedure", {"slug": slug},
@@ -503,6 +515,12 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("emails.archive", {"id": mid}, self._mail_action_done)
 
+    def delete_mail(self, mid: str) -> None:
+        """Move to Gmail's Trash — the daemon gates it behind the confirm
+        overlay before touching Gmail (same ritual as archive)."""
+        if self._data is not None:
+            self._data.request("emails.delete", {"id": mid}, self._mail_action_done)
+
     def set_mail_read(self, mid: str, read: bool) -> None:
         if self._data is not None:
             self._data.request("emails.mark_read", {"id": mid, "read": read},
@@ -543,6 +561,45 @@ class AppState(QObject):
         else:
             self.mails_changed.emit()
 
+    def reject_suggestion(self, mid: str) -> None:
+        """Review-pass reject (suggest-labels v2): local only — nothing was
+        ever written, so there is nothing to undo."""
+        if self.mail_suggestions.pop(mid, None) is not None:
+            self.mails_changed.emit()
+
+    def dismiss_suggestions(self) -> None:
+        """Clear the whole review pass without writing anything."""
+        if self.mail_suggestions:
+            self.mail_suggestions.clear()
+            self.mails_changed.emit()
+
+    def accept_all_for_label(self, label: str) -> None:
+        """Per-label bulk accept from the review bar. Each accept is the same
+        emails.apply_label write the single tap uses; one toast + refresh when
+        the last one lands."""
+        mids = [m for m, n in self.mail_suggestions.items() if n == label]
+        for mid in mids:
+            self.mail_suggestions.pop(mid, None)
+        if not mids:
+            return
+        if self._data is None:
+            self.mails_changed.emit()
+            return
+        left, filed = [len(mids)], [0]
+
+        def done(res):
+            left[0] -= 1
+            if isinstance(res, dict) and res.get("ok"):
+                filed[0] += 1
+            if left[0] == 0:
+                self.toast_requested.emit(
+                    f"✓ Filed {filed[0]} under {label} — moved out of inbox")
+                self.refresh_mails()
+
+        for mid in mids:
+            self._data.request("emails.apply_label",
+                               {"id": mid, "label": label}, done)
+
     # ---- mail rules (2026-07-15) ----
     def open_rule_editor(self, prefill: dict | None = None) -> None:
         self.rule_edit_requested.emit(prefill or {})
@@ -574,6 +631,37 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("rules.toggle", {"id": rid, "enabled": enabled},
                                cb or (lambda _r: None))
+
+    # ---- files workbench (new-features items 6-7) ----
+    # Browsing, reading, and the user's own Save are UI-local (the filesystem
+    # is native to this process; reads are ungated by explicit user decision,
+    # and a manual Save is direct manipulation like adding a todo). Only the
+    # model-involved calls — asks and edit proposals — go to the daemon.
+    def list_dir(self, path) -> dict:
+        from lumen.daemon.connectors import local_files
+        return local_files.list_dir(path)
+
+    def read_file(self, path) -> dict:
+        from lumen.daemon.connectors import local_files
+        return local_files.read_text(path)
+
+    def save_file(self, path, content: str) -> dict:
+        try:
+            from pathlib import Path
+            Path(path).expanduser().write_text(content)
+        except OSError as e:
+            return {"error": e.strerror or str(e)}
+        return {"ok": True}
+
+    def propose_edit(self, path: str, content: str, instruction: str, cb) -> None:
+        """✎ Edit: one local-model generation over the current editor buffer;
+        cb({ok, content|message}). Nothing is written until the user applies."""
+        if self._data is not None:
+            self._data.request("files.propose_edit",
+                               {"path": path, "content": content,
+                                "instruction": instruction}, cb)
+        else:
+            cb({"ok": False, "message": "Sample mode — edits need the daemon."})
 
     # ---- books ----
     def _set_books(self, rows: list[dict]) -> None:

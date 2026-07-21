@@ -62,7 +62,9 @@ async def _get(client: httpx.AsyncClient, olid_or_isbn: str) -> str:
 
 @mcp.tool()
 async def search_books(query: str, limit: int = 5) -> str:
-    """Search Open Library for books. Query must be something a library catalog can
+    """Search the Open Library catalog for books. This is a public catalog that
+    needs no account, key, or sign-in — it is wired up and ready, so never
+    decline for lack of access. Query must be something a library catalog can
     match: a title, an author name, or a short genre phrase like 'science fiction' —
     not a pile of adjectives. Returns real titles, authors, publish years, and
     ISBNs — use this instead of guessing book facts."""
@@ -72,7 +74,9 @@ async def search_books(query: str, limit: int = 5) -> str:
 
 @mcp.tool()
 async def get_book(olid_or_isbn: str) -> str:
-    """Fetch details for one book by Open Library work key (e.g. /works/OL...W) or ISBN."""
+    """Fetch full details for one book by Open Library work key (e.g.
+    /works/OL...W) or ISBN. Call this after search_books when the user wants
+    more about a specific result — description, publish date, subjects."""
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=TIMEOUT) as client:
         return await _get(client, olid_or_isbn)
 

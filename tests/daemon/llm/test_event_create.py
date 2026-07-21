@@ -217,3 +217,25 @@ async def test_propose_event_booking_context_skips_override():
                                  context="- Tue 2026-07-21 10:00-10:30")
     assert err is None
     assert p["start"].startswith("2026-07-21T10:00")
+
+
+# ---- year correction when no exact date was resolvable ----------------------
+
+from lumen.daemon.llm.event_create import apply_year_correction
+
+
+def test_year_correction_moves_next_year_off_the_current_year():
+    raw = {"start": "2026-03-10T14:00", "end": "2026-03-10T15:00"}
+    out = apply_year_correction(raw, "offsite in March next year", date(2026, 7, 19))
+    assert out["start"] == "2027-03-10T14:00" and out["end"] == "2027-03-10T15:00"
+
+
+def test_year_correction_rolls_a_past_month_forward():
+    raw = {"start": "2026-03-10", "end": "2026-03-12", "all_day": True}
+    out = apply_year_correction(raw, "the conference in March", date(2026, 7, 19))
+    assert out["start"] == "2027-03-10" and out["end"] == "2027-03-12"
+
+
+def test_year_correction_leaves_ordinary_proposals_alone():
+    raw = {"start": "2026-07-20T09:00", "end": "2026-07-20T09:30"}
+    assert apply_year_correction(raw, "standup tomorrow", date(2026, 7, 19)) is raw

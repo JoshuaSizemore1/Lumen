@@ -1,0 +1,555 @@
+{
+  "label": "bonsai-8b-strict",
+  "model": "bonsai",
+  "url": "http://127.0.0.1:8080",
+  "n_prompts": 30,
+  "arms": {
+    "json_schema_strict": {
+      "summary": {
+        "n": 30,
+        "well_formed": 30,
+        "malformation_rate": 0.0,
+        "needed_salvage": 0,
+        "strict_malformation_rate": 0.0,
+        "correct_tool": 25,
+        "correct_args": 24,
+        "semantic_accuracy": 0.8,
+        "median_wall_s": 2.414,
+        "mean_wall_s": 2.43,
+        "median_completion_tokens": 25.5
+      },
+      "detail": [
+        {
+          "prompt": "What did Chris send me about the invoice?",
+          "arm": "json_schema_strict",
+          "wall_s": 4.658,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "invoice from Chris"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 19,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"invoice from Chris\"}}"
+        },
+        {
+          "prompt": "Show me my unread email.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.99,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "is:unread",
+            "limit": 10
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 26,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"is:unread\", \"limit\": 10}}"
+        },
+        {
+          "prompt": "Any mail from yesterday?",
+          "arm": "json_schema_strict",
+          "wall_s": 1.868,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "from yesterday",
+            "limit": 5
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 24,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"from yesterday\", \"limit\": 5}}"
+        },
+        {
+          "prompt": "Pull up the full text of message m_8812.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.764,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "get_email",
+          "got_tool": "get_email",
+          "args": {
+            "id": "m_8812"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 22,
+          "raw": "{\"tool\": \"get_email\", \"arguments\": {\"id\": \"m_8812\"}}"
+        },
+        {
+          "prompt": "What's on my calendar next week?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.789,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_events",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-18",
+            "end": "2026-07-25"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-18\", \"end\": \"2026-07-25\"}}"
+        },
+        {
+          "prompt": "Am I free on August 3rd?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.817,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_events",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-08-03",
+            "end": "2026-08-03"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-08-03\", \"end\": \"2026-08-03\"}}"
+        },
+        {
+          "prompt": "What meetings do I have between September 1 and September 30?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.797,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_events",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-09-01",
+            "end": "2026-09-30"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-09-01\", \"end\": \"2026-09-30\"}}"
+        },
+        {
+          "prompt": "Add a todo to renew the car registration by Friday.",
+          "arm": "json_schema_strict",
+          "wall_s": 2.442,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "add_todo",
+          "got_tool": "add_todo",
+          "args": {
+            "text": "renew the car registration",
+            "due": "Friday",
+            "project": "car registration"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 34,
+          "raw": "{\"tool\": \"add_todo\", \"arguments\": {\"text\": \"renew the car registration\", \"due\": \"Friday\", \"project\": \"car registration\"}}"
+        },
+        {
+          "prompt": "Remind me to call the dentist.",
+          "arm": "json_schema_strict",
+          "wall_s": 3.413,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "add_todo",
+          "got_tool": "add_todo",
+          "args": {
+            "text": "Call the dentist",
+            "due": "2026-07-18T14:05:00Z",
+            "project": "Dentist"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 52,
+          "raw": "{\"tool\": \"add_todo\", \"arguments\": {\"text\": \"Call the dentist\", \"due\": \"2026-07-18T14:05:00Z\", \"project\": \"Dentist\"}}"
+        },
+        {
+          "prompt": "What's on my todo list?",
+          "arm": "json_schema_strict",
+          "wall_s": 1.321,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_todos",
+          "got_tool": "list_todos",
+          "args": {},
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 14,
+          "raw": "{\"tool\": \"list_todos\", \"arguments\": {}}"
+        },
+        {
+          "prompt": "Show me everything I still have open.",
+          "arm": "json_schema_strict",
+          "wall_s": 2.837,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_todos",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-18",
+            "end": "2026-07-18"
+          },
+          "correct_tool": false,
+          "correct_args": false,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-18\", \"end\": \"2026-07-18\"}}"
+        },
+        {
+          "prompt": "Mark todo 42 as done.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.539,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "complete_todo",
+          "got_tool": "complete_todo",
+          "args": {
+            "id": 42
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 18,
+          "raw": "{\"tool\": \"complete_todo\", \"arguments\": {\"id\": 42}}"
+        },
+        {
+          "prompt": "Do I own anything by Ursula Le Guin?",
+          "arm": "json_schema_strict",
+          "wall_s": 1.748,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_books",
+          "got_tool": "search_books",
+          "args": {
+            "query": "Ursula Le Guin"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 22,
+          "raw": "{\"tool\": \"search_books\", \"arguments\": {\"query\": \"Ursula Le Guin\"}}"
+        },
+        {
+          "prompt": "Look up the ISBN for Piranesi.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.616,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "lookup_book",
+          "got_tool": "search_books",
+          "args": {
+            "query": "Piranesi"
+          },
+          "correct_tool": false,
+          "correct_args": false,
+          "completion_tokens": 20,
+          "raw": "{\"tool\": \"search_books\", \"arguments\": {\"query\": \"Piranesi\"}}"
+        },
+        {
+          "prompt": "Read /home/josh/notes/standup.md for me.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.946,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "read_file",
+          "got_tool": "read_file",
+          "args": {
+            "path": "/home/josh/notes/standup.md"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 25,
+          "raw": "{\"tool\": \"read_file\", \"arguments\": {\"path\": \"/home/josh/notes/standup.md\"}}"
+        },
+        {
+          "prompt": "Find the email where Dana mentioned the lease.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.678,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "Dana mentioned the lease"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 21,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"Dana mentioned the lease\"}}"
+        },
+        {
+          "prompt": "What did I get on July 8th?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.839,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-08",
+            "end": "2026-07-08"
+          },
+          "correct_tool": false,
+          "correct_args": false,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-08\", \"end\": \"2026-07-08\"}}"
+        },
+        {
+          "prompt": "List my events for tomorrow.",
+          "arm": "json_schema_strict",
+          "wall_s": 3.964,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_events",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-19T00:00:00Z",
+            "end": "2026-07-19T23:59:59Z"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 61,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-19T00:00:00Z\", \"end\": \"2026-07-19T23:59:59Z\"}}"
+        },
+        {
+          "prompt": "Add 'buy oat milk' to my list.",
+          "arm": "json_schema_strict",
+          "wall_s": 3.358,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "add_todo",
+          "got_tool": "add_todo",
+          "args": {
+            "text": "buy oat milk",
+            "due": "2026-07-19T14:05:00Z",
+            "project": "daily"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 50,
+          "raw": "{\"tool\": \"add_todo\", \"arguments\": {\"text\": \"buy oat milk\", \"due\": \"2026-07-19T14:05:00Z\", \"project\": \"daily\"}}"
+        },
+        {
+          "prompt": "Search my library for books about cartography.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.507,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_books",
+          "got_tool": "search_books",
+          "args": {
+            "query": "cartography"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 18,
+          "raw": "{\"tool\": \"search_books\", \"arguments\": {\"query\": \"cartography\"}}"
+        },
+        {
+          "prompt": "Is there anything I should deal with today?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.866,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-18",
+            "end": "2026-07-18"
+          },
+          "correct_tool": false,
+          "correct_args": false,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-18\", \"end\": \"2026-07-18\"}}"
+        },
+        {
+          "prompt": "I think Priya emailed about the budget \u2014 can you find it?",
+          "arm": "json_schema_strict",
+          "wall_s": 1.81,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "budget",
+            "limit": 1
+          },
+          "correct_tool": true,
+          "correct_args": false,
+          "completion_tokens": 23,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"budget\", \"limit\": 1}}"
+        },
+        {
+          "prompt": "Delete todo 7, I already did it.",
+          "arm": "json_schema_strict",
+          "wall_s": 1.479,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "complete_todo",
+          "got_tool": "delete_todo",
+          "args": {
+            "id": 7
+          },
+          "correct_tool": false,
+          "correct_args": false,
+          "completion_tokens": 17,
+          "raw": "{\"tool\": \"delete_todo\", \"arguments\": {\"id\": 7}}"
+        },
+        {
+          "prompt": "When's my next dentist appointment?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.832,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_events",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-18",
+            "end": "2026-07-31"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-18\", \"end\": \"2026-07-31\"}}"
+        },
+        {
+          "prompt": "Put 'file taxes' on the list for April 15.",
+          "arm": "json_schema_strict",
+          "wall_s": 2.957,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "add_todo",
+          "got_tool": "add_todo",
+          "args": {
+            "text": "file taxes",
+            "due": "2026-04-15T14:05:00Z"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 43,
+          "raw": "{\"tool\": \"add_todo\", \"arguments\": {\"text\": \"file taxes\", \"due\": \"2026-04-15T14:05:00Z\"}}"
+        },
+        {
+          "prompt": "Which books do I have on Roman history?",
+          "arm": "json_schema_strict",
+          "wall_s": 1.859,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_books",
+          "got_tool": "search_books",
+          "args": {
+            "query": "Roman history",
+            "limit": 5
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 24,
+          "raw": "{\"tool\": \"search_books\", \"arguments\": {\"query\": \"Roman history\", \"limit\": 5}}"
+        },
+        {
+          "prompt": "Open /home/josh/notes/2026-07-17.md",
+          "arm": "json_schema_strict",
+          "wall_s": 2.386,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "read_file",
+          "got_tool": "read_file",
+          "args": {
+            "path": "/home/josh/notes/2026-07-17.md"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 33,
+          "raw": "{\"tool\": \"read_file\", \"arguments\": {\"path\": \"/home/josh/notes/2026-07-17.md\"}}"
+        },
+        {
+          "prompt": "Anything unread from this week that mentions the contract?",
+          "arm": "json_schema_strict",
+          "wall_s": 1.847,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "contract",
+            "limit": 5
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 23,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"contract\", \"limit\": 5}}"
+        },
+        {
+          "prompt": "Show me next month's schedule.",
+          "arm": "json_schema_strict",
+          "wall_s": 3.263,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "list_events",
+          "got_tool": "list_events",
+          "args": {
+            "start": "2026-07-18",
+            "end": "2026-08-18"
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 41,
+          "raw": "{\"tool\": \"list_events\", \"arguments\": {\"start\": \"2026-07-18\", \"end\": \"2026-08-18\"}}"
+        },
+        {
+          "prompt": "What's the id of the last email Chris sent?",
+          "arm": "json_schema_strict",
+          "wall_s": 2.713,
+          "well_formed": true,
+          "reason": "ok",
+          "needed_salvage": false,
+          "expected": "search_email",
+          "got_tool": "search_email",
+          "args": {
+            "query": "from:Chris",
+            "limit": 1
+          },
+          "correct_tool": true,
+          "correct_args": true,
+          "completion_tokens": 25,
+          "raw": "{\"tool\": \"search_email\", \"arguments\": {\"query\": \"from:Chris\", \"limit\": 1}}"
+        }
+      ]
+    }
+  }
+}

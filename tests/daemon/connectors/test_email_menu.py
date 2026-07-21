@@ -52,6 +52,56 @@ def test_search_matches_body_and_sender_and_survives_syntax(tmp_path):
     assert store.search('AND OR "unbalanced') == []             # no OperationalError
 
 
+# ---- todo-fixes #13/#11: recency, timezone-aware dates, operator queries ----
+from datetime import datetime, timedelta, timezone
+
+_TZ = timezone(timedelta(hours=-6))                    # the user's local tz
+_NOW = datetime(2026, 7, 17, 16, 0, tzinfo=_TZ)
+
+
+def test_search_empty_query_returns_newest_first(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1), msg(5), msg(3)])             # received 07-01/05/03
+    ids = [m["id"] for m in store.search("", now_local=_NOW)]
+    assert ids == ["m5", "m3", "m1"]                   # most recent first
+
+
+def test_search_on_date_uses_local_timezone(tmp_path):
+    # UTC 07-09T04:00 is the user's local 07-08T22:00 — 'on the 8th' must find
+    # it even though the stored UTC date is the 9th (the live bug).
+    store = make_store(tmp_path)
+    store.upsert([msg(1, received_at="2026-07-09T04:00:00+00:00"),   # local 07-08
+                  msg(2, received_at="2026-07-09T18:00:00+00:00")])  # local 07-09
+    ids = [m["id"] for m in store.search("on:2026-07-08", now_local=_NOW)]
+    assert ids == ["m1"]
+    ids = [m["id"] for m in store.search("after:2026-07-08 before:2026-07-09",
+                                         now_local=_NOW)]
+    assert ids == ["m1"]
+
+
+def test_search_operator_queries_become_filters(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert([msg(1, sender="Chris Sizemore <chris@x.com>", subject="Invoice"),
+                  msg(2, sender="Ada <ada@x.com>", subject="Lunch",
+                      labels=["SENT"]),
+                  msg(3, sender="Bob <bob@x.com>", subject="Invoice")])
+    assert {m["id"] for m in store.search("from:chris", now_local=_NOW)} == {"m1"}
+    assert {m["id"] for m in store.search("subject:invoice", now_local=_NOW)} == {"m1", "m3"}
+    # from:me is the user's sent mail, not a literal 'me' text match
+    assert {m["id"] for m in store.search("from:me", now_local=_NOW)} == {"m2"}
+    assert {m["id"] for m in store.search("in:sent", now_local=_NOW)} == {"m2"}
+
+
+def test_search_gmail_operator_garbage_degrades_gracefully(tmp_path):
+    # the exact shape the 4B emitted live — must not error, must not match junk
+    store = make_store(tmp_path)
+    store.upsert([msg(1)])
+    assert store.search("subject:'sent to me' from:me date:'2026-07-08'",
+                        now_local=_NOW) == []
+    assert store.search("subject:'x' || body:'x' || received:'2026-07-08'",
+                        now_local=_NOW) == []
+
+
 def test_update_labels_and_unread_and_counts(tmp_path):
     store = make_store(tmp_path)
     store.upsert([msg(1)])
@@ -551,6 +601,40 @@ async def test_action_failure_leaves_mirror_untouched(tmp_path):
     store.upsert([msg(1)])
     assert await sync.archive("m1") is False
     assert "INBOX" in store.get("m1")["labels"]
+
+
+# Delete = Gmail Trash (new-features item 8): the mirror only holds non-trash
+# mail (bulk pulls use includeSpamTrash=False), so a successful trash drops
+# the row; a failed one changes nothing.
+
+class TrashingService(FakeService):
+    def __init__(self, *a, fail=False, **kw):
+        super().__init__(*a, **kw)
+        self.trashed, self._fail = [], fail
+        self._messages.trash = self.trash
+
+    def trash(self, userId, id):
+        if self._fail:
+            return FakeExec(RuntimeError("api down"))
+        self.trashed.append(id)
+        return FakeExec({"id": id})
+
+
+async def test_trash_hits_api_then_drops_mirror_row(tmp_path):
+    svc = TrashingService({}, {})
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+    assert await sync.trash("m1") is True
+    assert svc.trashed == ["m1"]
+    assert store.get("m1") is None
+
+
+async def test_trash_failure_keeps_mirror_row(tmp_path):
+    svc = TrashingService({}, {}, fail=True)
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+    assert await sync.trash("m1") is False
+    assert store.get("m1") is not None
 
 
 # Final-review fix: sync_once must be serialized so the poller and mail.refresh
