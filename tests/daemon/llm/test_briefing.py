@@ -118,3 +118,23 @@ def test_manabi_nudge_appears_in_todos_section():
 def test_no_nudge_when_done_or_unconfigured():
     assert "Japanese" not in sections(manabi_due=False)
     assert "Japanese" not in sections()
+
+
+def test_build_sections_includes_canvas_announcements():
+    anns = [{"id": 5, "title": "Midterm Friday", "course_id": 1,
+             "posted_at": "2026-08-20T00:00:00Z", "actionable": 1,
+             "suggested_todo": '{"text": "Study", "due": "2026-08-28"}',
+             "course_code": "CS3505"}]
+    out = build_sections([], [], [], {"total": 0, "unread": 0}, NOW,
+                         cal_connected=True, mail_connected=True,
+                         mail_syncing=False, canvas_announcements=anns)
+    assert "CANVAS ANNOUNCEMENTS" in out
+    assert "Midterm Friday" in out
+    assert "CS3505" in out
+
+
+def test_build_sections_omits_empty_canvas_section():
+    out = build_sections([], [], [], {"total": 0, "unread": 0}, NOW,
+                         cal_connected=True, mail_connected=True,
+                         mail_syncing=False, canvas_announcements=[])
+    assert "CANVAS ANNOUNCEMENTS" not in out

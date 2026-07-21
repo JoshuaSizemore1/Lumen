@@ -1632,13 +1632,21 @@ class Router:
             unread, counts = self._mail_store.unread(limit=8), self._mail_store.counts()
         else:
             unread, counts = [], {"total": 0, "unread": 0}
+        canvas_anns = []
+        if self._canvas is not None:
+            store = self._canvas.store
+            courses = store.courses_by_id()
+            for a in store.announcements(limit=5):
+                c = courses.get(a["course_id"], {})
+                canvas_anns.append({**a, "course_code": c.get("course_code")})
         return build_sections(
             events, self._todos.open_todos(), unread, counts, now,
             cal_connected=(self._calendar is not None and self._calendar.connected),
             mail_connected=(self._mail is not None and self._mail.connected),
             mail_syncing=(self._mail is not None and self._mail.syncing),
             manabi_due=(self._manabi is not None
-                        and self._manabi.status(now)["due"] is True))
+                        and self._manabi.status(now)["due"] is True),
+            canvas_announcements=canvas_anns)
 
     async def _briefing_chat(self):
         try:

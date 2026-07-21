@@ -35,7 +35,7 @@ def _todo_line(t: dict, today: date) -> str:
 def build_sections(events: list[dict], todos: list[dict], unread: list[dict],
                    counts: dict, now: datetime, *, cal_connected: bool,
                    mail_connected: bool, mail_syncing: bool,
-                   manabi_due: bool = False) -> str:
+                   manabi_due: bool = False, canvas_announcements=None) -> str:
     """The exact data block the model narrates: three labeled sections with
     explicit empty/unavailable markers so silence can't be padded over."""
     today = now.date()
@@ -78,6 +78,17 @@ def build_sections(events: list[dict], todos: list[dict], unread: list[dict],
             for m in unread:
                 when = (m.get("received_at") or "")[:16].replace("T", " ")
                 lines.append(f"- {when}: {m['sender']} — {m['subject']}")
+
+    # Canvas assignments already surface as real todos above; only announcements
+    # need their own line. Omit the section entirely when there's nothing to say.
+    if canvas_announcements:
+        lines.append("")
+        lines.append("CANVAS ANNOUNCEMENTS:")
+        for a in canvas_announcements:
+            code = a.get("course_code") or ""
+            prefix = f"{code}: " if code else ""
+            hint = " (actionable)" if a.get("actionable") else ""
+            lines.append(f"- {prefix}{a.get('title') or 'Untitled'}{hint}")
     return "\n".join(lines)
 
 
