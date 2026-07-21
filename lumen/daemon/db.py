@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS canvas_assignments (
     todo_id INTEGER,                          -- linked local todo (Part 4)
     calendar_event_id TEXT,                  -- linked calendar marker (Part 4)
     first_seen TEXT,                         -- ISO ts first observed (Part 4)
-    handled INTEGER NOT NULL DEFAULT 0        -- user deleted the todo -> don't recreate
+    handled INTEGER NOT NULL DEFAULT 0,       -- user deleted the todo -> don't recreate
+    marker_due TEXT                           -- local date the calendar marker represents (Part 4)
 );
 CREATE TABLE IF NOT EXISTS canvas_announcements (
     id INTEGER PRIMARY KEY,                  -- Canvas discussion_topic id
@@ -186,4 +187,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(emails)")}
     if "body_html" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN body_html TEXT")
+    ca_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_assignments)")}
+    if "marker_due" not in ca_cols:
+        conn.execute("ALTER TABLE canvas_assignments ADD COLUMN marker_due TEXT")
     return conn

@@ -17,3 +17,9 @@ def test_canvas_assignments_has_reconciliation_columns(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_assignments)")}
     assert {"todo_id", "calendar_event_id", "first_seen", "handled",
             "submitted", "due_at"} <= cols
+
+
+def test_canvas_assignments_has_marker_due(tmp_path):
+    conn = db.connect(tmp_path / "c.db")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_assignments)")}
+    assert "marker_due" in cols
