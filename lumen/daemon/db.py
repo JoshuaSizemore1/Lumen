@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS todos (
     completed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,               -- ISO timestamp
     source TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'llm-extracted' | 'email' | 'calendar'
-    tags TEXT NOT NULL DEFAULT '[]'         -- JSON array of lowercase strings
+    tags TEXT NOT NULL DEFAULT '[]',        -- JSON array of lowercase strings
+    description TEXT                         -- optional longer note, nullable
 );
 CREATE TABLE IF NOT EXISTS books (
     id INTEGER PRIMARY KEY,
@@ -136,7 +137,8 @@ CREATE TABLE IF NOT EXISTS canvas_courses (
     name TEXT NOT NULL,
     course_code TEXT,
     term TEXT,
-    active INTEGER NOT NULL DEFAULT 1,       -- 1 = in the current active sync set
+    active INTEGER NOT NULL DEFAULT 1,       -- 1 = in the current active enrollment set
+    included INTEGER NOT NULL DEFAULT 1,     -- user's archive switch: 0 = hidden + not pulled (#28)
     last_synced TEXT                         -- ISO timestamp of last successful pull
 );
 CREATE TABLE IF NOT EXISTS canvas_assignments (
@@ -190,4 +192,11 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ca_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_assignments)")}
     if "marker_due" not in ca_cols:
         conn.execute("ALTER TABLE canvas_assignments ADD COLUMN marker_due TEXT")
+    cc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_courses)")}
+    if "included" not in cc_cols:
+        conn.execute(
+            "ALTER TABLE canvas_courses ADD COLUMN included INTEGER NOT NULL DEFAULT 1")
+    todo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(todos)")}
+    if "description" not in todo_cols:
+        conn.execute("ALTER TABLE todos ADD COLUMN description TEXT")
     return conn

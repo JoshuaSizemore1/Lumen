@@ -22,3 +22,19 @@ class AppState(_AppState):
     # Text size, as a percentage. Like the accent, it rebuilds the window: both
     # fonts and layout metrics are read once, at widget construction.
     font_scale_requested = pyqtSignal(int)
+    # Open a local file inside the shell's Files screen (path as a string).
+    open_file_requested = pyqtSignal(str)
+    # A screen navigated within itself (e.g. the calendar changed view/date).
+    # The shell records the new location onto the app-wide back/forward history
+    # (#18); a plain section switch is caught separately off the stack.
+    nav_location_changed = pyqtSignal()
+
+    def open_memory_file(self) -> None:
+        """Open memory.md in Lumen's own Files screen (#15).
+
+        ui_v2 shelled out to QDesktopServices.openUrl, which silently no-ops for
+        .md on some Linux setups (no registered handler) — Josh saw "nothing".
+        Staying in-app also matches the rest of the UI.
+        """
+        from lumen.daemon.config import default_memory_path
+        self.open_file_requested.emit(str(default_memory_path()))

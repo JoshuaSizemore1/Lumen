@@ -38,6 +38,10 @@ def monday_of(d: date) -> date:
 class EventBlock(QFrame):
     """A single event, tinted by its calendar color: 11% fill, 2.5px left rule."""
 
+    # A block shorter than this can't fit both a title line and a meta line, so
+    # the meta line is dropped rather than clipped mid-glyph (#17).
+    META_MIN_H = 30
+
     def __init__(self, ev: dict, compact: bool = False, on_click=None):
         super().__init__()
         self.ev = ev
@@ -45,18 +49,33 @@ class EventBlock(QFrame):
         self._on_click = on_click
         if on_click:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
-        pad = (7, 2, 5, 2) if compact else (11, 4, 9, 4)
+        pad = (7, 2, 5, 1) if compact else (10, 3, 8, 2)
         v = vbox(self, pad, 0)
-        title = ElideLabel(ev.get("title", "Untitled"), 10 if compact else 12,
-                           T.TEXT_PRIMARY, 600)
-        v.addWidget(title)
+        self._title = ElideLabel(ev.get("title", "Untitled"),
+                                 10 if compact else 11.5, T.TEXT_PRIMARY, 600)
+        v.addWidget(self._title)
         meta = ev.get("start", "")
         if not compact and ev.get("cal"):
             meta = f"{meta} · {ev['cal']}"
+        self._meta = None
         if meta:
-            v.addWidget(ElideLabel(meta, 8.5 if compact else 10, self.color,
-                                   mono=True))
+            self._meta = ElideLabel(meta, 8.5 if compact else 10, self.color,
+                                    mono=True)
+            v.addWidget(self._meta)
         v.addStretch(1)
+        # The full title + time is always available on hover, so nothing is
+        # ever truly lost even in a tiny rectangle (#17).
+        when = ev.get("start", "")
+        cal = f" · {ev['cal']}" if ev.get("cal") else ""
+        self.setToolTip(f"{ev.get('title', 'Untitled')}"
+                        + (f"\n{when}{cal}" if when else ""))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        # Hide the second (meta) line on a short block so the title alone gets
+        # the room and is never sliced through the middle (#17).
+        if self._meta is not None:
+            self._meta.setVisible(self.height() >= self.META_MIN_H)
 
     def mousePressEvent(self, e):
         if self._on_click and e.button() == Qt.MouseButton.LeftButton:
@@ -79,7 +98,7 @@ class DayColumn(QWidget):
     def __init__(self, events: list[dict], hour_h: int = T.GRID_HOUR_H,
                  start_h: int = T.GRID_START_H, end_h: int = T.GRID_END_H,
                  compact: bool = True, left_rule: bool = True,
-                 gutter: int = 0, on_event=None, min_h: int = 15,
+                 gutter: int = 0, on_event=None, min_h: int = 22,
                  shrink: int = 2, label_px: float = 0):
         super().__init__()
         self._hour_h, self._start_h, self._end_h = hour_h, start_h, end_h

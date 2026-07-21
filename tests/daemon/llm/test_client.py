@@ -73,6 +73,56 @@ async def test_warm_with_prime_caches_prefix_via_one_token_gen():
     await client.aclose()
 
 
+async def test_is_loaded_true_when_model_resident():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/ps"
+        return httpx.Response(200, json={"models": [
+            {"name": "qwen3:4b", "model": "qwen3:4b"}]})
+
+    client = make_client(handler)
+    assert await client.is_loaded() is True
+    await client.aclose()
+
+
+async def test_is_loaded_false_when_other_model_resident():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"models": [
+            {"name": "llama3:8b", "model": "llama3:8b"}]})
+
+    client = make_client(handler)
+    assert await client.is_loaded() is False   # a different model loaded is still cold for us
+    await client.aclose()
+
+
+async def test_is_loaded_false_when_nothing_resident():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"models": []})
+
+    client = make_client(handler)
+    assert await client.is_loaded() is False
+    await client.aclose()
+
+
+async def test_is_loaded_matches_tagless_latest():
+    # Ollama reports ':latest' for a tagless name; a tagless config must match.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"models": [{"model": "mymodel:latest"}]})
+
+    client = OllamaClient("http://test", "mymodel", "10m",
+                          transport=httpx.MockTransport(handler))
+    assert await client.is_loaded() is True
+    await client.aclose()
+
+
+async def test_is_loaded_false_when_ollama_down():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client = make_client(handler)
+    assert await client.is_loaded() is False   # can't tell → assume cold, the honest worst case
+    await client.aclose()
+
+
 async def test_unload_sends_zero_keep_alive_and_empty_messages():
     seen = {}
 

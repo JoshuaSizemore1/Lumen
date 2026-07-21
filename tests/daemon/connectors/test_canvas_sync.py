@@ -140,3 +140,39 @@ async def test_sync_without_todos_only_mirrors(tmp_path):
     store, sync = make(tmp_path, client)
     assert await sync.sync_once() is True
     assert {c["id"] for c in store.active_courses()} == {1}
+
+
+class RecordingClient(FakeClient):
+    """Records which course ids assignments/announcements were fetched for."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.queried: list[int] = []
+
+    def assignments(self, cid):
+        self.queried.append(cid)
+        return super().assignments(cid)
+
+    def announcements(self, cid):
+        return super().announcements(cid)
+
+
+async def test_archived_course_is_not_fetched(tmp_path):
+    courses = [{"id": 1, "name": "A", "course_code": "A"},
+               {"id": 2, "name": "B", "course_code": "B"}]
+    store, sync = make(tmp_path, FakeClient(courses=courses))
+    await sync.sync_once()                       # first sync: both courses exist
+    store.set_course_included(2, False)          # archive course 2
+
+    rec = RecordingClient(courses=courses)
+    sync._client_factory = lambda: rec
+    await sync.sync_once()
+    # Course 2 was archived, so the poller must not pull it — only course 1.
+    assert rec.queried == [1]
+
+    # Un-archive and it is pulled again.
+    store.set_course_included(2, True)
+    rec2 = RecordingClient(courses=courses)
+    sync._client_factory = lambda: rec2
+    await sync.sync_once()
+    assert set(rec2.queried) == {1, 2}

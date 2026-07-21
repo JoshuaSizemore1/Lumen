@@ -22,11 +22,12 @@ Decisions taken during brainstorming:
   browser (reuses the persisted session — no re-login).
 - **Course control:** a dedicated "Manage courses" panel with on/off toggles;
   no per-course filtering of the summary.
-- **Off behavior:** switching a course off removes its stuff too — hide it from
-  the summary, stop pulling it, AND remove the todos + calendar entries it
-  created. Because deleting Google Calendar events is an external write, the
-  toggle-off surfaces a confirmation before anything is deleted (project rule:
-  writes are confirmed in the UI).
+- **Off behavior (archive, non-destructive):** switching a course off *archives*
+  it — the backend keeps everything (assignment/announcement rows, and any todos
+  or calendar entries it already created), but the course is hidden from the
+  Canvas summary and no new data is pulled for it. Turning it back on un-hides it
+  and resumes pulling. Nothing is deleted, so there is no external write and no
+  confirmation is needed.
 
 ## Non-goals
 
@@ -66,11 +67,12 @@ A course is **pulled and shown** only when `active = 1 AND included = 1`.
   `courses_by_id()` become scoped to `active = 1 AND included = 1`, so excluded
   courses vanish from the summary and from reconciliation. (Kept as the same
   method names; the JOIN/WHERE gains `AND included = 1`.)
-- `links_for_course(course_id)` → assignments for that course that carry a
-  `todo_id` or `calendar_event_id` (for the purge preview + execution).
-- `clear_course_reconciliation(course_id)` → null out `todo_id`,
-  `calendar_event_id`, `marker_due`, `first_seen` and leave `handled = 0` for
-  that course's assignments, so re-enabling later reconciles fresh.
+Archiving is non-destructive: no purge helpers are needed. A course's
+assignment/announcement rows, and any todos/calendar markers it already
+created, are all left intact — hiding is done purely by the `included = 1`
+scoping on the summary reads and reconciliation. Re-enabling un-hides the same
+rows and resumes pulling; existing todo/calendar links are still valid, so
+reconciliation continues where it left off (no re-creation, no duplicates).
 
 ### Sync (`canvas_sync.py`) — two-phase fetch
 
@@ -89,26 +91,17 @@ excluded courses cost zero network:
 All SQLite stays on the loop thread; all network stays on worker threads — the
 existing threading discipline is preserved, just reordered.
 
-### Toggle-off purge (write-confirmation flow)
+### Archive / un-archive (no confirmation — nothing is deleted)
 
-New IPC route `canvas.set_course_included` with `{course_id, included}`:
+New IPC route `canvas.set_course_included` with `{course_id, included}` — a plain
+non-gated write, since archiving deletes nothing:
 
-- **Turning ON:** set `included = 1`, return status. The next poll (or an
-  immediate `sync_once`) re-fetches and reconciles the course from scratch;
-  calendar markers are re-offered through the normal `pending_calendar` path.
-- **Turning OFF:**
-  - If the course has no linked todos and no calendar markers
-    (`links_for_course` empty): apply immediately — `set_course_included(0)`,
-    then trigger a re-sync so the summary drops it. No confirmation needed
-    (nothing destructive).
-  - If it has links: yield a **confirmation** (mirroring the existing
-    `canvas_due_dates` / `_gated_*` pattern) describing the removal, e.g.
-    *"Turn off CS 3500 — this removes 3 todos and 2 calendar events it created."*
-    On accept: delete the linked calendar events (the confirmed external write,
-    via the same delete path `calendar.delete` uses), delete the linked todos
-    (`todos.delete` — local, covered by the same accept), then
-    `set_course_included(0)` + `clear_course_reconciliation(course_id)`, and
-    re-sync. On decline: nothing changes, the toggle snaps back to on.
+- **Turning OFF (archive):** `set_course_included(0)`. The course drops out of
+  the summary and the sync pull set immediately; its stored rows, todos, and
+  calendar markers are untouched. The route returns fresh status/content.
+- **Turning ON (un-archive):** `set_course_included(1)`. The course reappears in
+  the summary and rejoins the pull set on the next poll. Existing todo/calendar
+  links remain valid, so reconciliation resumes without duplicating anything.
 
 `canvas.courses` (new read route) returns `courses_for_panel()` for the UI.
 
@@ -122,13 +115,12 @@ pattern (compose/edit dialogs), so it dims the summary and is dismissible.
 Panel contents:
 
 - Title "Courses" + a one-line hint: "Turn off classes you're done with — Lumen
-  stops pulling them."
+  hides them and stops pulling new data. Nothing you've already saved is lost."
 - One row per `active` course: course-code chip (same `T.label_color` as the
   summary), full name, and a toggle (`QCheckBox` styled as a switch, matching
   existing settings toggles).
-- Flipping a toggle calls `state.canvas_set_course_included`; an off-flip that
-  needs confirmation shows the confirm text inline/below that row (or the app's
-  standard confirm surface) before committing.
+- Flipping a toggle calls `state.canvas_set_course_included` directly — no
+  confirmation, since archiving deletes nothing.
 - Closing the panel refreshes the summary (`_refresh_content` + status), so the
   change is visible immediately.
 
@@ -204,8 +196,7 @@ Both go through the generic `self._data.request(...)`. Sample-mode fallbacks
 return a small fixture list so the panel renders offline like the rest of the UI.
 
 Daemon router: add `canvas.courses` (read) and `canvas.set_course_included`
-(read + gated write on off-with-links), reusing `_confirm` / the calendar-delete
-path already used by `canvas.push_due_dates`.
+(plain non-gated write — archiving deletes nothing).
 
 ---
 
@@ -225,15 +216,15 @@ Headless-friendly, matching the existing suite (the web view stays lazy so
 nothing constructs Chromium during tests):
 
 - `tests/daemon/connectors/test_canvas_store.py`: `included` flag round-trip;
-  `pull_course_ids` / scoped `active_assignments` exclude an off course;
-  `links_for_course` + `clear_course_reconciliation`.
-- `tests/daemon/connectors/test_canvas_sync.py`: an excluded course is **not**
+  `pull_course_ids` / scoped `active_assignments` exclude an archived course but
+  its rows and todo/calendar links remain in the table (archive is
+  non-destructive); un-archiving restores it to the scoped reads.
+- `tests/daemon/connectors/test_canvas_sync.py`: an archived course is **not**
   fetched (assert the injected client's `assignments`/`announcements` are never
   called for it); a re-enabled course is fetched again.
 - `tests/daemon/test_router.py` (or a canvas-router test): `canvas.courses`
-  shape; `canvas.set_course_included` off-with-links yields a confirmation and,
-  on accept, issues the calendar deletes + todo deletes; off-without-links
-  applies directly; on returns status.
+  shape; `canvas.set_course_included` archives/un-archives and returns fresh
+  status (no confirmation involved).
 - `tests/ui/test_canvas_screen.py`: "Open ↗" present per assignment/announcement
   and calls `_open_in_browser` with the right `html_url`; Manage panel lists
   courses with toggles and calls `canvas_set_course_included`; the browser
@@ -244,7 +235,8 @@ nothing constructs Chromium during tests):
 ## Files touched
 
 - `lumen/daemon/db.py` — `included` column + migration.
-- `lumen/daemon/connectors/canvas_store.py` — flag + scoped reads + purge helpers.
+- `lumen/daemon/connectors/canvas_store.py` — flag + scoped reads (archive is
+  non-destructive; no purge helpers).
 - `lumen/daemon/connectors/canvas_sync.py` — two-phase gated fetch.
 - `lumen/daemon/connectors/canvas_reconcile.py` — inherits scoped
   `active_assignments` (verify no direct unscoped reads).

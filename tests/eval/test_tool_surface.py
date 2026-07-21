@@ -106,7 +106,8 @@ def test_surface_matches_production_not_the_old_bench():
     `lookup_book` never did."""
     assert surface.tool_names() == {"list_events", "search_events", "search_email",
                                     "get_email", "search_books", "get_book",
-                                    "add_todo", "complete_todo", "list_todos"}
+                                    "add_todo", "complete_todo", "list_todos",
+                                    "update_todo"}
 
 
 def test_config_allowlist_matches_the_servers():

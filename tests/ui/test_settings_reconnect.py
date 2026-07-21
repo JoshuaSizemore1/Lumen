@@ -1,6 +1,7 @@
-"""ui_v3 Settings: the Google 'Reconnect' button (re-consent when the token
-runs out). The screen under test is the primary Relay shell's settings, not
-ui_v2's."""
+"""ui_v3 Settings: the Google 'Connect' button. Per #6 a connected account has
+NO button (nothing to reconnect); only a disconnected account offers Connect,
+which runs the one-time consent flow. The screen under test is the primary Relay
+shell's settings, not ui_v2's."""
 from PyQt6.QtWidgets import QPushButton
 
 from lumen.ui_v3.state import AppState
@@ -36,11 +37,12 @@ def _buttons(w):
             ("Connect", "Reconnect", "Connecting…")]
 
 
-def test_connected_row_offers_reconnect_offline_row_offers_connect(qtbot):
+def test_connected_row_has_no_button_offline_row_offers_connect(qtbot):
     w, _state, _data = _screen(qtbot)
-    labels = {b.text() for b in _buttons(w)}
-    assert "Reconnect" in labels   # gmail connected → re-consent
-    assert "Connect" in labels     # calendar offline → first connect
+    # gmail connected → nothing to press; calendar offline → Connect. One shared
+    # Google login, so exactly one button total (#6).
+    assert {b.text() for b in _buttons(w)} == {"Connect"}
+    assert len(_buttons(w)) == 1
 
 
 def test_clicking_reconnect_fires_google_reconnect_and_shows_progress(qtbot):
@@ -58,8 +60,8 @@ def test_reconnect_success_refreshes_status(qtbot):
     fresh = {**SNAP, "accounts": {"gmail": {"connected": True},
                                   "google_calendar": {"connected": True}}}
     data.cb_for("google.reconnect")(fresh)
-    # Rebuilt rows: no lingering "Connecting…", both now show "Reconnect".
-    assert {b.text() for b in _buttons(w)} == {"Reconnect"}
+    # Both connected now → no lingering "Connecting…" and no button at all (#6).
+    assert _buttons(w) == []
 
 
 def test_reconnect_failure_clears_progress_via_status_channel(qtbot):

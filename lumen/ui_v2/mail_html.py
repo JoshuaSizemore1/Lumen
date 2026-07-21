@@ -219,6 +219,29 @@ def _clamp_widths(html: str) -> str:
     return _WIDTH_CSS.sub(css, _WIDTH_ATTR.sub(attr, html))
 
 
+def _constrain_images(html: str) -> str:
+    """Clamp an oversized image's own width to the pane instead of letting
+    `_clamp_widths` drop it (todo-fixes #3). Dropping a table's width lets it
+    reflow to fit, but dropping an <img>'s width makes it render at its full
+    intrinsic size — often 1000px+ — and overflow the pane, which is a big part
+    of why HTML mail "still looks weird". Clamping keeps the picture visible and
+    inside the card."""
+    def clamp_attr(wm):
+        val = next(g for g in wm.groups() if g)
+        return (f'width="{CONTENT_WIDTH}"' if int(val) > CONTENT_WIDTH
+                else wm.group(0))
+
+    def clamp_css(cm):
+        return (f"{cm.group(1)}:{CONTENT_WIDTH}px" if int(cm.group(2)) > CONTENT_WIDTH
+                else cm.group(0))
+
+    def repl(m):
+        tag = m.group(0)
+        return _WIDTH_CSS.sub(clamp_css, _WIDTH_ATTR.sub(clamp_attr, tag))
+
+    return _IMG.sub(repl, html or "")
+
+
 def _fix_invisible_text(html: str) -> str:
     """Light-on-dark mail goes invisible on the white paper card. Any text
     colour too pale to read against it is dropped so it inherits CARD_FG —
@@ -237,6 +260,9 @@ def prepare_html(html: str) -> str:
     and a sane base font wrapped around the result."""
     out = _VOID_HEAD.sub("", _SCRIPT.sub("", html or ""))
     out = _BGCOLOR.sub("", out)
+    # Clamp image widths BEFORE the general width drop, so an oversized <img>
+    # is resized to fit rather than stripped of its width and left to overflow.
+    out = _constrain_images(out)
     out = _fix_invisible_text(_clamp_widths(out))
     out = _EMPTY_STYLE.sub("", _DANGLING.sub(r"\1", out))
     return (

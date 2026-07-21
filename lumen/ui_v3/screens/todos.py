@@ -5,7 +5,9 @@ priority column, so that affordance is deliberately absent rather than wired to
 a stub that would silently forget.
 """
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QButtonGroup, QFrame, QLineEdit, QWidget
+from PyQt6.QtWidgets import (
+    QButtonGroup, QDialog, QFrame, QLineEdit, QPlainTextEdit, QWidget,
+)
 
 from .. import theme as T
 from ..components import TodoRow, accent_fill
@@ -13,6 +15,82 @@ from ..widgets import (
     ClickRow, Dot, ProgressBar, Switch, button, clear_layout, eyebrow, font,
     hbox, hline, label, scroll, scroll_fixed, seg_button, vbox, vline,
 )
+
+
+class TodoDetailDialog(QDialog):
+    """A todo's detail card (#21) — its full text, description, due date and
+    tags, all editable in place (#23). Save writes back through state; Delete
+    removes the todo. Kept a plain modal dialog so it works the same from the
+    Todos screen without threading through the window's overlay stack."""
+
+    def __init__(self, parent, state, todo: dict):
+        super().__init__(parent)
+        self.setObjectName("screen")
+        self.state = state
+        self.tid = todo["id"]
+        self.setWindowTitle("Todo")
+        self.setModal(True)
+        self.setMinimumWidth(T.sc(420))
+
+        v = vbox(self, (22, 20, 22, 18), 12)
+        v.addWidget(eyebrow("Todo detail", T.ACCENT))
+
+        v.addWidget(label("Task", 10.5, T.TEXT_FAINT, mono=True))
+        self.text = QLineEdit(todo.get("text", ""))
+        self.text.setFont(font(15))
+        v.addWidget(self.text)
+
+        v.addWidget(label("Description", 10.5, T.TEXT_FAINT, mono=True))
+        self.desc = QPlainTextEdit(todo.get("description", "") or "")
+        self.desc.setPlaceholderText("Add more detail about this task…")
+        self.desc.setFixedHeight(T.sc(110))
+        self.desc.setFont(font(13.5))
+        v.addWidget(self.desc)
+
+        due_row = hbox(s=10)
+        dcol = vbox(s=4)
+        dcol.addWidget(label("Due (YYYY-MM-DD)", 10.5, T.TEXT_FAINT, mono=True))
+        self.due = QLineEdit(todo.get("due_date") or "")
+        self.due.setPlaceholderText("e.g. 2026-07-24 · blank = no date")
+        self.due.setFont(font(13.5))
+        dcol.addWidget(self.due)
+        due_row.addLayout(dcol, 1)
+        v.addLayout(due_row)
+
+        v.addWidget(label("Tags (comma-separated)", 10.5, T.TEXT_FAINT, mono=True))
+        self.tags = QLineEdit(", ".join(todo.get("tags") or []))
+        self.tags.setPlaceholderText("e.g. admin, urgent")
+        self.tags.setFont(font(13.5))
+        v.addWidget(self.tags)
+
+        if todo.get("source"):
+            v.addWidget(label(f"source: {todo['source']}", 10, T.TEXT_FAINTER,
+                              mono=True))
+
+        actions = hbox(m=(0, 6, 0, 0), s=10)
+        dele = button("Delete", "danger", px=13, height=34)
+        dele.clicked.connect(self._delete)
+        actions.addWidget(dele)
+        actions.addStretch(1)
+        cancel = button("Close", "ghost", px=13, height=34)
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        save = button("Save", "primary", px=13, height=34)
+        save.clicked.connect(self._save)
+        actions.addWidget(save)
+        v.addLayout(actions)
+
+    def _save(self):
+        tags = [t.strip() for t in self.tags.text().split(",") if t.strip()]
+        self.state.update_todo(
+            self.tid, text=self.text.text().strip() or None,
+            description=self.desc.toPlainText().strip() or None,
+            due_date=self.due.text().strip() or None, tags=tags)
+        self.accept()
+
+    def _delete(self):
+        self.state.delete_todo(self.tid)
+        self.accept()
 
 GROUP_META = (("today", "Today", None), ("upcoming", "Upcoming", T.WARN),
               ("none", "No date", T.TEXT_MUTED))
@@ -140,7 +218,8 @@ class TodosScreen(QWidget):
             for t in self._sorted(items):
                 v.addWidget(TodoRow(t, on_toggle=self.state.toggle_todo,
                                     on_delete=self.state.delete_todo,
-                                    on_tag=self._set_tag))
+                                    on_tag=self._set_tag,
+                                    on_open=self._open_detail))
             v.addSpacing(20)
         v.addStretch(1)
 
@@ -208,6 +287,9 @@ class TodosScreen(QWidget):
             row.setStyleSheet(
                 f"ClickRow {{ background: {accent_fill()}; border-radius: 5px; }}")
         return row
+
+    def _open_detail(self, todo: dict):
+        TodoDetailDialog(self, self.state, todo).exec()
 
     def _add(self):
         text = self.new_todo.text().strip()

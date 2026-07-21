@@ -125,6 +125,61 @@ def test_pending_markers_create_then_update(tmp_path):
     assert pend[0]["event_id"] == "evt_1"
 
 
+def test_set_course_included_roundtrip_and_pull_ids(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "A", "course_code": "A"},
+                          {"id": 2, "name": "B", "course_code": "B"}])
+    # Default: everything is included, so both are in the pull set.
+    assert set(store.pull_course_ids()) == {1, 2}
+    store.set_course_included(2, False)          # archive course 2
+    assert store.pull_course_ids() == [1]
+    store.set_course_included(2, True)           # un-archive
+    assert set(store.pull_course_ids()) == {1, 2}
+
+
+def test_courses_for_panel_lists_all_active_with_flag(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "A", "course_code": "A"},
+                          {"id": 2, "name": "B", "course_code": "B"}])
+    store.set_course_included(2, False)
+    panel = {c["id"]: c["included"] for c in store.courses_for_panel()}
+    # The archived course still appears in the panel (so it can be toggled back),
+    # just with included = 0.
+    assert panel == {1: 1, 2: 0}
+
+
+def test_archive_hides_assignments_but_keeps_rows(tmp_path):
+    s = make_store(tmp_path); _seed_reconcile(s)   # course 1 active, assignment 10
+    s.upsert_assignments([{"id": 11, "course_id": 1, "name": "HW2",
+                           "due_at": "2026-09-08T06:59:59Z", "points": 10.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    s.link_todo(10, 55, "2026-07-21T09:00:00")     # a todo already exists
+    s.set_course_included(1, False)                # archive it
+    # Hidden from the summary/reconcile read...
+    assert s.active_assignments() == []
+    # ...but the rows and the todo link are untouched in the backend.
+    kept = s.assignments(course_id=1)
+    assert {a["id"] for a in kept} == {10, 11}
+    assert next(a for a in kept if a["id"] == 10)["todo_id"] == 55
+    # Un-archiving brings it straight back with the link intact.
+    s.set_course_included(1, True)
+    assert [a["id"] for a in s.active_assignments()] == [10, 11]
+
+
+def test_archive_hides_announcements_but_absent_course_still_shows(tmp_path):
+    s = make_store(tmp_path)
+    s.upsert_courses([{"id": 1, "name": "A", "course_code": "A"}])
+    s.upsert_announcements([
+        {"id": 1, "course_id": 1, "title": "From A", "posted_at": "2026-05-07T00:00:00Z",
+         "message": "m", "html_url": "a1"},
+        {"id": 2, "course_id": 99, "title": "Orphan", "posted_at": "2026-05-01T00:00:00Z",
+         "message": "m", "html_url": "a2"}])
+    s.set_course_included(1, False)
+    titles = [a["title"] for a in s.announcements()]
+    # Course 1 archived -> hidden. Course 99 has no course row -> not archived, shown.
+    assert titles == ["Orphan"]
+
+
 def test_announcement_classification_roundtrip(tmp_path):
     s = make_store(tmp_path)
     s.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])

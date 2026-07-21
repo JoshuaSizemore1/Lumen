@@ -111,6 +111,25 @@ def test_prepare_html_keeps_widths_that_fit():
     assert 'width="400"' in out
 
 
+def test_prepare_html_clamps_oversized_image_instead_of_dropping():
+    # An oversized <img> keeps a width — clamped to the pane — rather than being
+    # stripped bare and rendering at full intrinsic size (overflow, #3).
+    out = prepare_html(f'<img src="data:image/png;base64,x" width="{CONTENT_WIDTH + 500}">')
+    assert f'width="{CONTENT_WIDTH}"' in out
+    assert f"{CONTENT_WIDTH + 500}" not in out
+
+
+def test_prepare_html_clamps_oversized_image_css_width():
+    out = prepare_html(
+        f'<img src="data:image/png;base64,x" style="width:{CONTENT_WIDTH + 400}px">')
+    assert f"width:{CONTENT_WIDTH}px" in out
+
+
+def test_prepare_html_keeps_small_image_width():
+    out = prepare_html('<img src="data:image/png;base64,x" width="300">')
+    assert 'width="300"' in out
+
+
 def test_prepare_html_drops_unreadable_light_text():
     # white-on-dark mail is invisible on the white paper card
     out = prepare_html('<p style="color:#ffffff">important</p>')

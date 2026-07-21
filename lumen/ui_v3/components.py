@@ -131,9 +131,13 @@ class TodoRow(ClickRow):
     """Todo row. `compact` is the Today-column variant: check + text + tag only."""
 
     def __init__(self, todo: dict, compact: bool = False, on_toggle=None,
-                 on_delete=None, on_tag=None):
-        super().__init__(None)
+                 on_delete=None, on_tag=None, on_open=None):
+        # Clicking the row body (not the check/tag/delete, which swallow their
+        # own clicks) opens the todo's detail card (#21).
+        super().__init__((lambda: on_open(todo)) if on_open else None)
         self.setProperty("cls", "todorow")
+        if on_open is not None:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         done = todo.get("done", False)
 
         outer = vbox(self, (0, 0, 0, 0), 0)

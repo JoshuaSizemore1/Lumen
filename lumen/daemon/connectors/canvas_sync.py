@@ -64,15 +64,37 @@ class CanvasSync:
 
     async def sync_once(self) -> bool:
         """True on a successful refresh; False keeps the stale mirror untouched
-        (not connected, session dead, or a transient error)."""
+        (not connected, session dead, or a transient error).
+
+        Two phases so archived courses cost zero network (#28): fetch the course
+        list, decide the pull set on the loop thread (which respects the user's
+        archive flags), then fetch items only for that set. All Canvas HTTP runs
+        in worker threads; all SQLite stays on the loop thread."""
         async with self._sync_lock:
-            fetched = await asyncio.to_thread(self._fetch_blocking)
-            if fetched is None:
+            if not self.connected:
+                return False                   # no session yet — a normal tick
+            try:
+                client = self._client_factory()
+            except Exception:
+                log.exception("could not build canvas client")
                 return False
-            courses, assignments, announcements = fetched
-            # SQLite writes on the loop thread — the daemon's single-writer rule.
-            self._store.upsert_courses(courses)
-            self._store.deactivate_courses_except([c["id"] for c in courses])
+            if client is None:
+                return False
+            try:
+                courses = await asyncio.to_thread(self._fetch_courses, client)
+                if courses is None:
+                    return False
+                # SQLite on the loop thread — the daemon's single-writer rule.
+                self._store.upsert_courses(courses)
+                self._store.deactivate_courses_except([c["id"] for c in courses])
+                pull_ids = set(self._store.pull_course_ids())
+                pull = [c for c in courses if c["id"] in pull_ids]
+                items = await asyncio.to_thread(self._fetch_items, client, pull)
+                if items is None:
+                    return False
+                assignments, announcements = items
+            finally:
+                client.close()
             self._store.upsert_assignments(assignments)
             self._store.upsert_announcements(announcements)
             self._last_sync = datetime.now().isoformat(timespec="seconds")
@@ -92,27 +114,30 @@ class CanvasSync:
                         log.exception("canvas announcement flag failed")
             return True
 
-    def _fetch_blocking(self):
-        """All Canvas network here (worker thread). Returns
-        (courses, assignments, announcements) or None. None means: not connected,
-        session dead, or a transient error — the caller keeps the stale mirror."""
-        if not self.connected:
-            return None            # no session yet — a normal state every tick
+    def _fetch_courses(self, client):
+        """Phase 1 (worker thread): the enrolled-course list, or None on a dead
+        session / transient error — the caller keeps the stale mirror."""
         try:
-            client = self._client_factory()
+            return client.courses("active")
+        except CanvasSessionExpired:
+            log.info("canvas session expired — UI must re-login")
+            self._session_alive = False
+            return None
         except Exception:
-            log.exception("could not build canvas client")
+            log.exception("canvas course fetch failed — keeping stale mirror")
             return None
-        if client is None:
-            return None
+
+    def _fetch_items(self, client, courses):
+        """Phase 2 (worker thread): assignments + announcements for exactly the
+        courses handed in (the archive-filtered pull set). Returns
+        (assignments, announcements) or None on a dead session / error."""
         try:
-            courses = client.courses("active")
             assignments: list[dict] = []
             announcements: list[dict] = []
             for c in courses:
                 assignments.extend(client.assignments(c["id"]))
                 announcements.extend(client.announcements(c["id"]))
-            return courses, assignments, announcements
+            return assignments, announcements
         except CanvasSessionExpired:
             log.info("canvas session expired — UI must re-login")
             self._session_alive = False
@@ -120,8 +145,6 @@ class CanvasSync:
         except Exception:
             log.exception("canvas sync failed — keeping stale mirror")
             return None
-        finally:
-            client.close()
 
     async def poll_forever(self) -> None:
         """Daemon background task; cancellation is the shutdown path."""

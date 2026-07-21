@@ -4,7 +4,8 @@ from lumen.daemon import db
 def test_connect_creates_parent_dir_and_schema(tmp_path):
     conn = db.connect(tmp_path / "data" / "lumen.db")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(todos)")}
-    assert cols == {"id", "text", "due_date", "completed", "created_at", "source", "tags"}
+    assert cols == {"id", "text", "due_date", "completed", "created_at",
+                    "source", "tags", "description"}
     conn.close()
 
 

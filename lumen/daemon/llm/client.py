@@ -146,6 +146,24 @@ class OllamaClient:
                 "service running? (systemctl --user status ollama)"
             ) from e
 
+    async def is_loaded(self) -> bool:
+        """True if this model is currently resident in Ollama (GET /api/ps).
+        The authoritative 'will the next request pay a cold load?' check — the
+        UI uses it so it only says 'cold start' when the model genuinely has to
+        load, not on every slow prompt-eval. Can't tell (service down) → False:
+        assume cold, the honest worst case."""
+        def norm(name: str) -> str:
+            return name if ":" in name else f"{name}:latest"
+        try:
+            resp = await self._http.get("/api/ps")
+            resp.raise_for_status()
+            running = resp.json().get("models", [])
+        except (httpx.HTTPError, ValueError):
+            return False
+        want = norm(self.model)
+        return any(norm(m.get("model") or m.get("name") or "") == want
+                   for m in running)
+
     async def warm(self, prime: list[dict] | None = None) -> None:
         """Preload the model into RAM (the inverse of unload) so the next real
         request skips the cold load. Fire-and-forget: if Ollama is down or busy,

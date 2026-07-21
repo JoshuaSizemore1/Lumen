@@ -760,6 +760,18 @@ class GmailSync:
         self._store.update_labels(mid, add=[label_id], remove=["INBOX"])
         return True
 
+    async def remove_label(self, mid: str, label_name: str) -> bool:
+        """Take a user label off a message (#9). Unlike apply_label this does
+        NOT restore INBOX — removing a label is not the same as un-filing —
+        so the message stays wherever it currently lives, minus the label."""
+        label_id = self._store.label_id(label_name)
+        if label_id is None:
+            return False
+        if not await self._modify(mid, {"removeLabelIds": [label_id]}):
+            return False
+        self._store.update_labels(mid, add=[], remove=[label_id])
+        return True
+
     async def _apply_rules(self, msgs: list[dict]) -> None:
         """Deterministic pass over newly-arrived mail — no LLM, ever, here.
         A failed apply just leaves the message in the inbox; never fails

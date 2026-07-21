@@ -46,6 +46,7 @@ class LauncherPalette(QFrame):
         self.state = state
         self.chat = chat_client
         self._busy = False
+        self._cold = False    # set by the daemon when this turn actually loads the model
         self._acc = ""
         self._filtered = list(COMMANDS)
         self.status = None
@@ -86,13 +87,13 @@ class LauncherPalette(QFrame):
             self.chat.done.connect(self._on_done)
             self.chat.error.connect(self._on_error)
             self.chat.captured.connect(self._on_captured)
+            self.chat.cold_start.connect(self._on_cold)
             self.chat.conversation.connect(self._on_conversation)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
         self._wake.setInterval(WAKE_THRESHOLD_MS)
-        self._wake.timeout.connect(
-            lambda: self._set_status("◇ waking model… (cold start)", T.WARN))
+        self._wake.timeout.connect(self._on_wake)
 
         self._render_commands()
 
@@ -166,6 +167,7 @@ class LauncherPalette(QFrame):
         if not msg or self._busy or self.chat is None:
             return
         self._busy = True
+        self._cold = False
         self._acc = ""
         self.input.clear()
         clear_layout(self.body_lay)
@@ -191,6 +193,18 @@ class LauncherPalette(QFrame):
     def _set_status(self, text: str, color: str):
         if self.status is not None:
             self.status.set_static(text, color)
+
+    def _on_cold(self):
+        if self._busy:
+            self._cold = True
+
+    def _on_wake(self):
+        # Only call it a cold start if the daemon confirmed the model was
+        # actually loading (#22); otherwise it's a slow eval on a warm model.
+        if self._cold:
+            self._set_status("◇ waking model… (cold start)", T.WARN)
+        else:
+            self._set_status("◇ working…", T.INFO)
 
     def _on_conversation(self, cid: int):
         if self._busy:

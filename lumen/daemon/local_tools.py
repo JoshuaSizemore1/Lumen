@@ -55,6 +55,31 @@ TODO_TOOLS = [
                        "description": "The todo's id from list_todos."}},
             "required": ["id"]}}},
     {"type": "function", "function": {
+        "name": "update_todo",
+        "description": (
+            "Edit an existing todo by its id (from list_todos): change its "
+            "text, its due date, its description, and/or its tags/labels. Use "
+            "this when the user wants to rename a task, reschedule it, add a "
+            "note to it, or add/remove tags. To change tags, pass the COMPLETE "
+            "new tag list (it replaces the old one). Only include the fields "
+            "you are changing."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer",
+                       "description": "The todo's id from list_todos."},
+                "text": {"type": "string",
+                         "description": "New task text, if renaming."},
+                "due_date": {"type": "string", "description":
+                             "New ISO due date (YYYY-MM-DD), or empty string "
+                             "to clear the due date."},
+                "description": {"type": "string", "description":
+                                "A longer note/description for the task."},
+                "tags": {"type": "array", "items": {"type": "string"},
+                         "description": "The COMPLETE new list of tags/labels "
+                         "for this todo (replaces the existing tags)."}},
+            "required": ["id"]}}},
+    {"type": "function", "function": {
         "name": "list_todos",
         "description": (
             "List the user's open todos with their ids. The ids are needed "
@@ -66,6 +91,34 @@ TODO_TOOLS = [
 
 LOCAL_TOOL_NAMES = frozenset(
     t["function"]["name"] for t in TODO_TOOLS)
+
+# Mail label tool (#11). Unlike the todo tools this is async (it writes to
+# Gmail through the daemon's GmailSync), so the router's tool executor handles
+# it directly rather than through the synchronous `dispatch` below. Kept here
+# so the whole in-process tool surface is declared in one place.
+MAIL_TOOLS = [
+    {"type": "function", "function": {
+        "name": "label_email",
+        "description": (
+            "Apply one of the user's Gmail labels to an email, filing it under "
+            "that label (and out of the inbox). Use this whenever the user asks "
+            "to label, tag, file, or categorise an email — including 'label "
+            "this email' or 'the email I have open', whose id is given to you "
+            "in the context. Access is already set up — this acts on the user's "
+            "own mail, so never decline for lack of permission or account "
+            "access."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description":
+                             "The email's id — from the open-email context or "
+                             "from a search_email result."},
+                "label": {"type": "string", "description":
+                          "The label name to apply, e.g. 'Work'."}},
+            "required": ["email_id", "label"]}}},
+]
+
+MAIL_TOOL_NAMES = frozenset(t["function"]["name"] for t in MAIL_TOOLS)
 
 
 def _render(todos: list[dict]) -> str:
@@ -101,6 +154,37 @@ def dispatch(name: str, args: dict, todos) -> str:
         except ValueError:
             return "add_todo needs the task text."
         return f"Added to the user's todo list: {text}"
+
+    if name == "update_todo":
+        try:
+            todo_id = int(args.get("id"))
+        except (TypeError, ValueError):
+            return "update_todo needs the numeric id shown by list_todos."
+        if not todos.exists(todo_id):
+            return (f"No todo with id {todo_id}. Call list_todos to see the "
+                    "current ids.")
+        kw = {}
+        if "text" in args and str(args.get("text") or "").strip():
+            kw["text"] = str(args["text"]).strip()
+        if "description" in args:
+            kw["description"] = str(args.get("description") or "")
+        if "due_date" in args:
+            due = str(args.get("due_date") or "").strip()
+            if due:
+                try:
+                    due = date.fromisoformat(due).isoformat()
+                except ValueError:
+                    return "update_todo needs due_date as YYYY-MM-DD (or empty to clear)."
+            kw["due_date"] = due or None
+        if "tags" in args and isinstance(args.get("tags"), list):
+            kw["tags"] = [str(t) for t in args["tags"]]
+        if not kw:
+            return "update_todo needs at least one field to change."
+        try:
+            todos.update(todo_id, **kw)
+        except ValueError as e:
+            return f"update_todo: {e}"
+        return f"Updated todo {todo_id}."
 
     if name == "complete_todo":
         try:

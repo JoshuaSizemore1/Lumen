@@ -336,6 +336,8 @@ test (QtWebEngine + Duo).
 
 ## 11. Add a way for it to browes the internet, and pull information from queries, so I can ask it more specific questions like the address of something, etc
 
+## 12. Add a contacts system, for emails, where Lumen auto scans emails for common addresses that email you, then creates a contacts list that you can pull from in drafts to auto fill the recipient, as well as say "Lumen send an email to John Doe", which queries the contacts first, before searching for an address in recived emails
+
 ---
 
 ## Parking lot (named, not committed)

@@ -2,8 +2,9 @@
 from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QButtonGroup, QFrame, QWidget
+from PyQt6.QtWidgets import QButtonGroup, QDialog, QFrame, QLineEdit, QWidget
 
+from ...daemon.router import GCAL_COLOR_HEX, GCAL_COLOR_NAMES
 from .. import theme as T
 from ..calendar_grids import (
     MON3, MONTHS, WD_FULL, WEEKDAYS, DayColumn, MonthGrid, TimeGutter,
@@ -15,6 +16,105 @@ from ..widgets import (
     IconButton, font, hbox, hline, label, scroll, scroll_fixed, seg_button,
     vbox, vline,
 )
+
+
+def _tz_offset() -> str:
+    """Local UTC offset as +HH:MM, for stamping edited times into ISO."""
+    off = datetime.now().astimezone().strftime("%z")   # e.g. -0600
+    return f"{off[:3]}:{off[3:]}" if off else "+00:00"
+
+
+class EventEditDialog(QDialog):
+    """Edit an existing calendar event (#12): title, time, location, and a
+    colour ("tag") picked from Google's palette. Save routes through
+    state.update_event, which gates the change behind the confirm overlay."""
+
+    def __init__(self, parent, state, ev: dict):
+        super().__init__(parent)
+        self.setObjectName("screen")
+        self.state = state
+        self.ev = ev
+        self._color_id = ""
+        self.setWindowTitle("Edit event")
+        self.setModal(True)
+        self.setMinimumWidth(T.sc(400))
+
+        v = vbox(self, (22, 20, 22, 18), 12)
+        v.addWidget(eyebrow("Edit event", T.ACCENT))
+
+        v.addWidget(label("Title", 10.5, T.TEXT_FAINT, mono=True))
+        self.title = QLineEdit(ev.get("title", ""))
+        self.title.setFont(font(15))
+        v.addWidget(self.title)
+
+        if not ev.get("all_day"):
+            trow = hbox(s=12)
+            scol = vbox(s=4)
+            scol.addWidget(label("Start (HH:MM)", 10.5, T.TEXT_FAINT, mono=True))
+            self.start = QLineEdit(ev.get("start", ""))
+            self.start.setFont(font(13.5))
+            scol.addWidget(self.start)
+            trow.addLayout(scol, 1)
+            ecol = vbox(s=4)
+            ecol.addWidget(label("End (HH:MM)", 10.5, T.TEXT_FAINT, mono=True))
+            end_min = ev.get("start_min", 0) + ev.get("dur", 30)
+            self.end = QLineEdit(f"{end_min // 60:02d}:{end_min % 60:02d}")
+            self.end.setFont(font(13.5))
+            ecol.addWidget(self.end)
+            trow.addLayout(ecol, 1)
+            v.addLayout(trow)
+        else:
+            self.start = self.end = None
+
+        v.addWidget(label("Colour", 10.5, T.TEXT_FAINT, mono=True))
+        v.addLayout(self._color_row())
+
+        actions = hbox(m=(0, 6, 0, 0), s=10)
+        actions.addStretch(1)
+        cancel = button("Close", "ghost", px=13, height=34)
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        save = button("Save", "primary", px=13, height=34)
+        save.clicked.connect(self._save)
+        actions.addWidget(save)
+        v.addLayout(actions)
+
+    def _color_row(self):
+        row = hbox(s=6)
+        self._swatches = {}
+        for cid, name in GCAL_COLOR_NAMES.items():
+            sw = ClickLabel("●", 20, GCAL_COLOR_HEX[cid], tooltip=name,
+                            on_click=lambda c=cid: self._pick_color(c))
+            self._swatches[cid] = sw
+            row.addWidget(sw)
+        row.addStretch(1)
+        return row
+
+    def _pick_color(self, cid: str):
+        self._color_id = cid
+        for c, sw in self._swatches.items():
+            sw.setText("◉" if c == cid else "●")
+
+    def _iso(self, hhmm: str) -> str:
+        hhmm = (hhmm or "").strip()
+        return f"{self.ev['date']}T{hhmm}:00{_tz_offset()}" if hhmm else ""
+
+    def _save(self):
+        changes = {"all_day": bool(self.ev.get("all_day"))}
+        title = self.title.text().strip()
+        if title and title != self.ev.get("title"):
+            changes["title"] = title
+        if self.start is not None:
+            s, e = self.start.text().strip(), self.end.text().strip()
+            if s:
+                changes["start"] = self._iso(s)
+                changes["end"] = self._iso(e or s)
+        if self._color_id:
+            changes["color_id"] = self._color_id
+        self.state.update_event(self.ev.get("id"),
+                                self.ev.get("calendar_id") or "primary",
+                                changes)
+        self.accept()
 
 
 class CalendarScreen(QWidget):
@@ -109,13 +209,24 @@ class CalendarScreen(QWidget):
         self.rebuild()
 
     # ---- view switching ---------------------------------------------------
+    def _navigated(self):
+        """A user navigation landed on a new in-page location — refresh and let
+        the shell record it on the app-wide back/forward history (#18)."""
+        self.refresh()
+        self.state.nav_location_changed.emit()
+
+    def _sync_seg(self):
+        order = {"month": 0, "week": 1, "day": 2}
+        for i, b in enumerate(self.seg_group.buttons()):
+            b.setChecked(i == order.get(self.view, 0))
+
     def _set_view(self, key: str):
         self.view = key
-        self.refresh()
+        self._navigated()
 
     def _go_today(self):
         self.anchor = date.today()
-        self.refresh()
+        self._navigated()
 
     def _shift(self, sign: int):
         if self.view == "month":
@@ -126,13 +237,25 @@ class CalendarScreen(QWidget):
             self.anchor += timedelta(days=7 * sign)
         else:
             self.anchor += timedelta(days=sign)
-        self.refresh()
+        self._navigated()
 
     def _open_day(self, d: date):
         self.anchor = d
         self.view = "day"
-        for i, b in enumerate(self.seg_group.buttons()):
-            b.setChecked(i == 2)
+        self._sync_seg()
+        self._navigated()
+
+    # ---- app-wide back/forward hook (#18) ---------------------------------
+    # The shell's SwipeNavigator owns the gesture and history; the calendar only
+    # exposes its in-page location so back/forward can restore it.
+    def nav_token(self) -> tuple[str, date]:
+        return (self.view, self.anchor)
+
+    def nav_restore(self, token: tuple[str, date]):
+        # Apply a prior location WITHOUT emitting nav_location_changed — this is
+        # the shell replaying history, not a fresh navigation.
+        self.view, self.anchor = token
+        self._sync_seg()
         self.refresh()
 
     def _new_event(self):
@@ -266,6 +389,9 @@ class CalendarScreen(QWidget):
         row.addWidget(scroll_fixed(agenda, T.AGENDA_W))
         return w
 
+    def _edit_event(self, ev: dict):
+        EventEditDialog(self, self.state, ev).exec()
+
     def _agenda_row(self, ev: dict) -> QWidget:
         w = QWidget()
         v = vbox(w, (0, 0, 0, 0), 0)
@@ -282,9 +408,12 @@ class CalendarScreen(QWidget):
             meta = f"{meta} · {ev['cal']}"
         col.addWidget(label(meta, 10, T.TEXT_MUTED, mono=True))
         row.addLayout(col, 1)
-        # Delete lives only here, in the day agenda — never on the grid blocks
-        # themselves, where a stray click on a dense week would be destructive.
+        # Edit + Delete live only here, in the day agenda — never on the grid
+        # blocks themselves, where a stray click on a dense week would fire.
         if ev.get("id"):
+            row.addWidget(ClickLabel(
+                "✎", 13, T.TEXT_GHOST, tooltip="Edit event",
+                on_click=lambda e=ev: self._edit_event(e)))
             row.addWidget(ClickLabel(
                 "✕", 12, T.TEXT_GHOST, tooltip="Delete event",
                 on_click=lambda: self.state.delete_event(

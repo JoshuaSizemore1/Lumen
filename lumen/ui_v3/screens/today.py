@@ -14,7 +14,7 @@ from .. import theme as T
 from ..calendar_grids import DayColumn
 from ..components import LinkRow, MailRow, TodoRow, column_head, section_head
 from ..widgets import (
-    Chip, ClickLabel, Dot, button, clear_layout, empty_state, eyebrow, font,
+    Chip, ClickLabel, Dot, button, clear_layout, eyebrow, font,
     hbox, hline, label, scroll, vbox, vline,
 )
 
@@ -145,17 +145,20 @@ class TodayScreen(QWidget):
         n = len(self._events)
         v.addWidget(column_head("Schedule", f"{n} event{'' if n == 1 else 's'}"))
         v.addSpacing(13)
-        if self._events:
-            col = DayColumn(self._events, hour_h=T.DASH_HOUR_H,
-                            start_h=T.DASH_START_H, end_h=T.DASH_END_H,
-                            compact=False, left_rule=False, gutter=46,
-                            min_h=38, shrink=3, label_px=9)
-            now = datetime.now()
-            if T.DASH_START_H <= now.hour < T.DASH_END_H:
-                col.set_now(now.hour * 60 + now.minute)
-            v.addWidget(col)
-        else:
-            v.addWidget(empty_state("Nothing scheduled today."))
+        # Always draw the day grid, even with nothing on it (#5): an empty
+        # DayColumn still paints the hour rows and the current-time bar, which
+        # is more useful than a bare "nothing scheduled" placeholder.
+        col = DayColumn(self._events, hour_h=T.DASH_HOUR_H,
+                        start_h=T.DASH_START_H, end_h=T.DASH_END_H,
+                        compact=False, left_rule=False, gutter=46,
+                        min_h=38, shrink=3, label_px=9)
+        now = datetime.now()
+        if T.DASH_START_H <= now.hour < T.DASH_END_H:
+            col.set_now(now.hour * 60 + now.minute)
+        v.addWidget(col)
+        if not self._events:
+            v.addSpacing(8)
+            v.addWidget(label("Nothing scheduled today.", 12, T.TEXT_FAINT))
         v.addSpacing(15)
         v.addWidget(LinkRow("Open calendar →",
                             lambda: self.state.view_requested.emit("calendar")))

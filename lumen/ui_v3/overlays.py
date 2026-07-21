@@ -169,6 +169,7 @@ class ComposeOverlay(_Scrim):
         super().__init__(parent)
         self.state = state
         self._compose_id = None
+        self._reply_to = None
         self._on_dismiss = self.close_it
 
         self.card = _Card()
@@ -246,19 +247,32 @@ class ComposeOverlay(_Scrim):
 
     def open(self, payload: dict):
         self._compose_id = payload.get("compose_id")
-        self.to.setText(payload.get("to", ""))
+        self._reply_to = payload.get("reply_to")
+        # `to` arrives as a list from the daemon's compose_request (find-then-
+        # send prefills a recipient) and as a plain string from the mail
+        # screen's Compose/Reply. setText only accepts a str, so normalize —
+        # passing the list straight through crashed the app (todo-fixes #26).
+        to = payload.get("to") or ""
+        if isinstance(to, list):
+            to = ", ".join(to)
+        self.to.setText(to)
         self.subject.setText(payload.get("subject", ""))
         self.body_edit.setPlainText(payload.get("body", ""))
         self.hint.hide()
         self.ask.clear()
         self.pop()
         # A reply arrives with the recipient filled in — land in the body.
-        (self.body_edit if payload.get("to") else self.to).setFocus()
+        (self.body_edit if to else self.to).setFocus()
 
     def fields(self) -> dict:
-        return {"to": self.to.text().strip(),
+        # The daemon's send path expects address lists (it iterates `to`), so
+        # split the field rather than handing it a bare string — a string would
+        # be walked character by character and rejected as invalid addresses.
+        to = [a.strip() for a in self.to.text().split(",") if a.strip()]
+        return {"to": to, "cc": [], "bcc": [],
                 "subject": self.subject.text().strip(),
-                "body": self.body_edit.toPlainText()}
+                "body": self.body_edit.toPlainText(),
+                "reply_to": self._reply_to}
 
     def close_it(self):
         self.hide()

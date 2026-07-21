@@ -62,6 +62,13 @@ class FakeStore:
         self.calls.append(("delete", todo_id))
         return self.rows
 
+    def exists(self, todo_id):
+        return any(r["id"] == todo_id for r in self.rows)
+
+    def update(self, todo_id, **kw):
+        self.calls.append(("update", todo_id, kw))
+        return self.rows
+
     def open_todos(self):
         return self.rows
 
@@ -196,6 +203,16 @@ async def test_identity_prompt_prepended_on_plain_chat():
     assert llm.messages[-1] == {"role": "user", "content": "hi"}
 
 
+def test_identity_carries_formatting_and_no_censor_guardrails():
+    # #14: plain prose, no emoji/random symbol decoration.
+    low = IDENTITY.lower()
+    assert "emoji" in low
+    assert "plain prose" in low
+    # #4: don't refuse/moralise/joke away the user's own private list wording.
+    assert "verbatim" in low
+    assert "joke" in low
+
+
 async def test_identity_precedes_per_query_context():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore(rows=[])), "chat", {"message": "what's due today?"})
@@ -212,6 +229,31 @@ async def test_new_chat_creates_conversation_and_persists_turns(tmp_path):
     assert isinstance(cid, int)
     roles = [(m["role"], m["content"]) for m in conv.get(cid)["messages"]]
     assert roles == [("user", "hello"), ("assistant", "hi there")]  # write-through both turns
+
+
+async def test_ephemeral_chat_persists_nothing(tmp_path):
+    # The Ask-Lumen bar sends ephemeral turns (#24): no conversation is
+    # created, none is emitted, and the transcript store stays empty.
+    llm = FakeLLM(chunks=("an ", "answer"))
+    conv = conv_store(tmp_path)
+    out = await collect(Router(llm, FakeStore(), conversations=conv),
+                        "chat", {"message": "what's on this page", "ephemeral": True})
+    assert not any("conversation_id" in e for e in out)
+    assert conv.list_recent() == []
+    assert "".join(e.get("chunk", "") for e in out) == "an answer"
+
+
+async def test_conversations_seed_materializes_a_thread(tmp_path):
+    # "open in Chat" seeds a real thread from the ephemeral exchange (#24).
+    conv = conv_store(tmp_path)
+    out = await collect(Router(FakeLLM(), FakeStore(), conversations=conv),
+                        "conversations.seed",
+                        {"question": "who emailed me?", "answer": "Chris did.",
+                         "tools": ["search_email"]})
+    cid = out[0]["result"]["id"]
+    roles = [(m["role"], m["content"]) for m in conv.get(cid)["messages"]]
+    assert roles == [("user", "who emailed me?"), ("assistant", "Chris did.")]
+    assert conv.is_tool_engaged(cid)
 
 
 async def test_followup_threads_prior_turns_into_prompt(tmp_path):
@@ -475,6 +517,60 @@ class ToolLLM:
 class FakeModelRouter:
     def pick_model(self, message, *, needs_tools):
         return "fast"
+
+
+class LabelToolLLM:
+    """Fake LLM that calls label_email with the id it was handed in context."""
+    def __init__(self, email_id="m1", label="Bills"):
+        self.model = None
+        self._id, self._label = email_id, label
+        self.system = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.system = messages[0]["content"]
+        self.tool_names = [t["function"]["name"] for t in tools]
+        args = {"email_id": self._id, "label": self._label}
+        yield {"tool_call": {"name": "label_email", "arguments": args}}
+        text = await executor("label_email", args)
+        yield {"content": text}
+
+
+async def test_label_email_via_ask_bar_labels_the_open_message():
+    # #11: "label this email as Bills" with an open email in context routes to
+    # the tool loop, exposes label_email, and applies the label to that id.
+    llm = LabelToolLLM()
+    mail, store = FakeMailSync(), FakeMailStore()
+    router = Router(llm, FakeStore(), mail=mail, mail_store=store,
+                    bridge=FakeBridge(tools=()), model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "label this email as Bills",
+                         "open_email": {"id": "m1", "subject": "Engines",
+                                        "from": "Ada"}})
+    assert "label_email" in llm.tool_names
+    assert "id=m1" in llm.system                    # open-email context injected
+    assert mail.labeled == [("m1", "Bills")]        # the write happened
+    assert any("Labeled" in e.get("chunk", "") for e in out)
+
+
+async def test_label_email_tool_reports_unknown_id():
+    llm = LabelToolLLM(email_id="ghost")
+    mail, store = FakeMailSync(), FakeMailStore()
+    router = Router(llm, FakeStore(), mail=mail, mail_store=store,
+                    bridge=FakeBridge(tools=()), model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "label this email as Bills"})
+    assert mail.labeled == []                        # nothing applied
+    assert any("No email with id ghost" in e.get("chunk", "") for e in out)
+
+
+def test_mail_label_hint_matches_labeling_phrases():
+    from lumen.daemon.router import MAIL_LABEL_HINT
+    for m in ("label this email as Work", "tag this message", "label this",
+              "categorise this email", "file this email under Bills"):
+        assert MAIL_LABEL_HINT.search(m), m
+    # a plain read must not trip it
+    assert not MAIL_LABEL_HINT.search("what did Ada email me about")
 
 
 def test_tool_hint_matches_lookup_phrases():
@@ -1690,6 +1786,52 @@ async def test_calendar_delete_unknown_event_is_an_error():
     assert "not found" in out[0]["error"]
 
 
+# ---- calendar.update (confirm-gated event edit, #12) ----
+
+async def test_calendar_update_approved_patches_and_syncs():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge(result="Updated: Standup v2")
+    tool_log = FakeToolLog()
+    router = create_router(bridge=bridge, cal=cal, broker=broker, tool_log=tool_log)
+    events = await drive_oneshot(
+        router, "calendar.update",
+        {"id": "t1", "calendar_id": "primary",
+         "changes": {"title": "Standup v2", "color_id": "7"}}, broker, True)
+    req = next(e for e in events if "confirm_request" in e)
+    rows = dict(req["confirm_request"]["rows"])
+    assert rows["Title"] == "Standup v2"
+    assert rows["Colour"] == "Peacock"           # colorId 7 rendered by name
+    assert bridge.calls[0][0] == "update_event"
+    assert bridge.calls[0][1]["color_id"] == "7"
+    assert tool_log.entries == [("update_event", True)]
+    assert cal.synced == 1
+    assert events[-1]["result"]["updated"] is True
+
+
+async def test_calendar_update_declined_changes_nothing():
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge()
+    router = create_router(bridge=bridge, cal=cal, broker=broker)
+    events = await drive_oneshot(
+        router, "calendar.update",
+        {"id": "t1", "calendar_id": "primary",
+         "changes": {"title": "nope"}}, broker, False)
+    assert bridge.calls == [] and cal.synced == 0
+    assert events[-1]["result"]["updated"] is False
+
+
+async def test_calendar_update_no_changes_is_a_noop():
+    router = create_router(cal=SyncingFakeCal(rows=[CAL_ROW]))
+    out = await collect(router, "calendar.update",
+                        {"id": "t1", "calendar_id": "primary", "changes": {}})
+    assert out[-1]["result"]["updated"] is False
+    assert "Nothing to change" in out[-1]["result"]["message"]
+
+
 async def test_calendar_delete_validates_payload():
     router = create_router(cal=SyncingFakeCal(rows=[CAL_ROW]))
     out = await collect(router, "calendar.delete", {})
@@ -1796,6 +1938,103 @@ async def test_nl_remind_me_adds_too():
     await collect(Router(FakeLLM(), store), "chat",
                   {"message": "remind me to water the plants @tomorrow"})
     assert ("add", "water the plants @tomorrow") in store.calls
+
+
+async def test_bare_add_defaults_to_todo_not_event():
+    # "add call the dentist" trips EVENT_HINT (add + call) but names no time
+    # and no calendar noun. With a calendar present (so the event branch COULD
+    # fire) the bare-add branch must still route it to the todo list (#19).
+    store = capture_store()
+    bridge = FakeBridge()
+    out = await collect(
+        Router(FakeLLM(), store, bridge=bridge, calendar=FakeCal(),
+               confirm=ConfirmBroker(), model_router=FakeModelRouter()),
+        "chat", {"message": "add call the dentist"})
+    assert ("add", "call the dentist") in store.calls
+    assert not bridge.calls               # never reached create_event
+    assert any("Added todo" in e.get("chunk", "") for e in out)
+
+
+def test_bare_add_precedence_regexes():
+    # The precedence guard itself (#19): a cue-less add diverts to todos; a
+    # scheduling signal (clock time / weekday / calendar noun) does not.
+    from lumen.daemon.router import ADD_LOOSE, SCHEDULE_SIGNAL
+    for todo in ("add call the dentist", "add buy milk", "jot down email chris"):
+        assert ADD_LOOSE.match(todo) and not SCHEDULE_SIGNAL.search(todo)
+    for event in ("add dinner with Sam at 7pm", "add gym tomorrow",
+                  "add standup on monday", "add a meeting with Kim"):
+        assert SCHEDULE_SIGNAL.search(event)
+
+
+# ---- todo-fixes #19 rework: the Ask-Lumen bar's page decides an ambiguous add.
+# A bare "add X" (no time, no explicit "to my todos/calendar") becomes a
+# calendar event ONLY on the calendar page; everywhere else it stays a todo.
+
+async def _drive_ctx(router, message, context, broker, approve):
+    """Like drive(), but carries the ask-bar page context on the payload."""
+    events = []
+
+    async def consume():
+        async for ev in router.handle(
+                "chat", {"message": message, "context": context}):
+            events.append(ev)
+
+    task = _aio.ensure_future(consume())
+    for _ in range(200):
+        await _aio.sleep(0)
+        req = next((e for e in events if "confirm_request" in e), None)
+        if req is not None:
+            broker.resolve(req["confirm_id"], approve)
+            break
+    await _aio.wait_for(task, timeout=2)
+    return events
+
+
+async def test_bare_add_on_calendar_surface_creates_event():
+    broker = ConfirmBroker()
+    store = capture_store()
+    bridge = FakeBridge(result="Created: dentist — ...")
+    router = Router(FakeLLM(chunks=(VALID_JSON,)), store, bridge=bridge,
+                    calendar=SyncingFakeCal(), confirm=broker,
+                    model_router=FakeModelRouter())
+    events = await _drive_ctx(router, "add dentist", {"screen": "calendar"},
+                              broker, True)
+    assert bridge.calls and bridge.calls[0][0] == "create_event"
+    assert not any(c[0] == "add" for c in store.calls)   # never a todo
+    assert any("Created:" in e.get("chunk", "") for e in events)
+
+
+async def test_bare_add_on_todos_surface_stays_todo():
+    store = capture_store()
+    bridge = FakeBridge()
+    out = await collect(
+        Router(FakeLLM(), store, bridge=bridge, calendar=FakeCal(),
+               confirm=ConfirmBroker(), model_router=FakeModelRouter()),
+        "chat", {"message": "add dentist", "context": {"screen": "todos"}})
+    assert ("add", "dentist") in store.calls
+    assert not bridge.calls                       # never reached create_event
+
+
+async def test_bare_add_without_surface_defaults_to_todo():
+    # Launcher / Chat composer carry no page — the safe default stays todo.
+    store = capture_store()
+    bridge = FakeBridge()
+    out = await collect(
+        Router(FakeLLM(), store, bridge=bridge, calendar=FakeCal(),
+               confirm=ConfirmBroker(), model_router=FakeModelRouter()),
+        "chat", {"message": "add dentist"})
+    assert ("add", "dentist") in store.calls
+    assert not bridge.calls
+
+
+async def test_explicit_todo_hint_beats_calendar_surface():
+    # "add X to my todo list" on the calendar page must NOT become an event —
+    # the explicit todo phrase (TODO_TASK_HINT) still wins over the surface.
+    from lumen.daemon.router import ADD_LOOSE, TODO_TASK_HINT, FILE_TASK_HINT
+    msg = "add milk to my todo list"
+    assert ADD_LOOSE.match(msg) and TODO_TASK_HINT.search(msg)
+    fmsg = "add a note to project.md"
+    assert ADD_LOOSE.match(fmsg) and FILE_TASK_HINT.search(fmsg)
 
 
 def done_store():
@@ -3437,6 +3676,44 @@ def test_list_todos_tool_renders_ids():
     assert "no open todos" in local_tools.dispatch("list_todos", {}, FakeStore(rows=[]))
 
 
+def test_update_todo_tool_edits_fields():
+    from lumen.daemon import local_tools
+    store = FakeStore(rows=[TODO_ROW])
+    out = local_tools.dispatch(
+        "update_todo",
+        {"id": 1, "text": "call the dentist back", "tags": ["health"],
+         "due_date": "2026-08-01", "description": "ask about the crown"}, store)
+    assert "Updated todo 1" in out
+    _, tid, kw = store.calls[-1]
+    assert tid == 1 and kw["text"] == "call the dentist back"
+    assert kw["tags"] == ["health"] and kw["due_date"] == "2026-08-01"
+    assert kw["description"] == "ask about the crown"
+
+
+def test_update_todo_tool_rejects_unknown_id():
+    from lumen.daemon import local_tools
+    store = FakeStore(rows=[TODO_ROW])
+    assert "No todo with id 42" in local_tools.dispatch(
+        "update_todo", {"id": 42, "text": "x"}, store)
+    assert not any(c[0] == "update" for c in store.calls)
+
+
+def test_update_todo_tool_clears_due_with_empty_string():
+    from lumen.daemon import local_tools
+    store = FakeStore(rows=[TODO_ROW])
+    local_tools.dispatch("update_todo", {"id": 1, "due_date": ""}, store)
+    assert store.calls[-1] == ("update", 1, {"due_date": None})
+
+
+async def test_todos_update_route_edits_and_returns_list():
+    store = FakeStore(rows=[TODO_ROW])
+    out = await collect(Router(FakeLLM(), store), "todos.update",
+                        {"id": 1, "tags": ["health"], "due_date": None})
+    assert out[0]["result"] == store.rows
+    _, tid, kw = store.calls[-1]
+    assert tid == 1 and kw["tags"] == ["health"] and kw["due_date"] is None
+
+
 # ---- audit 2026-07-19: capability gaps where the nearest tool won ----------
 
 def test_task_wording_does_not_become_a_calendar_event():
@@ -3700,6 +3977,37 @@ async def test_canvas_assignments_route_flags_pending_marker(tmp_path):
     items = out[-1]["result"]["assignments"]
     assert items[0]["id"] == 10 and items[0]["pending_marker"] is True
     assert items[0]["course_code"] == "CS3505"
+
+
+async def test_canvas_courses_route_lists_courses_with_flags(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"},
+                          {"id": 2, "name": "MATH 2270", "course_code": "MATH2270"}])
+    store.set_course_included(2, False)
+    out = await collect(router, "canvas.courses", {})
+    courses = {c["id"]: c for c in out[-1]["result"]["courses"]}
+    assert courses[1]["included"] == 1 and courses[2]["included"] == 0
+    assert courses[1]["course_code"] == "CS3505"
+
+
+async def test_canvas_set_course_included_archives_and_hides(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)                  # course 1 + assignment 10 + todo
+    # Archive course 1 — no confirmation, nothing deleted.
+    out = await collect(router, "canvas.set_course_included",
+                        {"course_id": 1, "included": False})
+    assert not any("confirm_request" in e for e in out)
+    assert "result" in out[-1]
+    # The assignment is now hidden from the summary...
+    hidden = await collect(router, "canvas.assignments", {})
+    assert hidden[-1]["result"]["assignments"] == []
+    # ...but its row and its todo link are untouched in the backend.
+    assert store.assignments(course_id=1)[0]["todo_id"] is not None
+    # Un-archive restores it.
+    await collect(router, "canvas.set_course_included",
+                  {"course_id": 1, "included": True})
+    shown = await collect(router, "canvas.assignments", {})
+    assert [a["id"] for a in shown[-1]["result"]["assignments"]] == [10]
 
 
 def test_state_canvas_seam_defaults_without_daemon():

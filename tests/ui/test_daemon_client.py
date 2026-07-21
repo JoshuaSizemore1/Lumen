@@ -144,6 +144,15 @@ def test_tool_used_line_emits_signal(qtbot):
     assert seen == ["search_books"]
 
 
+def test_cold_start_line_emits_signal(qtbot):
+    client = DaemonClient("/nonexistent.sock")
+    seen = []
+    client.cold_start.connect(lambda: seen.append(True))
+    client._buf = b'{"id": 1, "cold_start": true}\n'
+    client._process_buffer()
+    assert seen == [True]
+
+
 def test_confirm_request_line_emits_signal(qtbot, tmp_path):
     client = DaemonClient(str(tmp_path / "d.sock"))
     payloads = []

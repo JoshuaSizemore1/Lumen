@@ -4,6 +4,7 @@ plus create_event / delete_event — which the daemon only ever calls after the
 user approved the exact event in a confirm dialog. Shares the poller's OAuth
 token via google_auth. Run: python -m lumen.mcp_servers.gcal"""
 
+import os
 from datetime import date, datetime, time, timedelta
 
 from mcp.server.fastmcp import FastMCP
@@ -13,6 +14,24 @@ mcp = FastMCP("gcal")
 NOT_CONNECTED = ("Google Calendar isn't connected yet — the user needs to run "
                  "'uv run lumen-google-auth' first (see docs/google-oauth-setup.md).")
 FAILED = "Couldn't reach Google Calendar right now."
+
+
+def _local_tz_name() -> str | None:
+    """The machine's IANA time-zone name (e.g. 'America/Denver').
+
+    Google Calendar REQUIRES an IANA timeZone on a recurring event's start/end;
+    a UTC offset baked into the dateTime is not enough, and without it the
+    insert fails outright — which is exactly why recurring events "wouldn't
+    connect" (todo-fixes #16). Derived from /etc/localtime, the reliable source
+    on the Linux laptop Lumen targets; TZ is the fallback."""
+    try:
+        real = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in real:
+            return real.split(marker, 1)[1]
+    except OSError:
+        pass
+    return os.environ.get("TZ") or None
 
 
 def _service(scopes=None):
@@ -134,6 +153,13 @@ def _create_event(service, title: str, start: str, end: str, all_day: bool,
     if recurrence:
         rule = recurrence if recurrence.startswith("RRULE") else f"RRULE:{recurrence}"
         body["recurrence"] = [rule]
+        # Recurring timed events need an IANA timeZone or Google rejects the
+        # insert (#16). All-day recurring events use bare dates, which are fine.
+        if not all_day:
+            tzname = _local_tz_name()
+            if tzname:
+                body["start"]["timeZone"] = tzname
+                body["end"]["timeZone"] = tzname
     try:
         created = service.events().insert(
             calendarId="primary", body=body,
@@ -143,6 +169,43 @@ def _create_event(service, title: str, start: str, end: str, all_day: bool,
     link = created.get("htmlLink", "")
     return (f"Created: {created.get('summary', title)} — {start}"
             + (f" ({link})" if link else ""))
+
+
+def _update_event(service, event_id: str, calendar_id: str, title: str,
+                  start: str, end: str, all_day: bool, location: str,
+                  description: str, color_id: str) -> str:
+    """Patch an existing event (#12). Only non-empty fields are sent, so a
+    caller can change just the colour or just the time without clobbering the
+    rest. Google's colour is a colorId ('1'..'11'); '' leaves it unchanged."""
+    if not event_id:
+        return "event_id is required."
+    if service is None:
+        return NOT_CONNECTED
+    body: dict = {}
+    if title:
+        body["summary"] = title
+    if location:
+        body["location"] = location
+    if description:
+        body["description"] = description
+    if color_id:
+        body["colorId"] = color_id
+    if start and end:
+        if all_day:
+            end_excl = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
+            body["start"], body["end"] = {"date": start}, {"date": end_excl}
+        else:
+            body["start"], body["end"] = ({"dateTime": start},
+                                          {"dateTime": end})
+    if not body:
+        return "Nothing to change."
+    try:
+        updated = service.events().patch(
+            calendarId=calendar_id or "primary", eventId=event_id,
+            body=body, sendUpdates="none").execute()
+    except Exception:
+        return FAILED
+    return f"Updated: {updated.get('summary', title or event_id)}"
 
 
 def _delete_event(service, event_id: str, calendar_id: str,
@@ -213,6 +276,21 @@ def create_event(title: str, start: str, end: str, all_day: bool = False,
     return _create_event(_service(google_auth.WRITE_SCOPES), title, start, end,
                          all_day, location, description, list(attendees),
                          recurrence)
+
+
+@mcp.tool()
+def update_event(event_id: str, calendar_id: str = "primary", title: str = "",
+                 start: str = "", end: str = "", all_day: bool = False,
+                 location: str = "", description: str = "",
+                 color_id: str = "") -> str:
+    """Edit an existing event on the user's Google Calendar — change its title,
+    time, location, description, or colour. Only the fields you pass are
+    changed. The daemon calls this only after the user confirmed the exact
+    change in a dialog — never call it speculatively."""
+    from lumen.daemon.connectors import google_auth
+    return _update_event(_service(google_auth.WRITE_SCOPES), event_id,
+                         calendar_id, title, start, end, all_day, location,
+                         description, color_id)
 
 
 @mcp.tool()

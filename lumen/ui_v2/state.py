@@ -52,7 +52,9 @@ def _norm_todo(row: dict, today: date) -> dict:
     tags = list(row.get("tags") or [])
     return {"id": row["id"], "text": row["text"], "done": bool(row["completed"]),
             "group": group, "due": due, "tags": tags,
-            "tag": tags[0] if tags else ""}
+            "tag": tags[0] if tags else "",
+            "description": row.get("description") or "",
+            "due_date": due_iso, "source": row.get("source") or ""}
 
 
 def _norm_book(row: dict) -> dict:
@@ -290,6 +292,19 @@ class AppState(QObject):
         self._data.request("canvas.add_announcement_todo", {"id": ann_id},
                            cb or (lambda _r: None))
 
+    def canvas_courses(self, cb) -> None:
+        if self._data is None:
+            cb({"courses": []}); return
+        self._data.request("canvas.courses", {}, cb)
+
+    def canvas_set_course_included(self, course_id: int, included: bool,
+                                   cb=None) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.set_course_included",
+                           {"course_id": course_id, "included": included},
+                           cb or (lambda _r: None))
+
     # ---- google (re-consent when the token expires) ----
     def google_reconnect(self, cb) -> None:
         """Kick off the browser consent flow in the daemon. cb(snapshot) fires
@@ -311,6 +326,21 @@ class AppState(QObject):
         """cb({conversation, messages}) for reopening a past thread."""
         if self._data is not None:
             self._data.request("conversations.get", {"id": cid}, cb)
+
+    def seed_conversation(self, question: str, answer: str,
+                          tools: list[str] | None, cb) -> None:
+        """Turn an ephemeral Ask-Lumen exchange into a persisted chat thread
+        (#24). cb(cid) fires with the new conversation id. No-op without a
+        daemon (sample mode has no transcript store)."""
+        if self._data is None:
+            cb(None)
+            return
+
+        def handle(result):
+            cb((result or {}).get("id"))
+        self._data.request("conversations.seed",
+                           {"question": question, "answer": answer,
+                            "tools": tools or []}, handle)
 
     def delete_conversation(self, cid: int, cb=None) -> None:
         """Remove a thread (and its messages) from local storage. Local-only
@@ -354,6 +384,35 @@ class AppState(QObject):
             for t in self.todos:
                 if t["id"] == tid:
                     t["done"] = not t["done"]
+            self.todos_changed.emit()
+
+    _UNSET = object()
+
+    def update_todo(self, tid, *, text=None, description=_UNSET,
+                    due_date=_UNSET, tags=None):
+        """Edit an existing todo from the detail card (#21/#23). Only the
+        fields passed are sent; the daemon returns the fresh list."""
+        payload = {"id": tid}
+        if text is not None:
+            payload["text"] = text
+        if description is not self._UNSET:
+            payload["description"] = description
+        if due_date is not self._UNSET:
+            payload["due_date"] = due_date
+        if tags is not None:
+            payload["tags"] = tags
+        if self._data is not None:
+            self._data.request("todos.update", payload, self._set_todos)
+        else:
+            for t in self.todos:
+                if t["id"] == tid:
+                    if text is not None:
+                        t["text"] = text
+                    if description is not self._UNSET:
+                        t["description"] = description or ""
+                    if tags is not None:
+                        t["tags"] = list(tags)
+                        t["tag"] = tags[0] if tags else ""
             self.todos_changed.emit()
 
     def delete_todo(self, tid):
@@ -604,6 +663,38 @@ class AppState(QObject):
                 cb(result)
         self._data.request("mail.suggest_labels", {}, handle)
 
+    def apply_label(self, mid: str, name: str) -> None:
+        """Manual label pick from the reading pane (#9): the same
+        emails.apply_label write the suggestion tap uses, but user-initiated.
+        Toasts + reloads the scope so the moved-out message drops from inbox."""
+        name = (name or "").strip()
+        if not name:
+            return
+        if self._data is not None:
+            self._data.request("emails.apply_label", {"id": mid, "label": name},
+                               self._mail_action_done)
+        else:
+            m = next((x for x in self.mails if x["id"] == mid), None)
+            if m is not None and name not in (m.get("label_names") or []):
+                m.setdefault("label_names", []).append(name)
+                if name not in self.mail_labels:
+                    self.mail_labels = sorted(self.mail_labels + [name])
+            self.mails_changed.emit()
+
+    def remove_label(self, mid: str, name: str) -> None:
+        """Remove a label from a message (#9). Wraps emails.remove_label."""
+        name = (name or "").strip()
+        if not name:
+            return
+        if self._data is not None:
+            self._data.request("emails.remove_label", {"id": mid, "label": name},
+                               self._mail_action_done)
+        else:
+            m = next((x for x in self.mails if x["id"] == mid), None)
+            if m is not None and name in (m.get("label_names") or []):
+                m["label_names"].remove(name)
+            self.mails_changed.emit()
+
     def apply_suggestion(self, mid: str) -> None:
         name = self.mail_suggestions.pop(mid, None)
         if name is None:
@@ -805,6 +896,23 @@ class AppState(QObject):
                 self.todos_changed.emit()      # repaint the dashboard column
 
         self._data.request("manabi.status", {}, handle)
+
+    def update_event(self, event_id: str, calendar_id: str, changes: dict,
+                     cb=None) -> None:
+        """Edit an existing event (#12). The daemon gates the change behind the
+        confirm overlay before patching Google Calendar. `changes` carries only
+        the touched fields (title/start/end/all_day/location/color_id)."""
+        if self._data is not None:
+            self._data.request("calendar.update",
+                               {"id": event_id, "calendar_id": calendar_id,
+                                "changes": changes},
+                               cb or (lambda _r: None))
+        else:
+            self.confirm_requested.emit({
+                "icon": "▲", "title": "Update calendar event",
+                "intro": "Lumen will change this event on your Google Calendar.",
+                "rows": [("Title", changes.get("title", ""))],
+                "confirm_label": "Save changes", "toast": "✓ Event updated"})
 
     def delete_event(self, event_id: str, calendar_id: str, cb=None) -> None:
         """External write: the daemon looks the event up in its cache and gates

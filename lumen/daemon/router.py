@@ -104,6 +104,21 @@ BRIEFING_HINT = re.compile(r"\b(?:brief(?:ing)?|my day)\b", re.IGNORECASE)
 # briefing route ("mark the briefing todo done" must not open a briefing).
 TODO_ADD = re.compile(r"^\s*(?:add\s+(?:a\s+)?todo:?|remind me to)\s+(.+)$",
                       re.IGNORECASE | re.DOTALL)
+# A bare imperative "add X" (or jot/note down) with NO scheduling signal is a
+# TODO, not a calendar event (#19). EVENT_HINT's "add" + a noun like "call"
+# used to steal "add call the dentist" into the calendar; here the user never
+# said meeting/appointment/calendar and gave no time, so default to the todo
+# list. SCHEDULE_SIGNAL below is what makes it an event instead.
+ADD_LOOSE = re.compile(
+    r"^\s*(?:add|jot\s+down|note\s+down)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+SCHEDULE_SIGNAL = re.compile(
+    r"\b(?:meeting|appointment|calendar|schedule|event|reminder)\b"
+    r"|\b(?:at|by|from|@)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b"
+    r"|\b\d{1,2}\s*(?:am|pm)\b"
+    r"|\b(?:today|tomorrow|tonight|this\s+\w+|next\s+\w+|"
+    r"mon(?:day)?|tues?(?:day)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|"
+    r"fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b",
+    re.IGNORECASE)
 MARK_DONE = re.compile(r"^\s*(?:mark|check\s*off|tick)\b(.+?)(?:\bas\s+)?"
                        r"\b(?:done|completed?|finished)\b", re.IGNORECASE)
 # "Delete todo 7, I already did it." — the user's intent is completion, stated
@@ -157,6 +172,16 @@ FILE_TASK_HINT = re.compile(
 # narrower than TODO_HINT — that one also matches "due"/"overdue", which would
 # wrongly block "book a meeting about the overdue invoice".
 TODO_TASK_HINT = re.compile(r"\b(?:todos?|to-?do list|tasks?)\b", re.IGNORECASE)
+
+# "label this email as Work" / "tag the open message" (#11): a labeling verb
+# aimed at a mail noun (or the deictic "this"/"it", since the mail-screen ask
+# bar carries which email is open). Routes to the tool loop where label_email
+# lives, with the open email named in context.
+MAIL_LABEL_HINT = re.compile(
+    r"\b(?:label|tag|categori[sz]e|file)\b"
+    r"[^.\n]{0,40}\b(?:email|message|mail|inbox|this|it)\b"
+    r"|\b(?:label|tag)\s+this\b",
+    re.IGNORECASE)
 
 # A dedicated "write me a document" intent (new-features item 2): an explicit
 # write verb aimed at a file noun. The local model authors the whole document
@@ -298,14 +323,29 @@ CAL_CONTEXT_DAYS = 14  # chat context window; the cache itself is wider
 # How much of the inbox a new rule scans for the "apply to existing" offer.
 RULE_SCAN_LIMIT = 500
 
-# Suggest-labels bounds: 15 sequential warm-model verdicts ≈ tens of seconds
-# worst case on the serial data channel — the UI disables the button while
-# waiting; a bigger cap would stall other one-shots behind it.
+# Suggest-labels bounds: one warm-model verdict per unlabeled message, run
+# sequentially. Raised from 15 → 40 (#8): Josh saw it "only do a couple", and
+# the cap was the reason — the loop is already one prompt per email. The UI now
+# dims the inbox behind a busy bar for the whole run (#7), so a longer pass is
+# visible rather than mysterious.
 SUGGEST_SCAN_LIMIT = 200
-SUGGEST_LIMIT = 15
+SUGGEST_LIMIT = 40
 # How many filed messages ground each label's one-line description
 # (suggest-labels v2) — local SQL per label, no model cost.
 LABEL_PROFILE_ROWS = 3
+
+# Google Calendar's fixed event-colour palette (colorId → display name), used
+# in the edit dialog's colour picker and the update confirm dialog (#12).
+GCAL_COLOR_NAMES = {
+    "1": "Lavender", "2": "Sage", "3": "Grape", "4": "Flamingo", "5": "Banana",
+    "6": "Tangerine", "7": "Peacock", "8": "Graphite", "9": "Blueberry",
+    "10": "Basil", "11": "Tomato"}
+# The hex Google renders each colorId as — so the picker's swatches match the
+# calendar, and the UI can preview a chosen colour before the sync round-trips.
+GCAL_COLOR_HEX = {
+    "1": "#7986cb", "2": "#33b679", "3": "#8e24aa", "4": "#e67c73",
+    "5": "#f6bf26", "6": "#f4511e", "7": "#039be5", "8": "#616161",
+    "9": "#3f51b5", "10": "#0b8043", "11": "#d50000"}
 
 # Confirm-gated mail writes (title, intro, confirm label, GmailSync verb,
 # success message). Delete is Gmail's Trash, not a permanent wipe — the
@@ -341,13 +381,19 @@ IDENTITY = (
     "gives you no tool or data for it, say so plainly instead of inventing a "
     "result. To write, send, or reply to an email, a compose window opens with "
     "your draft to review and send — so never claim you can't send email. Prefer "
-    "specific, concise answers."
+    "specific, concise answers. Write in plain prose: do not decorate replies "
+    "with emoji, and never scatter stars, asterisks, or other symbols — use them "
+    "only where they carry real meaning, like a Markdown list or a file path. "
+    "This is the user's own private laptop and their own data. When they ask you "
+    "to record a todo, note, or draft in their own words, capture it verbatim "
+    "without refusing, sanitising, moralising, or dismissing it as a joke — even "
+    "if the wording is crude or blunt. It is theirs."
 )
 
 # Write-capable tools stay callable by the daemon (after a confirm) but are
 # never offered to the model in the generic tool loop — the confirm gate is
 # mechanical, not prompt-enforced.
-WRITE_TOOLS = frozenset({"create_event", "delete_event"})
+WRITE_TOOLS = frozenset({"create_event", "delete_event", "update_event"})
 
 # Tool groups = MCP server names. Tools attach by subject-matter group (union
 # on multi-subject messages) keyed off the same wide hints that inject context
@@ -722,8 +768,14 @@ class Router:
                     yield {"captured": max(rows, key=lambda r: r["id"])}
                     yield {"done": True}
                     return
+            # Ephemeral turns (the Ask-Lumen bar, #24) run without ever
+            # touching the conversation store: no thread is created, none is
+            # emitted, and nothing is persisted — so they never surface as a
+            # chat instance. The user materializes one only by clicking
+            # "open in Chat", which calls conversations.seed.
+            ephemeral = bool(payload.get("ephemeral"))
             conv_id = payload.get("conversation_id")
-            if self._conv is not None:
+            if self._conv is not None and not ephemeral:
                 if conv_id is None:
                     conv_id = self._conv.create(message)
                     yield {"conversation_id": conv_id}   # emit first so the UI can track the thread
@@ -732,7 +784,9 @@ class Router:
             # sub-path it drives (the tool loop owns a pump task), not defer to GC.
             async with aclosing(self._chat(
                     message, conv_id, cwd=payload.get("cwd"),
-                    open_file=payload.get("open_file"))) as gen:
+                    open_file=payload.get("open_file"),
+                    open_email=payload.get("open_email"),
+                    surface=(payload.get("context") or {}).get("screen"))) as gen:
                 async for ev in gen:
                     yield ev
         elif type_ == "conversations.list":
@@ -750,6 +804,25 @@ class Router:
                 yield {"error": "conversations.get needs {id}"}
                 return
             yield {"error": "conversation not found"} if got is None else {"result": got}
+        elif type_ == "conversations.seed":
+            # Materialize an ephemeral Ask-Lumen exchange into a real chat
+            # thread on demand (#24 — "open in Chat"): create the conversation
+            # and write its one Q&A turn, so it now appears in the sidebar.
+            if self._conv is None:
+                yield {"error": "conversation history unavailable"}
+                return
+            question = str(payload.get("question") or "").strip()
+            answer = str(payload.get("answer") or "")
+            if not question:
+                yield {"error": "conversations.seed needs {question}"}
+                return
+            cid = self._conv.create(question)
+            self._conv.add_message(cid, "user", question)
+            tools = payload.get("tools") or None
+            self._conv.add_message(cid, "assistant", answer, tools)
+            if tools:
+                self._conv.mark_tool_engaged(cid)
+            yield {"result": {"id": cid}}
         elif type_ == "conversations.delete":
             if self._conv is None:
                 yield {"error": "conversation history unavailable"}
@@ -929,6 +1002,27 @@ class Router:
             tid = self._todos.add_structured(text, due, tags)
             store.link_announcement_todo(ann["id"], tid)
             yield {"result": {"todo_id": tid}}
+        elif type_ == "canvas.courses":
+            # The Manage-courses panel (#28): every enrolled course + its archive
+            # flag, so archived ones can be switched back on.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                yield {"result": {"courses": self._canvas.store.courses_for_panel()}}
+        elif type_ == "canvas.set_course_included":
+            # Archive / un-archive a course (#28). Non-destructive: nothing is
+            # deleted, so no confirmation — the flag just hides it + stops the
+            # poller pulling it. Reply carries fresh status like the other routes.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                cid = payload.get("course_id")
+                if cid is None:
+                    yield {"error": "canvas.set_course_included needs {course_id, included}"}
+                else:
+                    self._canvas.store.set_course_included(
+                        int(cid), bool(payload.get("included")))
+                    yield {"result": self._canvas_status()}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
@@ -1037,6 +1131,25 @@ class Router:
                 return
             async for ev in self._gated_delete(event):
                 yield ev
+        elif type_ == "calendar.update":
+            # Edit an existing event (#12): title / time / location / colour,
+            # gated like every other external calendar write.
+            if (self._calendar is None or self._bridge is None
+                    or self._confirm is None):
+                yield {"error": "calendar editing unavailable"}
+                return
+            event_id = str(payload.get("id") or "")
+            calendar_id = str(payload.get("calendar_id") or "")
+            changes = payload.get("changes") or {}
+            if not event_id or not calendar_id:
+                yield {"error": "calendar.update needs {id, calendar_id}"}
+                return
+            event = self._calendar.get(calendar_id, event_id)
+            if event is None:
+                yield {"error": "event not found"}
+                return
+            async for ev in self._gated_update(event, changes):
+                yield ev
         elif type_ == "calendar.list":
             if self._calendar is None:
                 yield {"error": "calendar unavailable"}
@@ -1070,6 +1183,31 @@ class Router:
                 yield {"result": self._todos.delete(int(payload["id"]))}
             except (KeyError, TypeError, ValueError):
                 yield {"error": "todos.delete needs {id}"}
+        elif type_ == "todos.update":
+            # Edit an existing todo (#23): text / description / due / tags.
+            # Only keys present in the payload are changed; due_date and
+            # description accept null to clear.
+            try:
+                tid = int(payload["id"])
+            except (KeyError, TypeError, ValueError):
+                yield {"error": "todos.update needs {id}"}
+                return
+            kw = {}
+            if "text" in payload:
+                kw["text"] = str(payload.get("text") or "")
+            if "description" in payload:
+                kw["description"] = payload.get("description")
+            if "due_date" in payload:
+                kw["due_date"] = payload.get("due_date")
+            if "tags" in payload:
+                kw["tags"] = list(payload.get("tags") or [])
+            try:
+                rows = self._todos.update(tid, **kw)
+            except ValueError as e:
+                yield {"error": str(e)}
+            else:
+                self._log("todos", "query", {"action": "update", "id": tid})
+                yield {"result": rows}
         elif type_.startswith("todos.") and type_.endswith(
                 ("suggestions", "scan_commitments", "accept_suggestion",
                  "dismiss_suggestion")):
@@ -1229,6 +1367,19 @@ class Router:
                 yield {"result": {"ok": ok, "message":
                        f"Labeled {name} — moved out of inbox." if ok else
                        "Couldn't reach Gmail — nothing was changed."}}
+            elif type_ == "emails.remove_label":
+                # Manual un-label from the reading pane (#9). Ungated: it is a
+                # direct-manipulation click on the user's own mail, same as the
+                # one-tap apply above, and it only takes a label off.
+                mid = str(payload.get("id", ""))
+                name = str(payload.get("label", "")).strip()
+                if not name or self._mail_store.get(mid) is None:
+                    yield {"error": "emails.remove_label needs {id, label}"}
+                    return
+                ok = await self._mail.remove_label(mid, name)
+                yield {"result": {"ok": ok, "message":
+                       f"Removed label {name}." if ok else
+                       "Couldn't reach Gmail — nothing was changed."}}
             elif type_ == "emails.send":
                 ok, text = await self._send_email(payload)
                 yield {"result": {"ok": ok, "message": text}}
@@ -1363,8 +1514,21 @@ class Router:
         else:
             yield {"error": f"unknown request type: {type_}"}
 
+    def _open_email_context(self, open_email: dict | None) -> str | None:
+        """Context line naming the email the user has open in the mail screen
+        (#11), so 'label this email' resolves to label_email against its id."""
+        if not open_email or not open_email.get("id"):
+            return None
+        subj = open_email.get("subject") or "(no subject)"
+        frm = open_email.get("from") or ""
+        return (f"The user is currently viewing this email in the mail screen: "
+                f"id={open_email['id']}, from {frm}, subject \"{subj}\". When "
+                "they say 'this email' / 'the open email', that is the one. To "
+                "label it, call label_email with that email_id.")
+
     async def _chat(self, message: str, conv_id: int | None,
-                    cwd: str | None = None, open_file: str | None = None):
+                    cwd: str | None = None, open_file: str | None = None,
+                    open_email: dict | None = None, surface: str | None = None):
         """Pick the chat sub-path, stream it through, write-through the
         assistant turn, and log the interaction for the memory system."""
         subsystem = "chat"
@@ -1404,6 +1568,15 @@ class Router:
                 and self._mail_store is not None and self._confirm is not None
                 and RULE_HINT.search(message)):
             sub, subsystem = self._create_rule_chat(message), "email"
+        elif (self._mail is not None and self._mail_store is not None
+                and MAIL_LABEL_HINT.search(message)):
+            # "label this email as Work" (#11): the tool loop owns label_email,
+            # and the open-email context names which message "this" is.
+            sub = self._chat_with_tools(
+                message, conv_id, groups=frozenset({"mail"}),
+                extra_context=self._open_email_context(open_email),
+                include_mail_write=True)
+            subsystem = "email"
         elif (self._confirm is not None and FILE_WRITE_HINT.search(message)
                 and not RULE_HINT.search(message)
                 and not EXPLICIT_PATH.search(message)):
@@ -1422,6 +1595,24 @@ class Router:
             subsystem = "email"
         elif self._calendar is not None and SLOT_HINT.search(message):
             sub, subsystem = self._slots_chat(message), "calendar"
+        elif (surface == "calendar" and ADD_LOOSE.match(message)
+                and self._confirm is not None and self._bridge is not None
+                and self._calendar is not None
+                and not TODO_TASK_HINT.search(message)
+                and not FILE_TASK_HINT.search(message)):
+            # The Ask-Lumen bar's page decides an ambiguous add (#19 rework):
+            # on the calendar page a bare "add X" is an event, not a todo. An
+            # explicit "…to my todo list" / a file noun still overrides this,
+            # and every other surface keeps the todo default below.
+            sub, subsystem = self._create_event_chat(message), "calendar"
+        elif ((am := ADD_LOOSE.match(message))
+                and not SCHEDULE_SIGNAL.search(message)
+                and not FILE_TASK_HINT.search(message)
+                and not TODO_TASK_HINT.search(message)):
+            # Bare "add X" with no time/calendar cue → the todo list, ahead of
+            # the event branch that would otherwise claim it (#19). An explicit
+            # "…to my todo list" keeps the established tool-loop path instead.
+            sub, subsystem = self._nl_add_chat(am.group(1).strip()), "todos"
         elif (self._confirm is not None and self._bridge is not None
                 and self._calendar is not None and BOOKING_HINT.search(message)
                 and not FILE_TASK_HINT.search(message)
@@ -1986,6 +2177,69 @@ class Router:
                 log.exception("post-delete sync failed")
         yield {"result": {"deleted": ok, "message": text}}
 
+    async def _gated_update(self, event: dict, changes: dict):
+        """Confirm-over-IPC then patch an event on Google Calendar (#12). UI
+        one-shot only; `changes` carries the fields the edit dialog touched
+        (title/start/end/all_day/location/color_id), and only those are sent."""
+        title = str(changes.get("title") or "").strip()
+        start = str(changes.get("start") or "").strip()
+        end = str(changes.get("end") or "").strip()
+        color_id = str(changes.get("color_id") or "").strip()
+        location = str(changes.get("location") or "").strip()
+        rows = []
+        if title:
+            rows.append(("Title", title))
+        if start:
+            rows.append(("When", f"{start} – {end}" if end else start))
+        if location:
+            rows.append(("Location", location))
+        if color_id:
+            rows.append(("Colour", GCAL_COLOR_NAMES.get(color_id, color_id)))
+        if not rows:
+            yield {"result": {"updated": False, "message": "Nothing to change."}}
+            return
+        confirm_id = self._confirm.begin()
+        yield {"confirm_request": {
+                   "icon": "▲", "title": "Update calendar event",
+                   "intro": "Lumen will change this event on your Google "
+                            "Calendar.",
+                   "rows": rows, "confirm_label": "Save changes"},
+               "confirm_id": confirm_id}
+        if not await self._confirm.wait(confirm_id):
+            self._log("calendar", "correction", {"action": "declined_update"})
+            yield {"result": {"updated": False,
+                              "message": "Cancelled — nothing was changed."}}
+            return
+        try:
+            await self._bridge.ensure_started()
+        except Exception:
+            log.exception("MCP bridge unavailable for event update")
+            yield {"result": {"updated": False,
+                              "message": "calendar tools are unavailable right now"}}
+            return
+        args = {"event_id": event["id"], "calendar_id": event["calendar_id"],
+                "title": title, "start": start, "end": end,
+                "all_day": bool(changes.get("all_day")),
+                "location": location, "color_id": color_id}
+        start_t = time.monotonic()
+        try:
+            text = await self._bridge.call("update_event", args)
+            ok = True
+        except Exception as e:
+            text, ok = f"tool error: {e}", False
+            if not isinstance(e, ToolCallError):
+                log.exception("update_event failed unexpectedly")
+        if self._tool_log is not None:
+            self._tool_log.write("update_event", args, ok, text,
+                                 int((time.monotonic() - start_t) * 1000))
+        ok = ok and text.startswith("Updated")
+        if ok and hasattr(self._calendar, "sync_once"):
+            try:
+                await self._calendar.sync_once()
+            except Exception:
+                log.exception("post-update sync failed")
+        yield {"result": {"updated": ok, "message": text}}
+
     async def _create_rule_chat(self, message: str):
         """NL → structured rule (local model) → confirm overlay → save/backfill.
         The overlay's rows are the plain-language rendering of the parsed rule."""
@@ -2156,6 +2410,25 @@ class Router:
                     return addr
         return None
 
+    async def _label_email_tool(self, args: dict) -> str:
+        """label_email tool (#11): apply a Gmail label to one message via the
+        daemon's GmailSync (same write the suggestion tap and the manual pane
+        picker use — the user's own mail, reversible, so ungated). Returns the
+        text the model reports back."""
+        mid = str(args.get("email_id") or "").strip()
+        name = str(args.get("label") or "").strip()
+        if not mid or not name:
+            return "label_email needs both an email_id and a label name."
+        if self._mail_store is None or self._mail_store.get(mid) is None:
+            return (f"No email with id {mid} in the mailbox — check the id, or "
+                    "use search_email to find the message first.")
+        try:
+            ok = await self._mail.apply_label(mid, name)
+        except Exception as e:
+            return f"tool error: {e}"
+        return (f"Labeled that email as '{name}' and moved it out of the inbox."
+                if ok else "Couldn't reach Gmail — the label wasn't applied.")
+
     async def _send_email(self, fields: dict) -> tuple[bool, str]:
         """Validate + send. No confirm gate: every caller is downstream of the
         compose popup, whose Send click is the confirmation."""
@@ -2264,7 +2537,8 @@ class Router:
 
     async def _chat_with_tools(self, message: str, conv_id: int | None = None,
                                groups: frozenset[str] = SERVER_GROUPS,
-                               extra_context: str | None = None):
+                               extra_context: str | None = None,
+                               include_mail_write: bool = False):
         try:
             await self._bridge.ensure_started()
             tools = [t for t in self._bridge.ollama_tools(
@@ -2279,6 +2553,12 @@ class Router:
         # a todo request lands on write_file again (todo-fixes #19).
         if "todos" in groups:
             tools = tools + list(local_tools.TODO_TOOLS)
+        # The mail label tool is in-process too (it writes through GmailSync).
+        # It is a WRITE, so it does not ride the mail ride-along on every loop —
+        # only the explicit labeling route attaches it (#11).
+        if (include_mail_write and self._mail is not None
+                and self._mail_store is not None):
+            tools = tools + list(local_tools.MAIL_TOOLS)
         if not tools:   # no servers came up → plain chat, honest context only
             messages = self._messages_for(message, conv_id, extra=extra_context)
             try:
@@ -2301,9 +2581,15 @@ class Router:
 
         async def executor(name, args):
             start = time.monotonic()
-            if name.split("__")[-1] in local_tools.LOCAL_TOOL_NAMES:
-                text = local_tools.dispatch(name.split("__")[-1], args,
-                                            self._todos)
+            short = name.split("__")[-1]
+            if short in local_tools.LOCAL_TOOL_NAMES:
+                text = local_tools.dispatch(short, args, self._todos)
+                if self._tool_log is not None:
+                    self._tool_log.write(name, args, True, text,
+                                         int((time.monotonic() - start) * 1000))
+                return text
+            if short in local_tools.MAIL_TOOL_NAMES:
+                text = await self._label_email_tool(args)
                 if self._tool_log is not None:
                     self._tool_log.write(name, args, True, text,
                                          int((time.monotonic() - start) * 1000))

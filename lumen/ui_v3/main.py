@@ -16,9 +16,12 @@ from PyQt6.QtWidgets import (
 from . import theme as T
 from .askbar import ASK_SCREENS, AskBar
 from .components import NavRow
+from .nav_history import NavController, NavEntry
 from .overlays import ComposeOverlay, ConfirmOverlay, EventOverlay, Toast
 from .rule_dialog import RuleDialog
 from .state import AppState
+from .swipe_indicator import SwipeIndicator
+from .swipe_nav import SwipeNavigator
 from .styles import app_palette, build_qss
 from .widgets import ClickRow, Dot, hbox, hline, label, qcolor, vbox
 from .screens.books import BooksScreen
@@ -84,6 +87,18 @@ class LumenWindow(QWidget):
         self.askbar = AskBar(self.state, chat_client, self._ask_context)
         mv.addWidget(self.askbar)
         root.addWidget(main, 1)
+        self.content = main
+
+        # ---- app-wide back/forward swipe (#18) ----------------------------
+        # One unified history across section switches AND in-page steps; the
+        # gesture (circle+arrow, commit-on-release) is filtered app-wide but
+        # scoped to the content area so vertical scrolling is untouched.
+        self._restoring = False
+        self.nav = NavController()
+        self._swipe_indicator = SwipeIndicator(self.content)
+        self._swipe = SwipeNavigator(self.nav, self._restore,
+                                     self._swipe_indicator, within=self.content)
+        QApplication.instance().installEventFilter(self._swipe)
 
         # ---- overlays -----------------------------------------------------
         self.confirm = ConfirmOverlay(self)
@@ -103,6 +118,10 @@ class LumenWindow(QWidget):
         self.state.mails_changed.connect(self._update_badges)
         self.state.accent_requested.connect(self._change_accent)
         self.state.font_scale_requested.connect(self._change_font_scale)
+        self.state.open_file_requested.connect(self._open_file)
+        # An in-page navigation (e.g. the calendar changing view/date) records a
+        # new location on the shared history, same as a section switch below.
+        self.state.nav_location_changed.connect(self._record_location)
 
         for i, (key, _, _) in enumerate(NAV):
             sc = QShortcut(QKeySequence(str(i + 1)), self)
@@ -184,8 +203,32 @@ class LumenWindow(QWidget):
         if key in self.screens:
             self.stack.setCurrentIndex(SCREENS.index(key))
 
+    # ---- app-wide back/forward history (#18) ------------------------------
+    def _current_entry(self) -> NavEntry:
+        key = SCREENS[self.stack.currentIndex()]
+        screen = self.screens[key]
+        token = screen.nav_token() if hasattr(screen, "nav_token") else None
+        return NavEntry(key, token)
+
+    def _record_location(self):
+        # Skipped while replaying history so back/forward can't record itself.
+        if self._restoring:
+            return
+        self.nav.visit(self._current_entry())
+
+    def _restore(self, entry: NavEntry):
+        self._restoring = True
+        try:
+            self.switch_to(entry.screen)
+            screen = self.screens.get(entry.screen)
+            if entry.token is not None and hasattr(screen, "nav_restore"):
+                screen.nav_restore(entry.token)
+        finally:
+            self._restoring = False
+
     def _sync_chrome(self, index: int):
         key = SCREENS[index]
+        self._record_location()          # every section switch is a history step
         for k, row in self.nav_rows.items():
             row.set_on(k == key)
         pal = self.settings_lab.palette()
@@ -207,7 +250,8 @@ class LumenWindow(QWidget):
         if key == "mail":
             m = self.state.sel_mail()
             return {"screen": "mail",
-                    "message": {"from": m.get("from"), "subject": m.get("subj"),
+                    "message": {"id": m.get("id"), "from": m.get("from"),
+                                "subject": m.get("subj"),
                                 "body": (m.get("body") or "")[:4000]} if m else None}
         if key == "calendar":
             return {"screen": "calendar",
@@ -227,6 +271,10 @@ class LumenWindow(QWidget):
         self.activateWindow()
         self.switch_to("chat")
         self.screens["chat"].load_conversation(conv_id)
+
+    def _open_file(self, path: str):
+        self.switch_to("files")
+        self.screens["files"].open_path(path)
 
     def _open_confirm(self, payload: dict):
         # A confirm can arrive while only the hotkey overlay is up; the overlay

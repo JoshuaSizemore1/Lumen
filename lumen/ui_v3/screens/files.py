@@ -93,6 +93,15 @@ class FilesScreen(QWidget):
             self.dirty = False
         self.rebuild()
 
+    def open_path(self, p) -> None:
+        """Open a file requested from elsewhere in the shell, e.g. Settings'
+        'open memory.md' (#15). Land in the file's directory so Close returns
+        there rather than home."""
+        p = Path(p).expanduser()
+        if p.parent.is_dir():
+            self.path = p.parent
+        self._open(p)
+
     def context(self) -> dict:
         """What the ask bar should carry when this screen is showing."""
         if self.open_file is not None:
@@ -111,6 +120,18 @@ class FilesScreen(QWidget):
             self._editor()
 
     def _crumbs(self):
+        # "Up a directory" — the clicking-a-crumb-ancestor path always existed,
+        # but there was no one-click way up one level (#25). Browser-only: while
+        # editing, Close is the way back out.
+        if self.open_file is None:
+            at_root = self.path.parent == self.path
+            up = button("↑ Up", "soft", px=11.5, height=26)
+            up.setToolTip("Go up to the parent folder")
+            up.setEnabled(not at_root)
+            if not at_root:
+                up.clicked.connect(lambda: self._open(self.path.parent))
+            self.crumb_lay.addWidget(up)
+
         parts = list(self.path.parts)
         home = Path.home().parts
         # Render the home prefix as ~, the way the mock does.

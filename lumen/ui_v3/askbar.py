@@ -38,7 +38,10 @@ class AskBar(QFrame):
         self.chat = chat_client
         self._context = context_provider
         self._busy = False
+        self._cold = False    # set by the daemon when this turn actually loads the model
         self._acc = ""
+        self._question = ""   # the last asked question, for "open in Chat" (#24)
+        self._tools: list[str] = []
 
         root = vbox(self, (0, 0, 0, 0), 0)
 
@@ -71,13 +74,13 @@ class AskBar(QFrame):
             self.chat.done.connect(self._on_done)
             self.chat.error.connect(self._on_error)
             self.chat.tool_used.connect(self._on_tool)
+            self.chat.cold_start.connect(self._on_cold)
             self.chat.conversation.connect(self._on_conversation)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
         self._wake.setInterval(WAKE_THRESHOLD_MS)
-        self._wake.timeout.connect(
-            lambda: self._status("◇ waking model… (cold start)", T.WARN))
+        self._wake.timeout.connect(self._on_wake)
 
     def focus(self):
         self.input.setFocus()
@@ -88,16 +91,27 @@ class AskBar(QFrame):
         if not msg or self._busy or self.chat is None:
             return
         self._busy = True
+        self._cold = False
         self._acc = ""
         self.input.clear()
         self._open_panel(msg)
         self._wake.start()
 
-        payload = {"message": msg, "context": self._context() or {}}
-        if self.state.active_conv_id is not None:
-            payload["conversation_id"] = self.state.active_conv_id
-        else:
-            payload["capture_ok"] = True   # note-shaped text may become a todo
+        self._question = msg
+        self._tools: list[str] = []
+        # Ephemeral by design (#24): the Ask-Lumen bar never persists a chat
+        # thread. It runs standalone and only becomes a real conversation if
+        # the user clicks "open in Chat", which seeds one from this exchange.
+        ctx = self._context() or {}
+        payload = {"message": msg, "context": ctx,
+                   "ephemeral": True, "capture_ok": True}
+        # Tell the daemon which email is open so "label this email" resolves to
+        # a concrete id (#11). Only the id/subject/from — the body already
+        # rides in `context`.
+        if ctx.get("screen") == "mail" and ctx.get("message", {}).get("id"):
+            m = ctx["message"]
+            payload["open_email"] = {"id": m["id"], "subject": m.get("subject"),
+                                     "from": m.get("from")}
         self.chat.send("chat", payload)
 
     def _open_panel(self, question: str):
@@ -138,20 +152,45 @@ class AskBar(QFrame):
         clear_layout(self.panel_lay)
 
     def _open_in_chat(self):
-        if self.state.active_conv_id is not None:
-            self.state.open_chat_requested.emit(self.state.active_conv_id)
+        # Materialize this ephemeral exchange into a real thread on demand, then
+        # hand it to the Chat screen (#24). This is the ONLY path that creates a
+        # chat instance from the ask bar.
+        q = getattr(self, "_question", "")
+        if not q or not self._acc:
+            return
+
+        def opened(cid):
+            if cid is not None:
+                self.state.active_conv_id = cid
+                self.state.open_chat_requested.emit(cid)
+        self.state.seed_conversation(q, self._acc,
+                                     getattr(self, "_tools", None), opened)
 
     def _status(self, text: str, color: str):
         if getattr(self, "status", None) is not None:
             self.status.set_static(text, color)
 
+    def _on_cold(self):
+        if self._busy:
+            self._cold = True
+
+    def _on_wake(self):
+        # Only call it a cold start if the daemon confirmed the model was
+        # actually loading (#22); otherwise it's a slow eval on a warm model.
+        if self._cold:
+            self._status("◇ waking model… (cold start)", T.WARN)
+        else:
+            self._status("◇ working…", T.INFO)
+
     # ---- stream handlers --------------------------------------------------
     def _on_conversation(self, cid: int):
-        if self._busy:
-            self.state.active_conv_id = cid
+        # Ephemeral ask-bar turns never emit a conversation id; this stays as a
+        # guard in case a non-ephemeral turn is ever routed here.
+        pass
 
     def _on_tool(self, name: str):
         if self._busy and getattr(self, "tool_label", None) is not None:
+            self._tools.append(name)
             self.tool_label.setText(f"◆ used {name}")
             self.tool_label.show()
 
@@ -174,8 +213,13 @@ class AskBar(QFrame):
             self.answer.setText("(no answer)")
         self.foot.setText(f"answered on-device · {T.MODEL_NAME} · "
                           "0 tokens sent externally")
-        if self.state.active_conv_id is not None:
+        # "open in Chat" is offered whenever there's an answer to carry over —
+        # it no longer depends on a persisted thread (there isn't one, #24).
+        if self._acc:
             self.open_chat.show()
+        # A turn may have run add_todo/complete_todo; pull fresh state so the
+        # Todos screen reflects it without a manual add first (#20).
+        self.state.refresh_todos()
 
     def _on_error(self, msg: str):
         if not self._busy:

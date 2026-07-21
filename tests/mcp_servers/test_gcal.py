@@ -210,6 +210,84 @@ def test_create_recurrence_gets_rrule_prefix_once():
     assert svc.api.kwargs["body"]["recurrence"] == ["RRULE:FREQ=WEEKLY;BYDAY=MO"]
 
 
+def test_recurring_timed_event_carries_iana_timezone(monkeypatch):
+    # Google rejects a recurring timed event without an IANA timeZone on
+    # start/end — that failure is why recurring events "wouldn't connect" (#16).
+    import lumen.mcp_servers.gcal as g
+    monkeypatch.setattr(g, "_local_tz_name", lambda: "America/Denver")
+    svc = WriteService()
+    g._create_event(svc, **make_args(recurrence="RRULE:FREQ=WEEKLY;BYDAY=MO"))
+    body = svc.api.kwargs["body"]
+    assert body["start"]["timeZone"] == "America/Denver"
+    assert body["end"]["timeZone"] == "America/Denver"
+    assert body["start"]["dateTime"] == "2026-07-11T14:00:00-06:00"
+
+
+def test_non_recurring_event_omits_timezone_field(monkeypatch):
+    # The timeZone is only needed for recurrence; a one-off keeps the plain
+    # offset dateTime it always had.
+    import lumen.mcp_servers.gcal as g
+    monkeypatch.setattr(g, "_local_tz_name", lambda: "America/Denver")
+    svc = WriteService()
+    g._create_event(svc, **make_args())
+    assert "timeZone" not in svc.api.kwargs["body"]["start"]
+
+
+def test_recurring_all_day_event_uses_bare_dates(monkeypatch):
+    import lumen.mcp_servers.gcal as g
+    monkeypatch.setattr(g, "_local_tz_name", lambda: "America/Denver")
+    svc = WriteService()
+    g._create_event(svc, **make_args(start="2026-07-20", end="2026-07-20",
+                                     all_day=True,
+                                     recurrence="RRULE:FREQ=WEEKLY;BYDAY=MO"))
+    assert svc.api.kwargs["body"]["start"] == {"date": "2026-07-20"}
+
+
+class PatchCapture:
+    def __init__(self):
+        self.kwargs = None
+
+    def patch(self, **kwargs):
+        self.kwargs = kwargs
+        return FakeExec({"summary": kwargs["body"].get("summary", "e1")})
+
+
+class PatchService:
+    def __init__(self):
+        self.api = PatchCapture()
+
+    def events(self):
+        return self.api
+
+
+def test_update_event_patches_only_passed_fields():
+    from lumen.mcp_servers.gcal import _update_event
+    svc = PatchService()
+    out = _update_event(svc, "e1", "primary", "New title", "", "", False,
+                        "", "", "7")
+    assert "Updated" in out
+    body = svc.api.kwargs["body"]
+    assert body == {"summary": "New title", "colorId": "7"}   # no start/end sent
+    assert svc.api.kwargs["eventId"] == "e1"
+
+
+def test_update_event_sets_times_when_both_given():
+    from lumen.mcp_servers.gcal import _update_event
+    svc = PatchService()
+    _update_event(svc, "e1", "primary", "", "2026-07-22T15:00:00-06:00",
+                  "2026-07-22T15:30:00-06:00", False, "", "", "")
+    body = svc.api.kwargs["body"]
+    assert body["start"] == {"dateTime": "2026-07-22T15:00:00-06:00"}
+
+
+def test_update_event_nothing_to_change_and_not_connected():
+    from lumen.mcp_servers.gcal import _update_event
+    assert "Nothing to change" in _update_event(
+        PatchService(), "e1", "primary", "", "", "", False, "", "", "")
+    assert "isn't connected" in _update_event(
+        None, "e1", "primary", "x", "", "", False, "", "", "")
+
+
 def test_create_not_connected_and_failure_degrade_gracefully():
     assert "isn't connected" in _create_event(None, **make_args())
     assert "Couldn't" in _create_event(WriteService(fail=True), **make_args())

@@ -25,6 +25,7 @@ class ChatScreen(QWidget):
         self.state = state
         self.chat = chat_client
         self._busy = False
+        self._cold = False    # set by the daemon when this turn actually loads the model
         self._acc = ""
         self._messages: list[dict] = []
         self._conversations: list[dict] = []
@@ -94,13 +95,13 @@ class ChatScreen(QWidget):
             self.chat.done.connect(self._on_done)
             self.chat.error.connect(self._on_error)
             self.chat.tool_used.connect(self._on_tool)
+            self.chat.cold_start.connect(self._on_cold)
             self.chat.conversation.connect(self._on_conversation)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
         self._wake.setInterval(WAKE_THRESHOLD_MS)
-        self._wake.timeout.connect(
-            lambda: self._status("◇ waking model… (cold start)", T.WARN))
+        self._wake.timeout.connect(self._on_wake)
 
         self._refresh_list()
         self._render_thread()
@@ -151,6 +152,7 @@ class ChatScreen(QWidget):
         if self.state.active_conv_id == cid:
             self.state.active_conv_id = None
             self._messages = []
+            self.title.setText("New conversation")
             self._render_thread()
 
     def _new(self):
@@ -214,6 +216,7 @@ class ChatScreen(QWidget):
         if not msg or self._busy or self.chat is None:
             return
         self._busy = True
+        self._cold = False
         self._acc = ""
         self.input.clear()
         if not self._messages:
@@ -259,6 +262,21 @@ class ChatScreen(QWidget):
         if self.status is not None:
             self.status.set_static(text, color)
 
+    def _on_cold(self):
+        # The daemon says this turn genuinely loads the model — the wake message
+        # may honestly say "cold start". Arrives well before the wake timer.
+        if self._busy:
+            self._cold = True
+
+    def _on_wake(self):
+        # Still no first token after the threshold. Only call it a cold start if
+        # the daemon told us the model was actually loading (#22); otherwise it's
+        # just a slow prompt-eval on an already-warm model.
+        if self._cold:
+            self._status("◇ waking model… (cold start)", T.WARN)
+        else:
+            self._status("◇ working…", T.INFO)
+
     def _on_conversation(self, cid: int):
         if self._busy:
             self.state.active_conv_id = cid
@@ -285,6 +303,9 @@ class ChatScreen(QWidget):
             self.resp_label.setText("(no answer)")
         self._messages.append({"role": "assistant", "text": self._acc})
         self._refresh_list()
+        # A turn may have run add_todo/complete_todo; pull fresh state so the
+        # Todos screen reflects it without a manual add first (#20).
+        self.state.refresh_todos()
 
     def _on_error(self, msg: str):
         if not self._busy:

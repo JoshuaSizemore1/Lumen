@@ -66,6 +66,26 @@ class CanvasStore:
         return [dict(r) for r in self._conn.execute(
             "SELECT * FROM canvas_courses WHERE active = 1 ORDER BY id DESC")]
 
+    # --- archive switch (#28): user hides a course + stops pulling it, without
+    # deleting anything. `included` is the user's flag; `active` is enrollment.
+    def set_course_included(self, course_id: int, included: bool) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_courses SET included = ? WHERE id = ?",
+                (1 if included else 0, course_id))
+
+    def courses_for_panel(self) -> list[dict]:
+        """Every enrolled course + its archive flag, for the Manage-courses panel.
+        Archived courses stay listed so they can be switched back on."""
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM canvas_courses WHERE active = 1 "
+            "ORDER BY course_code, name")]
+
+    def pull_course_ids(self) -> list[int]:
+        """Courses the poller should fetch: enrolled AND not archived."""
+        return [r["id"] for r in self._conn.execute(
+            "SELECT id FROM canvas_courses WHERE active = 1 AND included = 1")]
+
     def assignments(self, course_id: int | None = None) -> list[dict]:
         if course_id is None:
             rows = self._conn.execute(
@@ -78,19 +98,26 @@ class CanvasStore:
         return [dict(r) for r in rows]
 
     def announcements(self, limit: int = 50) -> list[dict]:
+        # Hide announcements from archived courses (#28). An announcement whose
+        # course row is absent is NOT archived, so it still shows.
         return [dict(r) for r in self._conn.execute(
-            "SELECT * FROM canvas_announcements ORDER BY posted_at DESC, id DESC "
-            "LIMIT ?", (limit,))]
+            "SELECT * FROM canvas_announcements "
+            "WHERE course_id NOT IN "
+            "(SELECT id FROM canvas_courses WHERE included = 0) "
+            "ORDER BY posted_at DESC, id DESC LIMIT ?", (limit,))]
 
     # --- reconciliation reads/writes (Part 4) ---
     def courses_by_id(self) -> dict[int, dict]:
         return {c["id"]: c for c in self.active_courses()}
 
     def active_assignments(self) -> list[dict]:
+        # Enrolled AND not archived (#28) — scopes the summary list, reconcile,
+        # and pending calendar markers all at once.
         return [dict(r) for r in self._conn.execute(
             "SELECT a.* FROM canvas_assignments a "
             "JOIN canvas_courses c ON c.id = a.course_id "
-            "WHERE c.active = 1 ORDER BY a.due_at IS NULL, a.due_at, a.id")]
+            "WHERE c.active = 1 AND c.included = 1 "
+            "ORDER BY a.due_at IS NULL, a.due_at, a.id")]
 
     def link_todo(self, assignment_id: int, todo_id: int, first_seen: str) -> None:
         with self._conn:

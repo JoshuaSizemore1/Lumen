@@ -16,6 +16,7 @@ class DaemonClient(QObject):
     done = pyqtSignal()
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
+    cold_start = pyqtSignal()             # this turn genuinely loads the model (#22)
     conversation = pyqtSignal(int)        # daemon assigned this chat a conversation id
     captured = pyqtSignal(dict)           # quick capture: the todo that was created
     confirm_requested = pyqtSignal(dict)  # payload rows + confirm_id
@@ -102,6 +103,8 @@ class DaemonClient(QObject):
             elif "compose_request" in msg:
                 self.compose_requested.emit(
                     {"compose_id": msg.get("compose_id"), **msg["compose_request"]})
+            elif "cold_start" in msg:
+                self.cold_start.emit()
             elif "tool_used" in msg:
                 self.tool_used.emit(msg["tool_used"])
             elif "conversation_id" in msg:

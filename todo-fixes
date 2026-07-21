@@ -365,28 +365,228 @@ about how Lumen should respond at all.
 
 ## Josh's Finds
 
-1. When I open an email, and it loads the pictures, it resets the email inbox scroll wheel to the top
-2. Loading emails, are laggy, and show partiall things while other stuff is still loading, only show the email after all pictures load / everything is loaded
-3. The email HTML formatting is still off, and HTML emails often look weird
-4. When I tell it to add something "inappropriate" to my todo list it does not do it and says its a joke, please add to the Lumen system prompt a message telling it to not have a content filter on whats inapporopiate / rude things
-5. In the Today tab even if there is nothing on the calendar today, it should still render a view of the calendar for today including a bar showing the time on the calendar
-6. Make the gmail/gogole calendar connection status's in the settings menu, as currently when they were not connected it did not say that, and the connect button is sstill there after it is reconnected
-7. There needs to be some sort of indication that the suggusted labels button is doing work after clicking, such as greying out the inbox and doing a loading circle
-8. When I do the suggust labels button, it sometimes only does it for a couple emails, I want the code to take each email, and ask for a suggusted label as its own prompt rather than trying to do it all at once (if that is how it is currently doing it)
-9. There is no way that I can see to label an email on my own
-10. I want the email UI, to have another column, for "Inboxes" aka each label, sent, standard aka all unlabeld mail, this column should be able to be closed / hidden to the left to give emails more space
-11. I asked lumen in the "Ask Lumen" bar to label the current email I had open as a certain label, and it said it can't do that, I think there is no set up tool for lumen to start a label adding, or the main chat has no vision of it
-12. No way to set events tags (maybe during creation, but for sure cannot change after), there is no way to edit an event manually after added
-13. After deleting a chat in the chat menu refresh the chat title at the top of the scrren, if there are no more chats refresh it to nothing
-14. Improve the formatting of responses from lumen in chats, to minimise emoji use, and not use random Stars and symbols
-15. Clicking the open memory.md button in the settings for the "What Lumen has learned" does nothing, instead it should open it in the file viewer in Lumen
-16. When trying to create a reaccuring event in the calendar it does not connect to google calendar correctly
-17. Make the events look better in the calendar, using better colours, and making sure no text is ever cut off, even if the event takes up a small amount of time thus has a small rectangle
-18. I want to be able to swipe left and right on the track pad to undo / redo steps on pages such as undoing clicking on a specific day of the week in the calendar to go back to the week view
-19. When I asked lumen in the "Ask Lumen" bar to add something without clarifying that I was talking about the todo list, it tried to create a calendar event, however it should be given context to realise I was talking about the todo list not the calendar
-20. After adding to the todo list, and using the add_todo tool, there is nothing on my todo list in the Lumen UI, it only appeared after I manually added my own event, after each prompt to lumen it should refresh the status of the page so that new information loads
+1. When I open an email, and it loads the pictures, it resets the email inbox scroll wheel to the top — ✔ fixed
+    - **Root cause:** every `mails_changed` (select, body/image load) rebuilt the
+      whole list, resetting the QScrollArea to the top. **Done:** the list scroll
+      position is preserved across rebuilds that don't change which mails are
+      listed; a real membership change (scope switch/search) still goes to top.
+      `MailScreen.rebuild` in ui_v3.
+2. Loading emails, are laggy, and show partiall things while other stuff is still loading, only show the email after all pictures load / everything is loaded — ✔ fixed
+    - **Done:** the reading pane shows a "Loading message…" placeholder while the
+      HTML body fetch or the remote-image inline is in flight, then renders once,
+      complete — no more text-then-images reflow. `MailScreen._body`/`_loading_body`.
+3. The email HTML formatting is still off, and HTML emails often look weird — ✔ improved
+    - **Done:** oversized `<img>` widths are now clamped to the pane width instead
+      of being stripped (which let the image render at full intrinsic size and
+      overflow). `mail_html._constrain_images`. Further fidelity is bounded by
+      QTextBrowser's HTML4/CSS2 subset; a bigger lift would be a QWebEngine
+      reading pane — flagged, not done here (no specific failing sample supplied).
+4. When I tell it to add something "inappropriate" to my todo list it does not do it and says its a joke, please add to the Lumen system prompt a message telling it to not have a content filter on whats inapporopiate / rude things — ✔ fixed
+    - **Done:** the chat/tool-loop system prompt (`router.IDENTITY`) now states
+      that this is the user's own private laptop and data, and that when they ask
+      Lumen to record a todo/note/draft in their own words it must capture it
+      verbatim — no refusing, sanitising, moralising, or calling it a joke, even
+      if the wording is crude. Asserted in `tests/daemon/test_router.py`
+      (`test_identity_carries_formatting_and_no_censor_guardrails`).
+5. In the Today tab even if there is nothing on the calendar today, it should still render a view of the calendar for today including a bar showing the time on the calendar — ✔ fixed
+    - **Done:** the Today schedule column always draws the day grid (hour rows +
+      current-time bar) even with zero events, with a small "Nothing scheduled"
+      note beneath, instead of a bare placeholder. `TodayScreen._cal_col`.
+6. Make the gmail/gogole calendar connection status's in the settings menu, as currently when they were not connected it did not say that, and the connect button is sstill there after it is reconnected — ✔ fixed
+    - **Status genuinely checked (point 2):** verified the whole chain —
+      `settings_snapshot.build_settings_snapshot` calls
+      `google_auth.connected(cfg.google, scopes)`, which reads the token file and
+      confirms a refresh_token + that the granted scopes cover Gmail-read /
+      Calendar-read. `settings.get` recomputes it on each call, and the Settings
+      screen re-fetches on every `showEvent`, so the status is live, not cached.
+      (It intentionally does no network call, so a server-side-revoked token would
+      still read "connected" until first use — a deliberate purity tradeoff.)
+    - **Clearer layout (point 1):** replaced the generic key/value row (which
+      stretched an empty "—" value and stranded a lonely status chip + button at
+      the far right) with a purpose-built `_account_row`: the name, then a
+      coloured dot + "Connected"/"Not connected" grouped tight on the left.
+    - **No button when connected (point 3):** the Connect button now renders only
+      for a disconnected account; a connected one has nothing to press. Gmail and
+      Calendar share one Google login, so a single Connect (on the down account)
+      covers both. Screenshot- and regression-tested
+      (`tests/ui/test_settings_screen_v3.py`, updated `test_settings_reconnect.py`).
+7. There needs to be some sort of indication that the suggusted labels button is doing work after clicking, such as greying out the inbox and doing a loading circle — ✔ fixed
+    - **Done:** clicking "✦ suggest labels" now dims the mail screen behind a busy
+      overlay with an indeterminate progress bar ("Classifying inbox mail…") until
+      the daemon returns. `MailScreen._suggest` + `_BusyOverlay`.
+8. When I do the suggust labels button, it sometimes only does it for a couple emails, I want the code to take each email, and ask for a suggusted label as its own prompt rather than trying to do it all at once (if that is how it is currently doing it) — ✔ fixed
+    - **Verified + Done:** the daemon was ALREADY one model prompt per email (a
+      loop in `mail.suggest_labels`). "Only a couple" was the SUGGEST_LIMIT cap of
+      15 plus the strong-fit floor; raised the cap to 40. With the new busy
+      overlay (#7) the longer pass is visible rather than mysterious.
+9. There is no way that I can see to label an email on my own — ✔ fixed
+    - **Done:** the reading pane now shows a "＋ Label" picker (existing labels or
+      "New label…") and each applied label is a removable "✕" chip. New daemon
+      `emails.remove_label` route + `email_menu.remove_label`; state.apply_label /
+      remove_label. `MailScreen._label_menu`.
+10. I want the email UI, to have another column, for "Inboxes" aka each label, sent, standard aka all unlabeld mail, this column should be able to be closed / hidden to the left to give emails more space — ✔ fixed
+    - **Done:** a collapsible mailbox nav column on the left lists Inbox (=
+      standard/unlabeled, since labeling moves mail out of the inbox), Unread,
+      Sent, then each Gmail label. A chevron collapses it; a chevron in the list
+      header reopens it. Scope chips moved out of the header into the nav.
+      `MailScreen._folder_nav`/`_build_nav`/`_set_nav`.
+11. I asked lumen in the "Ask Lumen" bar to label the current email I had open as a certain label, and it said it can't do that, I think there is no set up tool for lumen to start a label adding, or the main chat has no vision of it — ✔ fixed
+    - **Root cause:** two gaps — no label tool for the model, and the ask-bar's
+      open-email context never reached the daemon (only cwd/open_file did).
+    - **Done:** new in-process `label_email` tool (async, writes via GmailSync);
+      a MAIL_LABEL_HINT route attaches it and injects an open-email context line
+      naming the message's id, so "label this email as X" resolves. The ask bar
+      now forwards `open_email` {id, subject, from}. The tool is a write, so it is
+      NOT on the general mail ride-along — only the labeling route offers it.
+12. No way to set events tags (maybe during creation, but for sure cannot change after), there is no way to edit an event manually after added — ✔ fixed
+    - **Done:** an "✎ Edit" affordance on each day-agenda event opens an edit
+      dialog (title / start / end / colour = Google's 11-colour palette as the
+      "tag"). New gated `calendar.update` route + `_gated_update`, MCP
+      `update_event` (patch; only passed fields change), `state.update_event`.
+      `EventEditDialog` in ui_v3 calendar.
+13. After deleting a chat in the chat menu refresh the chat title at the top of the scrren, if there are no more chats refresh it to nothing — ✔ fixed
+    - **Root cause:** `ChatScreen._delete` (ui_v3) cleared the thread and
+      `active_conv_id` when the open chat was deleted but never reset the header
+      `self.title`, so it kept showing the deleted chat's name (and the placeholder
+      never returned when the last chat went away).
+    - **Done:** deleting the active chat now resets the title to "New conversation"
+      (the same placeholder `_new` uses); deleting a non-open chat leaves the title
+      alone. Regression-tested in `tests/ui/test_chat_screen_v3.py`.
+14. Improve the formatting of responses from lumen in chats, to minimise emoji use, and not use random Stars and symbols — ✔ fixed
+    - **Done:** `router.IDENTITY` now instructs plain prose — no emoji, and no
+      scattering stars/asterisks/other symbols except where they carry real
+      meaning (a Markdown list, a file path). Asserted in
+      `tests/daemon/test_router.py`. (Prompt-level steering; behaviour depends on
+      the local model honouring it, but the instruction the 4B follows is now
+      explicit where before it was silent.)
+15. Clicking the open memory.md button in the settings for the "What Lumen has learned" does nothing, instead it should open it in the file viewer in Lumen — ✔ fixed
+    - **Root cause:** ui_v3's `state.open_memory_file` shelled out to
+      `QDesktopServices.openUrl` for the `.md` path, which silently no-ops on
+      Josh's Linux/Wayland box (no registered .md handler) — hence "nothing".
+    - **Done:** ui_v3 `AppState.open_memory_file` now emits a new
+      `open_file_requested` signal instead; `MainWindow._open_file` switches to
+      the Files screen and calls the new `FilesScreen.open_path`, which opens the
+      file in Lumen's own viewer and lands in its directory (so Close returns
+      there). ui_v2's external-editor behavior is untouched (archived shell).
+      Regression-tested in `tests/ui/test_files_screen_v3.py`.
+16. When trying to create a reaccuring event in the calendar it does not connect to google calendar correctly — ✔ fixed
+    - **Root cause:** Google Calendar REQUIRES an IANA `timeZone` on a recurring
+      event's start/end — a UTC offset in the dateTime is not enough — so the
+      insert failed outright (one-off events, which don't need it, worked). **Done:**
+      the MCP `create_event` now sets start/end `timeZone` from `/etc/localtime`
+      for recurring timed events (`_local_tz_name`). NOTE: not repro-tested against
+      the live Google account (needs Josh) — this is the documented cause and the
+      fix is unit-tested + harmless to one-offs.
+17. Make the events look better in the calendar, using better colours, and making sure no text is ever cut off, even if the event takes up a small amount of time thus has a small rectangle — ✔ fixed
+    - **Done:** `EventBlock` hides its second (meta) line on a short block so the
+      title is never sliced mid-glyph, carries a tooltip with the full title +
+      time (nothing lost even in a tiny rectangle), and the grid's min block
+      height was raised so a title line always fits.
+18. I want to be able to swipe left and right on the track pad to undo / redo steps on pages such as undoing clicking on a specific day of the week in the calendar to go back to the week view — ✔ reworked app-wide (2026-07-21)
+    - **Superseded** the calendar-only, fire-mid-swipe first pass. Now an
+      application-wide browser-style gesture: a ~40px circle with a '‹'/'›'
+      arrow drags in from the edge as you swipe (arrow points opposite the
+      swipe) and navigation commits only on **release** past a threshold —
+      release early and it eases out with no change. At the history edge the
+      circle dims and rubber-bands ("can't go").
+    - **Unified history:** one `NavController` records every location in visit
+      order — section switches (Mail→Calendar) AND in-page steps (calendar
+      day→week/date). Back walks it in reverse, one step per swipe; forward
+      re-walks; a fresh nav after going back drops the redo tail.
+    - **Pieces:** `nav_history.py` (pure model, unit-tested), `swipe_nav.py`
+      (`SwipeGesture` core + `SwipeNavigator` wheel-event filter, phases with a
+      ~120ms inactivity-timer fallback for NoScrollPhase touchpads),
+      `swipe_indicator.py` (the painted overlay). Calendar's private
+      swipe/history was removed; it now exposes `nav_token()`/`nav_restore()`
+      and emits `nav_location_changed`. Only Calendar has in-page history for
+      now (Files-folder history is an easy later add).
+    - **Still owed (Josh only):** real two-finger trackpad on Wayland — phase
+      delivery, direction, and the release-commit feel. Headless-tested via the
+      gesture state machine + synthetic events; the indicator renders in-app.
+19. When I asked lumen in the "Ask Lumen" bar to add something without clarifying that I was talking about the todo list, it tried to create a calendar event, however it should be given context to realise I was talking about the todo list not the calendar — ✔ reworked adaptive (2026-07-21)
+    - **Superseded** the always-default-to-todos first pass. A bare "add X" (no
+      time, no explicit "to my todos/calendar") is now decided by the page the
+      Ask-Lumen bar is on: **Calendar page → calendar event; every other page**
+      (Todos, Today, Mail, Files, Books, Canvas) and the launcher/Chat (no
+      surface) **→ todo**. Explicit words still override the page: "…to my
+      calendar" / "…to my todos" / "…at 3pm" route as stated everywhere.
+    - **Done:** the ask bar already sends `context.screen`; the daemon plumbs it
+      into `_chat` as `surface`, and one branch routes a calendar-surface
+      ambiguous add to the event path (`TODO_TASK_HINT`/`FILE_TASK_HINT` still
+      exclude explicit todo/file adds). Regression-tested in `test_router.py`.
+20. After adding to the todo list, and using the add_todo tool, there is nothing on my todo list in the Lumen UI, it only appeared after I manually added my own event, after each prompt to lumen it should refresh the status of the page so that new information loads — ✔ fixed
+    - **Root cause:** neither the Chat screen nor the Ask Lumen bar refreshed
+      app state after a turn completed. A turn that ran `add_todo`/`complete_todo`
+      changed the daemon's SQLite todos, but the UI's cached list (and the Todos
+      screen bound to `todos_changed`) never re-queried until some *other* action
+      (a manual add) happened to call `refresh_todos`.
+    - **Done:** both `_on_done` handlers (ui_v3 `chat.py` + `askbar.py`) now call
+      `state.refresh_todos()` on turn completion, which re-runs `todos.list` and
+      emits `todos_changed`, so the Todos screen updates immediately after the
+      prompt. Regression-tested in `tests/ui/test_chat_screen_v3.py`.
 21. I want be able to click on a todo, and a card popup appears with a more indepth explination of the todo, including a description, and all its tags
-22. Whenever I give a prompt to lumen it says something along the lines of "cold start", verify if it is cold starting every single time I give it a new prompt, and if it is fix that, and if not remove the confusing message so it only says cold start if it is truely cold starting
+22. Whenever I give a prompt to lumen it says something along the lines of "cold start", verify if it is cold starting every single time I give it a new prompt, and if it is fix that, and if not remove the confusing message so it only says cold start if it is truely cold starting — ✔ fixed
+    - **Verified:** it was NOT cold-starting every time. The message came from a
+      blind 1.5s `QTimer` (`WAKE_THRESHOLD_MS`) in each chat surface that fired
+      whenever the first token took >1.5s — which on the iGPU-only box is
+      essentially every prompt (prompt-eval dominates), warm or cold. It had no
+      connection to whether Ollama actually loaded the model.
+    - **Done:** the daemon now checks residency via Ollama `GET /api/ps`
+      (`OllamaClient.is_loaded`) at the start of each chat turn and emits
+      `{"cold_start": true}` **only** when the model isn't loaded. The UI's wake
+      timer says "◇ waking model… (cold start)" only on that signal; on a warm
+      model it says "◇ working…" instead. Live-verified against the real daemon
+      + Ollama: cold turn → cold_start emitted; immediate warm turn → not
+      emitted; after unload → emitted again.
 23. Lumen says it cannot add tags to todo list items, verify this, and then add a way to edit already made todos, thus a way to add / remove tags, and give Lumen a tool to do all this
 24. For any chat done in the "Ask Lumen" bar do not automatically create a chat instance in the "Chat" section of the application, only create a chat if the user clicks the "open chat" button
-25. There is no button to go back a directoy in the file manager
+25. There is no button to go back a directoy in the file manager — ✔ fixed
+    - **Done:** the ui_v3 Files screen now has a "↑ Up" button at the left of the
+      breadcrumb bar that steps up one level (`self.path.parent`), disabled at the
+      filesystem root and hidden while editing a file (Close is the way out
+      there). Breadcrumb-ancestor clicks still work as before. Screenshot- and
+      unit-tested.
+26. Lumen crashes when I ask it to look through emails for a persons address, and then send them an email — ✔ fixed
+    - **Root cause:** the daemon's find-then-send compose_request sends `to` as a
+      LIST of resolved addresses; ui_v3's ComposeOverlay.open passed it straight to
+      QLineEdit.setText (str-only) → TypeError → crash the moment an address was
+      found. Its fields() also returned `to` as a bare string, which the daemon's
+      _send_email then iterates character-by-character.
+    - **Done:** the overlay normalizes `to` (list or string) for display and
+      returns an address LIST from fields(), plus carries reply_to. Regression-
+      tested in `tests/ui/test_compose_overlay_v3.py`.
+27. The whole canvas UI needs an actual design — ✔ redesigned
+    - **Done:** adaptive header (connected → just Disconnect + status; disconnected
+      → a focused Connect CTA + remember toggle, no wall of buttons); a welcome
+      "hero" card in the disconnected empty state instead of two bare empty boxes;
+      assignments sorted soonest-first with urgency-coloured due chips (overdue =
+      red, ≤3 days = amber) and per-course colour chips; announcements share the
+      course colouring. Regression-tested in `tests/ui/test_canvas_screen.py`.
+
+28. And idea for the canvas UI, I want a button to press to view the canvas webpage and brows it like a normal website; each assignment should have a button / link in it to click to open it in canvas; I want to be able to turn on and off certain classes / courses so I do not pull information from past classes
+29. The new swipe back/forward navigation should go up and down directories in the file viewer similar to the calendar nav
+30. Look at the rendering for the email with subject "Your receipt from Anthropic, PBC #2727-6826-8411", as it does not render good at all
+31. If I swipe left or right to navigae back/forward pages, if I fully swipe then hold it at the end, it does not wait for me to let go, it will auto go back/forward after a second or so
+32. The auto suggusted email tags, after finishinf clasifying them it makes a little X suggusted button on the top of the inbox that you click to accept the changes, however I want it to instead when done with the work auto pull up a mini inbox popup that lets you look through the emails it suggusted tags for and accept or deny
+33. As emails come in, they should automatically be ran through the lumen AI to determine the tag for it, and be auto added without me confirming, thus I can look at each inbox and see any with unread mail, then look there
+34. Ran into an issue where I asked lumen in the "ask lumen" bottom bar "I want to create a new email tag for fidelity emails", and it responded immediatly with "(no answer)", with the thinking... still playing the animation 
+35. I asked lumen if it could make a new label for emails from fidelity, and it said it can't as it does not have the capabilities to modify email labels or settings directly; check if this is true, and if it is then add a tool so it can
+36. It created a new rule, but the inbox did not create a new section for the new label, and the emails did not show that they now have a new label; this means the inbox, and labels need to be managed dynamically so when lumen craetes new rules, and new labels it can handel it seamlessly (It does appear but only if there are emails with that label)
+37. In the settings tab it says that the connection is managed in the canvas tab for the canvas connectiong, however I want it to show if it is connected or not connected, in the settings like the gmail, and google calendar
+38. Add a button next to each connection in the settings to disable the connection, and another button for deleting the connection
+39. When I asked lumen to find the email address of X and send an email about the event we have tommorow on my calendar, it 1. set an email to a random email address, and 2. made up some random event to talk about in the email body
+40. Stared emails in gmail need to be accessable, and a stared email systme needs to be added so I can star important emails
+41. There is no way to manage / remove email rules manually
+42. If you remove a label from an email it should automatically get the inbox label again and appear in the inbox
+43. Review the way that context about the currently opened page is given to the "ask lumen" bar as it does not seem to help give it context for the file manager page
+
+---
+
+## Josh's Finds — status 2026-07-21
+
+All 19 open items above fixed/addressed (the rest were already ✔). 1130 tests
+pass (+34 new). Two fixes cannot be fully verified without Josh on the real
+account/hardware and are flagged inline: **#16** (recurring-event timezone — the
+documented cause, unit-tested) and **#18** (trackpad swipe on Wayland). **#3**
+(HTML fidelity) got a concrete overflow fix but is bounded by QTextBrowser;
+a QWebEngine reading pane is the bigger lever if specific emails still look wrong.
