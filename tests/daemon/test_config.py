@@ -322,3 +322,27 @@ def test_scheduling_rejects_bad_hours(tmp_path):
     p.write_text('[scheduling]\nday_start = "8am"\n')
     with pytest.raises(SystemExit):
         load_config(p)
+
+
+def test_canvas_defaults_when_section_absent(tmp_path):
+    cfg = load_config(tmp_path / "nope.toml")
+    assert cfg.canvas.enabled is False
+    assert cfg.canvas.poll_minutes == 45
+    assert cfg.canvas.base_url == "https://utah.instructure.com"
+
+
+def test_canvas_section_parsed_and_base_url_trimmed(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[canvas]\nenabled = true\npoll_minutes = 30\n"
+                 "base_url = 'https://utah.instructure.com/'\n")
+    cfg = load_config(p)
+    assert cfg.canvas.enabled is True
+    assert cfg.canvas.poll_minutes == 30
+    assert cfg.canvas.base_url == "https://utah.instructure.com"
+
+
+def test_canvas_poll_floor_rejected(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[canvas]\npoll_minutes = 2\n")
+    with pytest.raises(SystemExit, match="at least 5"):
+        load_config(p)

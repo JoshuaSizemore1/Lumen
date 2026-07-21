@@ -35,3 +35,8 @@ think = false               # reasoning toggle for thinking-capable models — f
 # command = "python"
 # args = ["-m", "lumen.mcp_servers.openlibrary"]
 # tools = ["search_books", "get_book"]
+
+[canvas]
+# enabled = false          # Canvas import (new-features #10); flip true once the UI login (Part 3) exists
+# poll_minutes = 45        # background sync cadence; minimum 5
+# base_url = "https://utah.instructure.com"   # your school's Canvas host

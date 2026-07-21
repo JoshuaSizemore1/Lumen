@@ -116,6 +116,23 @@ class SyncConfig:
 
 
 @dataclass(frozen=True)
+class MailConfig:
+    # Remote images load on open by default (user decision, 2026-07-19). The
+    # cost is that a sender can log the open — time, repeat opens, and the IP
+    # the fetch came from. Set false to go back to the click-to-load bar.
+    load_remote_images: bool = True
+
+
+@dataclass(frozen=True)
+class CanvasConfig:
+    # Canvas import (new-features #10). Read-only session-cookie access; the
+    # password lives in the OS keyring, never here. poll_minutes floored at 5.
+    enabled: bool = False
+    poll_minutes: int = 45
+    base_url: str = "https://utah.instructure.com"
+
+
+@dataclass(frozen=True)
 class MCPServerConfig:
     name: str
     command: str
@@ -151,6 +168,8 @@ class Config:
     notes: "NotesConfig" = field(default_factory=lambda: NotesConfig())
     manabi: "ManabiConfig" = field(default_factory=lambda: ManabiConfig())
     memory: "MemoryConfig" = field(default_factory=lambda: MemoryConfig())
+    mail: "MailConfig" = field(default_factory=lambda: MailConfig())
+    canvas: "CanvasConfig" = field(default_factory=lambda: CanvasConfig())
     memory_path: Path = field(default_factory=default_memory_path)
     procedures_dir: Path = field(default_factory=default_procedures_dir)
 
@@ -289,6 +308,24 @@ def load_config(path: Path | None = None) -> Config:
         if mem_cfg.blob_cap_chars <= 0 or mem_cfg.max_active_procedures <= 0:
             raise SystemExit("lumen: [memory] caps must be positive")
         kwargs["memory"] = mem_cfg
+    mail_raw = data.get("mail")
+    if mail_raw is not None and "load_remote_images" in mail_raw:
+        kwargs["mail"] = MailConfig(
+            load_remote_images=bool(mail_raw["load_remote_images"]))
+    canvas_raw = data.get("canvas")
+    if canvas_raw is not None:
+        c_kwargs = {}
+        if "enabled" in canvas_raw:
+            c_kwargs["enabled"] = bool(canvas_raw["enabled"])
+        if "poll_minutes" in canvas_raw:
+            c_kwargs["poll_minutes"] = int(canvas_raw["poll_minutes"])
+        if "base_url" in canvas_raw:
+            c_kwargs["base_url"] = str(canvas_raw["base_url"]).rstrip("/")
+        canvas_cfg = CanvasConfig(**c_kwargs)
+        if canvas_cfg.poll_minutes < 5:
+            raise SystemExit(
+                "lumen: [canvas] poll_minutes must be at least 5 — no tight polling loops")
+        kwargs["canvas"] = canvas_cfg
     if "memory_path" in storage:
         kwargs["memory_path"] = Path(storage["memory_path"]).expanduser()
     if "procedures_dir" in storage:
