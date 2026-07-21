@@ -81,3 +81,88 @@ class CanvasStore:
         return [dict(r) for r in self._conn.execute(
             "SELECT * FROM canvas_announcements ORDER BY posted_at DESC, id DESC "
             "LIMIT ?", (limit,))]
+
+    # --- reconciliation reads/writes (Part 4) ---
+    def courses_by_id(self) -> dict[int, dict]:
+        return {c["id"]: c for c in self.active_courses()}
+
+    def active_assignments(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT a.* FROM canvas_assignments a "
+            "JOIN canvas_courses c ON c.id = a.course_id "
+            "WHERE c.active = 1 ORDER BY a.due_at IS NULL, a.due_at, a.id")]
+
+    def link_todo(self, assignment_id: int, todo_id: int, first_seen: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET todo_id = ?, first_seen = ? "
+                "WHERE id = ?", (todo_id, first_seen, assignment_id))
+
+    def mark_handled(self, assignment_id: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET handled = 1, todo_id = NULL "
+                "WHERE id = ?", (assignment_id,))
+
+    def set_calendar_marker(self, assignment_id: int, event_id: str | None,
+                            marker_due: str | None) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments "
+                "SET calendar_event_id = ?, marker_due = ? WHERE id = ?",
+                (event_id, marker_due, assignment_id))
+
+    def pending_markers(self, active_ids: list[int] | None = None) -> list[dict]:
+        """Assignments that need a calendar marker created or updated: has a
+        linked todo, has a due date, not submitted, not handled. 'create' when no
+        event yet; 'update' when the stored marker_due no longer matches the
+        current local due date. active_ids scopes to the caller's active set."""
+        from lumen.daemon.connectors.canvas_reconcile import local_day
+        out: list[dict] = []
+        for a in self.active_assignments():
+            if active_ids is not None and a["course_id"] not in active_ids:
+                continue
+            if a["todo_id"] is None or a["handled"] or a["submitted"]:
+                continue
+            due = local_day(a["due_at"])
+            if due is None:
+                continue
+            if a["calendar_event_id"] is None:
+                out.append({**a, "action": "create", "due": due, "event_id": None})
+            elif a["marker_due"] != due:
+                out.append({**a, "action": "update", "due": due,
+                            "event_id": a["calendar_event_id"]})
+        return out
+
+    # --- announcement classification (Part 4/5) ---
+    def unclassified_announcements(self, limit: int) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM canvas_announcements WHERE actionable IS NULL "
+            "ORDER BY posted_at DESC, id DESC LIMIT ?", (limit,))]
+
+    def set_announcement_flag(self, ann_id: int, actionable: int,
+                              suggested_todo: str | None) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_announcements "
+                "SET actionable = ?, suggested_todo = ?, seen = 1 WHERE id = ?",
+                (actionable, suggested_todo, ann_id))
+
+    def mark_announcements_seen(self, ids: list[int]) -> None:
+        if not ids:
+            return
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE canvas_announcements SET seen = 1 WHERE id = ?",
+                [(i,) for i in ids])
+
+    def link_announcement_todo(self, ann_id: int, todo_id: int) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_announcements SET todo_id = ? WHERE id = ?",
+                (todo_id, ann_id))
+
+    def get_announcement(self, ann_id: int) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM canvas_announcements WHERE id = ?", (ann_id,)).fetchone()
+        return dict(row) if row else None

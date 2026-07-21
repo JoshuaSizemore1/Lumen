@@ -81,3 +81,60 @@ def test_deactivate_courses_except_empty_deactivates_all(tmp_path):
     store.upsert_courses([{"id": 1, "name": "A", "course_code": "A"}])
     store.deactivate_courses_except([])
     assert store.active_courses() == []
+
+
+def _seed_reconcile(store):
+    store.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"},
+                          {"id": 9, "name": "OLD", "course_code": "OLD"}])
+    store.deactivate_courses_except([1])   # course 9 concluded
+    store.upsert_assignments([
+        {"id": 10, "course_id": 1, "name": "HW1", "due_at": "2026-09-01T06:59:59Z",
+         "points": 100.0, "html_url": "u", "description": None, "submitted": False},
+        {"id": 99, "course_id": 9, "name": "OLD HW", "due_at": None, "points": None,
+         "html_url": None, "description": None, "submitted": False}])
+
+
+def test_active_assignments_excludes_inactive_courses(tmp_path):
+    s = make_store(tmp_path); _seed_reconcile(s)
+    assert [a["id"] for a in s.active_assignments()] == [10]
+
+
+def test_link_and_mark_handled(tmp_path):
+    s = make_store(tmp_path); _seed_reconcile(s)
+    s.link_todo(10, 55, "2026-07-21T09:00:00")
+    a = next(a for a in s.active_assignments() if a["id"] == 10)
+    assert a["todo_id"] == 55 and a["first_seen"] == "2026-07-21T09:00:00"
+    s.mark_handled(10)
+    a = next(a for a in s.active_assignments() if a["id"] == 10)
+    assert a["handled"] == 1 and a["todo_id"] is None
+
+
+def test_pending_markers_create_then_update(tmp_path):
+    s = make_store(tmp_path); _seed_reconcile(s)
+    s.link_todo(10, 55, "2026-07-21T09:00:00")
+    pend = s.pending_markers([1])
+    assert [p["id"] for p in pend] == [10]
+    assert pend[0]["action"] == "create"
+    s.set_calendar_marker(10, "evt_1", "2026-09-01")
+    assert s.pending_markers([1]) == []
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": "2026-09-05T06:59:59Z", "points": 100.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    pend = s.pending_markers([1])
+    assert pend[0]["id"] == 10 and pend[0]["action"] == "update"
+    assert pend[0]["event_id"] == "evt_1"
+
+
+def test_announcement_classification_roundtrip(tmp_path):
+    s = make_store(tmp_path)
+    s.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])
+    s.upsert_announcements([{"id": 5, "course_id": 1, "title": "Exam moved",
+                             "posted_at": "2026-08-20T00:00:00Z",
+                             "message": "midterm now Friday", "html_url": "a"}])
+    assert [a["id"] for a in s.unclassified_announcements(10)] == [5]
+    s.set_announcement_flag(5, 1, '{"text": "Study", "due": "2026-08-28"}')
+    assert s.unclassified_announcements(10) == []
+    a = s.get_announcement(5)
+    assert a["actionable"] == 1 and a["seen"] == 1
+    s.link_announcement_todo(5, 77)
+    assert s.get_announcement(5)["todo_id"] == 77
