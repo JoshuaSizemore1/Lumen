@@ -36,6 +36,13 @@ think = false               # reasoning toggle for thinking-capable models — f
 # args = ["-m", "lumen.mcp_servers.openlibrary"]
 # tools = ["search_books", "get_book"]
 
+# Read-only Canvas mirror tools (assignments + announcements) for chat/briefing.
+# [[mcp.servers]]
+# name = "canvas"
+# command = "python"
+# args = ["-m", "lumen.mcp_servers.canvas"]
+# tools = ["list_assignments", "get_assignment", "list_announcements"]
+
 [canvas]
 # enabled = true           # Canvas import (new-features #10); flip true, then connect in the Canvas tab
 # poll_minutes = 45        # background sync cadence; minimum 5
