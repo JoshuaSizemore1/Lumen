@@ -3555,7 +3555,10 @@ async def test_canvas_set_session_hands_cookies_to_sync():
                         "canvas.set_session", {"cookies": {"canvas_session": "x"}})
     assert canvas.session == {"canvas_session": "x"}
     assert canvas.connected is True
-    assert out[-1].get("done") is True
+    # Reply must be a *result* (not {"done": True}): the UI client only fires a
+    # request's per-id callback on "result", so a bare done would never refresh
+    # the Canvas tab after login (live bug 2026-07-20).
+    assert out[-1]["result"]["connected"] is True
 
 
 async def test_canvas_status_reports_live_state():
@@ -3571,7 +3574,7 @@ async def test_canvas_disconnect_clears_session():
     out = await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
                         "canvas.disconnect", {})
     assert canvas.cleared is True
-    assert out[-1].get("done") is True
+    assert out[-1]["result"]["connected"] is False
 
 
 async def test_canvas_routes_without_canvas_are_safe():

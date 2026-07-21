@@ -563,6 +563,19 @@ class Router:
         if self._confirm is not None:
             self._confirm.deny_all()
 
+    def _canvas_status(self) -> dict:
+        """Live poller state for the Canvas tab + Settings row. Every canvas.*
+        route answers with this shape as a *result* so the UI's per-id callback
+        fires and the label reflects the daemon's truth."""
+        if self._canvas is None:
+            return {"connected": False, "last_sync": None, "enabled": False}
+        return {
+            "connected": self._canvas.connected,
+            "last_sync": self._canvas.last_sync(),
+            "enabled": (self._config.canvas.enabled
+                        if self._config is not None else False),
+        }
+
     def _warm_prefix(self) -> list[dict]:
         """The always-present prefix (identity + memory blob) plus a trivial
         turn, for `warm()` to prime. Every real request's system message starts
@@ -755,27 +768,22 @@ class Router:
                 yield {"result": build_settings_snapshot(self._config)}
         elif type_ == "canvas.set_session":
             # UI hands the browser session (cookies) to the in-memory poller.
-            # Never a password — the daemon only ever sees cookies.
+            # Never a password — the daemon only ever sees cookies. Reply with
+            # the fresh status as a *result* so the UI's per-id callback fires
+            # and the Canvas tab flips to Connected (a bare {"done": True} was
+            # swallowed by the client's done-signal path — live bug 2026-07-20).
             if self._canvas is None:
                 yield {"error": "canvas unavailable"}
             else:
                 self._canvas.set_session(payload.get("cookies", {}))
-                yield {"done": True}
+                yield {"result": self._canvas_status()}
         elif type_ == "canvas.status":
-            # Live poller state (not config) for the Settings connect row.
-            if self._canvas is None:
-                yield {"result": {"connected": False, "last_sync": None,
-                                  "enabled": False}}
-            else:
-                yield {"result": {
-                    "connected": self._canvas.connected,
-                    "last_sync": self._canvas.last_sync(),
-                    "enabled": (self._config.canvas.enabled
-                                if self._config is not None else False)}}
+            # Live poller state (not config) for the Canvas tab + Settings row.
+            yield {"result": self._canvas_status()}
         elif type_ == "canvas.disconnect":
             if self._canvas is not None:
                 self._canvas.clear_session()
-            yield {"done": True}
+            yield {"result": self._canvas_status()}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}
