@@ -526,7 +526,7 @@ class Router:
                  manabi=None,
                  memory=None, memory_path=None, memory_cap=4000,
                  procedures=None, distill_trigger=None,
-                 config=None, rules=None,
+                 config=None, rules=None, marker_writer=None,
                  max_iterations=4):
         self._llm = llm
         self._todos = todos
@@ -556,6 +556,7 @@ class Router:
         self._distill_trigger = distill_trigger  # callable() scheduling a run
         self._config = config    # loaded Config for the read-only settings.get
         self._rules = rules      # RuleStore — deterministic inbox rules
+        self._marker_writer = marker_writer  # CalendarMarkerWriter (gated) — lazy
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
@@ -575,6 +576,14 @@ class Router:
             "enabled": (self._config.canvas.enabled
                         if self._config is not None else False),
         }
+
+    def _markers(self):
+        """Lazily build the gated calendar-marker writer (real writes) unless a
+        test injected one. Returns None when Calendar config is absent."""
+        if self._marker_writer is None and self._config is not None:
+            from .connectors.gcal import CalendarMarkerWriter
+            self._marker_writer = CalendarMarkerWriter(self._config.google)
+        return self._marker_writer
 
     def _warm_prefix(self) -> list[dict]:
         """The always-present prefix (identity + memory blob) plus a trivial
@@ -693,6 +702,13 @@ class Router:
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
             message = payload.get("message", "")
+            # Tell the UI only when this turn genuinely pays a model load, so it
+            # says "cold start" only then — not on every slow prompt-eval (#22).
+            # Emitted first, before any sub-path touches the model; the UI treats
+            # the absence of this event as "warm". A client that can't report
+            # load state degrades to warm (no false alarm), never an error.
+            if hasattr(self._llm, "is_loaded") and not await self._llm.is_loaded():
+                yield {"cold_start": True}
             # Quick capture (launcher only sets capture_ok): note-shaped text
             # becomes a todo instead of a chat turn — before any conversation
             # is created, so a captured note never litters the history.
@@ -802,6 +818,63 @@ class Router:
             if self._canvas is not None:
                 self._canvas.clear_session()
             yield {"result": self._canvas_status()}
+        elif type_ == "canvas.pending_calendar":
+            # Assignments whose due-date marker the user hasn't confirmed onto
+            # the calendar yet (create), or whose due date drifted (update). Read
+            # only — nothing is written until canvas.push_due_dates is confirmed.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                store = self._canvas.store
+                active = [c["id"] for c in store.active_courses()]
+                courses = store.courses_by_id()
+                markers = []
+                for m in store.pending_markers(active):
+                    c = courses.get(m["course_id"], {})
+                    label = c.get("course_code") or c.get("name") or "Canvas"
+                    markers.append({"id": m["id"], "due": m["due"],
+                                    "action": m["action"],
+                                    "title": f"{label} — {m['name']} due"})
+                yield {"result": {"markers": markers}}
+        elif type_ == "canvas.push_due_dates":
+            # The one Canvas external write: batch-confirm all pending due-date
+            # markers in a single dialog, then create/patch them on the calendar.
+            # Nothing reaches Google without the confirm resolving True.
+            if self._canvas is None or self._confirm is None:
+                yield {"error": "canvas unavailable"}
+                return
+            store = self._canvas.store
+            active = [c["id"] for c in store.active_courses()]
+            courses = store.courses_by_id()
+            pend = store.pending_markers(active)
+            if not pend:
+                yield {"result": {"added": 0, "updated": 0}}
+                return
+            confirm_id = self._confirm.begin()
+            yield {"confirm_request": {
+                "kind": "canvas_due_dates",
+                "summary": f"Add {len(pend)} Canvas due-date(s) to your calendar?",
+                "items": [{"name": p["name"], "due": p["due"]} for p in pend]},
+                "confirm_id": confirm_id}
+            ok = await self._confirm.wait(confirm_id)
+            if not ok:
+                yield {"result": {"added": 0, "updated": 0, "cancelled": True}}
+                return
+            writer = self._markers()
+            added = updated = 0
+            for p in pend:
+                c = courses.get(p["course_id"], {})
+                label = c.get("course_code") or c.get("name") or "Canvas"
+                title = f"{label} — {p['name']} due"
+                if p["action"] == "create":
+                    eid = writer.create_all_day(title, p["due"]) if writer else None
+                    if eid:
+                        store.set_calendar_marker(p["id"], eid, p["due"])
+                        added += 1
+                elif writer and writer.patch_all_day(p["event_id"], p["due"]):
+                    store.set_calendar_marker(p["id"], p["event_id"], p["due"])
+                    updated += 1
+            yield {"result": {"added": added, "updated": updated}}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}

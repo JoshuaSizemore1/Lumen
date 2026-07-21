@@ -14,12 +14,16 @@ def conv_store(tmp_path):
 
 
 class FakeLLM:
-    def __init__(self, chunks=("a", "b"), fail=False):
+    def __init__(self, chunks=("a", "b"), fail=False, loaded=True):
         self._chunks = chunks
         self._fail = fail
+        self._loaded = loaded
         self.unloaded = False
         self.warmed = False
         self.messages = None
+
+    async def is_loaded(self):
+        return self._loaded
 
     async def chat(self, messages):
         self.messages = messages
@@ -141,6 +145,16 @@ async def collect(router, type_, payload):
 async def test_chat_streams_then_done():
     out = await collect(Router(FakeLLM(), FakeStore()), "chat", {"message": "hi"})
     assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_chat_signals_cold_start_only_when_model_not_resident():
+    # #22: the UI must only say "cold start" when the model genuinely loads.
+    cold = await collect(Router(FakeLLM(loaded=False), FakeStore()), "chat",
+                         {"message": "hi"})
+    assert cold[0] == {"cold_start": True}     # emitted first, before any chunk
+    warm = await collect(Router(FakeLLM(loaded=True), FakeStore()), "chat",
+                         {"message": "hi"})
+    assert not any("cold_start" in ev for ev in warm)   # resident → no cold claim
 
 
 async def test_chat_llm_down_yields_error():
@@ -3580,3 +3594,83 @@ async def test_canvas_disconnect_clears_session():
 async def test_canvas_routes_without_canvas_are_safe():
     out = await collect(Router(FakeLLM(), FakeStore()), "canvas.status", {})
     assert out[-1]["result"]["connected"] is False
+
+
+# --- Canvas Parts 4/5 routes ---------------------------------------------
+from lumen.daemon.config import CanvasConfig as _CanvasConfig
+from lumen.daemon.connectors.canvas_store import CanvasStore as _CanvasStore
+from lumen.daemon.connectors.canvas_sync import CanvasSync as _CanvasSync
+from lumen.daemon.connectors.todos import TodoStore as _TodoStore
+
+
+class _FakeMarkerWriter:
+    def __init__(self):
+        self.created = []
+        self.patched = []
+
+    def create_all_day(self, title, day):
+        self.created.append((title, day))
+        return "evt_1"
+
+    def patch_all_day(self, event_id, day):
+        self.patched.append((event_id, day))
+        return True
+
+
+def canvas_router(tmp_path):
+    from lumen.daemon.confirm import ConfirmBroker
+    conn = db.connect(tmp_path / "canvas.db")
+    store = _CanvasStore(conn)
+    todos = _TodoStore(conn)
+    canvas = _CanvasSync(store, _CanvasConfig(enabled=True))
+    broker = ConfirmBroker(timeout=5.0)
+    writer = _FakeMarkerWriter()
+    router = Router(FakeLLM(), todos, canvas=canvas, confirm=broker,
+                    marker_writer=writer)
+    return router, store, todos, broker, writer
+
+
+def _seed_pending(store, todos):
+    store.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])
+    store.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+        "due_at": "2026-09-01T06:59:59Z", "points": 1.0, "html_url": "u",
+        "description": None, "submitted": False}])
+    tid = todos.add_structured("CS3505 — HW1", "2026-09-01", ["CS3505", "canvas"])
+    store.link_todo(10, tid, "2026-07-21T00:00:00")
+
+
+async def test_pending_calendar_lists_markers(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)
+    out = await collect(router, "canvas.pending_calendar", {})
+    markers = out[-1]["result"]["markers"]
+    assert markers[0]["id"] == 10 and markers[0]["action"] == "create"
+    assert "HW1 due" in markers[0]["title"]
+
+
+async def test_push_due_dates_confirm_writes_marker(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)
+    events = []
+    async for ev in router.handle("canvas.push_due_dates", {}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], True)
+    assert any("confirm_request" in e for e in events)
+    assert events[-1]["result"] == {"added": 1, "updated": 0}
+    assert writer.created == [("CS3505 — HW1 due", "2026-09-01")]
+    a = store.active_assignments()[0]
+    assert a["calendar_event_id"] == "evt_1" and a["marker_due"] == "2026-09-01"
+
+
+async def test_push_due_dates_decline_writes_nothing(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)
+    events = []
+    async for ev in router.handle("canvas.push_due_dates", {}):
+        events.append(ev)
+        if "confirm_request" in ev:
+            broker.resolve(ev["confirm_id"], False)
+    assert events[-1]["result"]["cancelled"] is True
+    assert writer.created == []
+    assert store.active_assignments()[0]["calendar_event_id"] is None
