@@ -264,6 +264,15 @@ class AppState(QObject):
             return
         self._data.request("canvas.disconnect", {}, cb or (lambda _r: None))
 
+    # ---- google (re-consent when the token expires) ----
+    def google_reconnect(self, cb) -> None:
+        """Kick off the browser consent flow in the daemon. cb(snapshot) fires
+        with a fresh settings snapshot on success; a failure travels the normal
+        error → status_requested channel, so cb only ever sees success."""
+        if self._data is None:
+            return
+        self._data.request("google.reconnect", {}, cb)
+
     # ---- conversations (chat history) ----
     def list_conversations(self, cb) -> None:
         """cb(rows) with sidebar-shaped [{id, title, updated_at}], newest first."""

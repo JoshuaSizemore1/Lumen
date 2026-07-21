@@ -149,18 +149,58 @@ class SettingsScreen(QWidget):
         accounts = self._snapshot.get("accounts") or {}
         gmail = accounts.get("gmail") or {}
         gcal = accounts.get("google_calendar") or {}
+        gmail_on = bool(gmail.get("connected"))
+        gcal_on = bool(gcal.get("connected"))
+        # The snapshot carries no address/summary yet, so fall back to a neutral
+        # dash when connected rather than "not connected" (which would fight the
+        # green status chip and the Reconnect button on the same row).
         v.addWidget(self._row(
-            "gmail", gmail.get("address") or "not connected",
-            status="connected" if gmail.get("connected") else "offline",
-            status_color=T.OK if gmail.get("connected") else T.TEXT_FAINTER))
+            "gmail", gmail.get("address") or ("—" if gmail_on else "not connected"),
+            status="connected" if gmail_on else "offline",
+            status_color=T.OK if gmail_on else T.TEXT_FAINTER,
+            right=self._reconnect_button(gmail_on)))
         v.addWidget(self._row(
-            "google_calendar", gcal.get("summary") or "not connected",
-            status="connected" if gcal.get("connected") else "offline",
-            status_color=T.OK if gcal.get("connected") else T.TEXT_FAINTER))
+            "google_calendar",
+            gcal.get("summary") or ("—" if gcal_on else "not connected"),
+            status="connected" if gcal_on else "offline",
+            status_color=T.OK if gcal_on else T.TEXT_FAINTER,
+            right=self._reconnect_button(gcal_on)))
         # Canvas login + live status live in the Canvas tab (the web view can't
         # sit inside this config sheet); this row is just a pointer to it.
         v.addWidget(self._row("canvas", "connect & manage in the Canvas tab"))
         v.addSpacing(22)
+
+    def _reconnect_button(self, connected: bool) -> QWidget:
+        """Re-run the Google consent flow (one login covers Gmail + Calendar).
+        The daemon opens the browser; on success it answers with a fresh snapshot
+        and the rows flip to 'connected'. 'Connect' when the token is missing,
+        'Reconnect' when it's present but stale (the common 'they ran out' case)."""
+        b = button("Reconnect" if connected else "Connect", "soft", px=11, height=24)
+        b.clicked.connect(lambda: self._reconnect_google(b))
+        return b
+
+    def _reconnect_google(self, btn) -> None:
+        btn.setEnabled(False)
+        btn.setText("Connecting…")
+        # A failed/abandoned flow travels the error→status channel, not the
+        # reconnect callback, so arm a one-shot rebuild to clear this transient
+        # state; success rebuilds via _on_settings, which also disarms it.
+        def recover(_msg=None):
+            try:
+                self.state.status_requested.disconnect(recover)
+            except TypeError:
+                pass
+            self.rebuild()
+
+        def done(snapshot):
+            try:
+                self.state.status_requested.disconnect(recover)
+            except TypeError:
+                pass
+            self._on_settings(snapshot)
+
+        self.state.status_requested.connect(recover)
+        self.state.google_reconnect(done)
 
     def _mcp_section(self, v):
         v.addWidget(self._section_label("mcp_servers"))

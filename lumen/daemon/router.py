@@ -766,6 +766,24 @@ class Router:
             else:
                 from .settings_snapshot import build_settings_snapshot
                 yield {"result": build_settings_snapshot(self._config)}
+        elif type_ == "google.reconnect":
+            # Settings 'Reconnect' button — re-run the Google consent flow when
+            # the refresh token has expired/been revoked. Blocks on the browser
+            # (and the loopback redirect), so it rides an executor thread to keep
+            # the event loop — and the poller/MCP tasks — responsive. One consent
+            # covers both Gmail and Calendar, so either row's button fixes both.
+            if self._config is None:
+                yield {"error": "settings unavailable"}
+            else:
+                from .connectors import google_auth
+                loop = asyncio.get_running_loop()
+                ok, err = await loop.run_in_executor(
+                    None, google_auth.reconnect, self._config.google)
+                if ok:
+                    from .settings_snapshot import build_settings_snapshot
+                    yield {"result": build_settings_snapshot(self._config)}
+                else:
+                    yield {"error": err}
         elif type_ == "canvas.set_session":
             # UI hands the browser session (cookies) to the in-memory poller.
             # Never a password — the daemon only ever sees cookies. Reply with

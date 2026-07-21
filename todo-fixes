@@ -370,3 +370,23 @@ about how Lumen should respond at all.
 3. The email HTML formatting is still off, and HTML emails often look weird
 4. When I tell it to add something "inappropriate" to my todo list it does not do it and says its a joke, please add to the Lumen system prompt a message telling it to not have a content filter on whats inapporopiate / rude things
 5. In the Today tab even if there is nothing on the calendar today, it should still render a view of the calendar for today including a bar showing the time on the calendar
+6. Make the gmail/gogole calendar connection status's in the settings menu, as currently when they were not connected it did not say that, and the connect button is sstill there after it is reconnected
+7. There needs to be some sort of indication that the suggusted labels button is doing work after clicking, such as greying out the inbox and doing a loading circle
+8. When I do the suggust labels button, it sometimes only does it for a couple emails, I want the code to take each email, and ask for a suggusted label as its own prompt rather than trying to do it all at once (if that is how it is currently doing it)
+9. There is no way that I can see to label an email on my own
+10. I want the email UI, to have another column, for "Inboxes" aka each label, sent, standard aka all unlabeld mail, this column should be able to be closed / hidden to the left to give emails more space
+11. I asked lumen in the "Ask Lumen" bar to label the current email I had open as a certain label, and it said it can't do that, I think there is no set up tool for lumen to start a label adding, or the main chat has no vision of it
+12. No way to set events tags (maybe during creation, but for sure cannot change after), there is no way to edit an event manually after added
+13. After deleting a chat in the chat menu refresh the chat title at the top of the scrren, if there are no more chats refresh it to nothing
+14. Improve the formatting of responses from lumen in chats, to minimise emoji use, and not use random Stars and symbols
+15. Clicking the open memory.md button in the settings for the "What Lumen has learned" does nothing, instead it should open it in the file viewer in Lumen
+16. When trying to create a reaccuring event in the calendar it does not connect to google calendar correctly
+17. Make the events look better in the calendar, using better colours, and making sure no text is ever cut off, even if the event takes up a small amount of time thus has a small rectangle
+18. I want to be able to swipe left and right on the track pad to undo / redo steps on pages such as undoing clicking on a specific day of the week in the calendar to go back to the week view
+19. When I asked lumen in the "Ask Lumen" bar to add something without clarifying that I was talking about the todo list, it tried to create a calendar event, however it should be given context to realise I was talking about the todo list not the calendar
+20. After adding to the todo list, and using the add_todo tool, there is nothing on my todo list in the Lumen UI, it only appeared after I manually added my own event, after each prompt to lumen it should refresh the status of the page so that new information loads
+21. I want be able to click on a todo, and a card popup appears with a more indepth explination of the todo, including a description, and all its tags
+22. Whenever I give a prompt to lumen it says something along the lines of "cold start", verify if it is cold starting every single time I give it a new prompt, and if it is fix that, and if not remove the confusing message so it only says cold start if it is truely cold starting
+23. Lumen says it cannot add tags to todo list items, verify this, and then add a way to edit already made todos, thus a way to add / remove tags, and give Lumen a tool to do all this
+24. For any chat done in the "Ask Lumen" bar do not automatically create a chat instance in the "Chat" section of the application, only create a chat if the user clicks the "open chat" button
+25. There is no button to go back a directoy in the file manager

@@ -54,6 +54,26 @@ def run_consent_flow(google_cfg, scopes=SCOPES):
     return creds
 
 
+def reconnect(google_cfg, scopes=SCOPES) -> tuple[bool, str | None]:
+    """Re-run the browser consent flow for the Settings 'Reconnect' button and
+    save a fresh token. Returns (ok, error): unlike run_consent_flow this never
+    raises — it's driven by a daemon route serving a UI click, so a missing
+    client file or an abandoned browser must come back as a message, not a
+    SystemExit that would take the connection down."""
+    if not Path(google_cfg.client_secret_path).exists():
+        return False, (f"No OAuth client file at {google_cfg.client_secret_path} — "
+                       "see docs/google-oauth-setup.md for the one-time setup")
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(google_cfg.client_secret_path), scopes=list(scopes))
+        creds = flow.run_local_server(port=0)
+        save_token(google_cfg, creds)
+    except Exception as e:  # browser closed, timeout, network — surface, don't crash
+        return False, f"Reconnect failed: {e}"
+    return True, None
+
+
 def main() -> None:
     """`uv run lumen-google-auth` — the one-time (or re-consent) browser flow."""
     from lumen.daemon.config import load_config

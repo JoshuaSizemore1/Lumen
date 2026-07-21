@@ -323,7 +323,9 @@ changed nothing; approve moved it to Trash and the mirror row vanished.
 
 ## 9. Look into a way to send text messages, and see messages?
 
-## 10. THE BIG ONE - be able to grab assignments and other information from my u of u canvas account, then add it to the todo, and calendar
+## 10. THE BIG ONE - be able to grab assignments and other information from my u of u canvas account, then add it to the todo, and calendar *WORKING ON*
+
+## 11. Add a way for it to brows the internet, and pull information from queries, so I can ask it more specific questions like the address of something, etc
 
 ---
 

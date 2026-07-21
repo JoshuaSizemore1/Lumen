@@ -71,6 +71,27 @@ def test_consent_flow_without_client_secret_exits_with_pointer(tmp_path):
         google_auth.run_consent_flow(cfg(tmp_path), READ_SCOPES)
 
 
+def test_reconnect_without_client_secret_returns_error_not_raise(tmp_path):
+    # The Settings 'Reconnect' button must never take the daemon down.
+    ok, err = google_auth.reconnect(cfg(tmp_path))
+    assert ok is False
+    assert "google-oauth-setup" in err
+
+
+def test_reconnect_swallows_flow_failure(tmp_path, monkeypatch):
+    (tmp_path / "cs.json").write_text("{}")  # exists → past the file guard
+
+    class Boom:
+        @staticmethod
+        def from_client_secrets_file(*a, **k):
+            raise RuntimeError("browser closed")
+
+    import google_auth_oauthlib.flow as flow_mod
+    monkeypatch.setattr(flow_mod, "InstalledAppFlow", Boom)
+    ok, err = google_auth.reconnect(cfg(tmp_path))
+    assert ok is False and "browser closed" in err
+
+
 def test_gmail_scopes_staged_into_consent():
     assert "https://www.googleapis.com/auth/gmail.readonly" in google_auth.GMAIL_READ_SCOPES
     assert "https://www.googleapis.com/auth/gmail.modify" in google_auth.GMAIL_WRITE_SCOPES
