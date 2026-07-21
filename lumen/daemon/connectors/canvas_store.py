@@ -21,6 +21,19 @@ class CanvasStore:
                 "name=excluded.name, course_code=excluded.course_code, active=1",
                 courses)
 
+    def deactivate_courses_except(self, keep_ids: list[int]) -> None:
+        """Mark every course NOT in keep_ids inactive, so concluded courses drop
+        out of active_courses() once they leave the live active-enrollment set.
+        Empty keep_ids (e.g. between terms) deactivates all."""
+        with self._conn:
+            if keep_ids:
+                placeholders = ",".join("?" * len(keep_ids))
+                self._conn.execute(
+                    f"UPDATE canvas_courses SET active = 0 "
+                    f"WHERE id NOT IN ({placeholders})", keep_ids)
+            else:
+                self._conn.execute("UPDATE canvas_courses SET active = 0")
+
     def upsert_assignments(self, rows: list[dict]) -> None:
         if not rows:
             return

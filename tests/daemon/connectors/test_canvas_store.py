@@ -63,3 +63,21 @@ def test_announcements_newest_first_and_upsert_preserves_seen(tmp_path):
          "message": "m2b", "html_url": "a2"}])
     edited = [a for a in store.announcements() if a["id"] == 2][0]
     assert edited["title"] == "New (edited)" and edited["seen"] == 1
+
+
+def test_deactivate_courses_except_keeps_only_listed(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert_courses([
+        {"id": 1, "name": "A", "course_code": "A"},
+        {"id": 2, "name": "B", "course_code": "B"},
+        {"id": 3, "name": "C", "course_code": "C"},
+    ])
+    store.deactivate_courses_except([1, 3])
+    assert {r["id"] for r in store.active_courses()} == {1, 3}
+
+
+def test_deactivate_courses_except_empty_deactivates_all(tmp_path):
+    store = make_store(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "A", "course_code": "A"}])
+    store.deactivate_courses_except([])
+    assert store.active_courses() == []
