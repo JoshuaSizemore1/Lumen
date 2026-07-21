@@ -9,6 +9,8 @@ from lumen.daemon import db
 from lumen.daemon.config import load_config
 from lumen.daemon.confirm import ConfirmBroker
 from lumen.daemon.connectors.books import BookStore
+from lumen.daemon.connectors.canvas_store import CanvasStore
+from lumen.daemon.connectors.canvas_sync import CanvasSync
 from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.mail_rules import RuleStore
@@ -43,6 +45,7 @@ async def run() -> None:
     emails = EmailStore(conn)
     rules = RuleStore(conn)
     mail = GmailSync(emails, cfg.google, cfg.sync, rules=rules)
+    canvas = CanvasSync(CanvasStore(conn), cfg.canvas)
     memory_log = MemoryLog(conn)
     procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
     memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,
@@ -74,6 +77,8 @@ async def run() -> None:
     await server.start()
     poll_task = asyncio.create_task(calendar.poll_forever())
     mail_task = asyncio.create_task(mail.poll_forever())
+    canvas_task = (asyncio.create_task(canvas.poll_forever())
+                   if cfg.canvas.enabled else None)
     log.info("listening on %s (model=%s, keep_alive=%s, db=%s)",
              cfg.socket_path, cfg.model, cfg.keep_alive, cfg.db_path)
 
@@ -84,9 +89,12 @@ async def run() -> None:
     await stop.wait()
 
     log.info("shutting down")
-    poll_task.cancel()
-    mail_task.cancel()
-    await asyncio.gather(poll_task, mail_task, return_exceptions=True)
+    bg_tasks = [poll_task, mail_task]
+    if canvas_task is not None:
+        bg_tasks.append(canvas_task)
+    for t in bg_tasks:
+        t.cancel()
+    await asyncio.gather(*bg_tasks, return_exceptions=True)
     await server.stop()
     await memory_worker.aclose()
     await llm.aclose()
