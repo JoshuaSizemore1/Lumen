@@ -5,9 +5,11 @@ description = "Local-first daily assistant"
 requires-python = ">=3.12"
 dependencies = [
     "PyQt6>=6.6",
+    "PyQt6-WebEngine>=6.6",
     "google-api-python-client>=2.198.0",
     "google-auth-oauthlib>=1.4.0",
     "httpx>=0.27",
+    "keyring>=25",
     "mcp>=1.28.1",
     "python-dateutil>=2.9.0.post0",
     "sqlite-vec>=0.1.9",
