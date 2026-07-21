@@ -45,7 +45,8 @@ async def run() -> None:
     emails = EmailStore(conn)
     rules = RuleStore(conn)
     mail = GmailSync(emails, cfg.google, cfg.sync, rules=rules)
-    canvas = CanvasSync(CanvasStore(conn), cfg.canvas)
+    canvas = CanvasSync(CanvasStore(conn), cfg.canvas,
+                        todos=TodoStore(conn), llm=llm)
     memory_log = MemoryLog(conn)
     procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
     memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,

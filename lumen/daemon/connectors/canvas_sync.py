@@ -13,20 +13,29 @@ import logging
 from datetime import datetime
 
 from lumen.daemon.connectors.canvas_client import CanvasClient, CanvasSessionExpired
+from lumen.daemon.connectors.canvas_reconcile import reconcile_todos
 from lumen.daemon.connectors.canvas_store import CanvasStore
+from lumen.daemon.llm.canvas_flag import flag_announcements
 
 log = logging.getLogger("lumen.daemon")
 
 
 class CanvasSync:
-    def __init__(self, store: CanvasStore, canvas_cfg, *, client_factory=None):
+    def __init__(self, store: CanvasStore, canvas_cfg, *,
+                 todos=None, llm=None, client_factory=None):
         self._store = store
         self._cfg = canvas_cfg
+        self._todos = todos
+        self._llm = llm
         self._cookies: dict[str, str] | None = None
         self._session_alive = False
         self._last_sync: str | None = None
         self._client_factory = client_factory or self._build_client
         self._sync_lock = asyncio.Lock()
+
+    @property
+    def store(self) -> CanvasStore:
+        return self._store
 
     # --- session handoff (the IPC route in Part 3 calls these) ---
     def set_session(self, cookies: dict[str, str]) -> None:
@@ -67,6 +76,20 @@ class CanvasSync:
             self._store.upsert_assignments(assignments)
             self._store.upsert_announcements(announcements)
             self._last_sync = datetime.now().isoformat(timespec="seconds")
+            if self._todos is not None:
+                # Ungated: local todos are not an external write. Failures here
+                # keep the fresh mirror — the next sync retries reconciliation.
+                try:
+                    reconcile_todos(self._store, self._todos)
+                except Exception:
+                    log.exception("canvas reconcile failed — mirror kept")
+                if self._llm is not None:
+                    # The one allowed model touch: bounded classification of the
+                    # NEW announcements only (spec). Never fails the sync.
+                    try:
+                        await flag_announcements(self._store, self._llm)
+                    except Exception:
+                        log.exception("canvas announcement flag failed")
             return True
 
     def _fetch_blocking(self):

@@ -106,3 +106,37 @@ async def test_poll_forever_runs_a_sync_then_cancels_cleanly(tmp_path):
         await task
     assert sync.last_sync() is not None
     assert {c["id"] for c in store.active_courses()} == {1}
+
+
+class FlagLLM:
+    async def chat(self, messages):
+        yield '{"actionable": false, "text": "", "due": ""}'
+
+
+async def test_sync_reconciles_assignments_into_todos(tmp_path):
+    from lumen.daemon.connectors.todos import TodoStore
+    conn = db.connect(tmp_path / "c.db")
+    store = CanvasStore(conn)
+    todos = TodoStore(conn)
+    client = FakeClient(
+        courses=[{"id": 1, "name": "CS 3505", "course_code": "CS3505"}],
+        assignments={1: [{"id": 10, "course_id": 1, "name": "HW1",
+                          "due_at": "2026-09-01T06:59:59Z", "points": 100.0,
+                          "html_url": "u", "description": None, "submitted": False}]},
+        announcements={1: [{"id": 5, "course_id": 1, "title": "Welcome",
+                            "posted_at": "2026-08-20T00:00:00Z", "message": "hi",
+                            "html_url": "a"}]})
+    sync = CanvasSync(store, CanvasConfig(enabled=True), todos=todos, llm=FlagLLM(),
+                      client_factory=lambda: client)
+    sync.set_session({"canvas_session": "abc"})
+    assert await sync.sync_once() is True
+    assert [t["text"] for t in todos.list_all()] == ["CS3505 — HW1"]
+    assert store.get_announcement(5)["actionable"] == 0
+    assert sync.store is store
+
+
+async def test_sync_without_todos_only_mirrors(tmp_path):
+    client = FakeClient(courses=[{"id": 1, "name": "A", "course_code": "A"}])
+    store, sync = make(tmp_path, client)
+    assert await sync.sync_once() is True
+    assert {c["id"] for c in store.active_courses()} == {1}
