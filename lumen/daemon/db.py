@@ -131,6 +131,40 @@ CREATE TABLE IF NOT EXISTS memory_log (   -- Phase 9 tier-1 raw interaction log
     detail TEXT NOT NULL,           -- compact JSON: message, route, tools, outcome
     folded INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS canvas_courses (
+    id INTEGER PRIMARY KEY,                 -- Canvas course id
+    name TEXT NOT NULL,
+    course_code TEXT,
+    term TEXT,
+    active INTEGER NOT NULL DEFAULT 1,       -- 1 = in the current active sync set
+    last_synced TEXT                         -- ISO timestamp of last successful pull
+);
+CREATE TABLE IF NOT EXISTS canvas_assignments (
+    id INTEGER PRIMARY KEY,                  -- Canvas assignment id
+    course_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    due_at TEXT,                             -- RFC3339 UTC as given, nullable
+    points REAL,
+    html_url TEXT,
+    description TEXT,                         -- HTML body, nullable
+    submitted INTEGER NOT NULL DEFAULT 0,
+    todo_id INTEGER,                          -- linked local todo (Part 4)
+    calendar_event_id TEXT,                  -- linked calendar marker (Part 4)
+    first_seen TEXT,                         -- ISO ts first observed (Part 4)
+    handled INTEGER NOT NULL DEFAULT 0        -- user deleted the todo -> don't recreate
+);
+CREATE TABLE IF NOT EXISTS canvas_announcements (
+    id INTEGER PRIMARY KEY,                  -- Canvas discussion_topic id
+    course_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    posted_at TEXT,                          -- RFC3339 UTC
+    message TEXT,                             -- HTML body
+    html_url TEXT,
+    seen INTEGER NOT NULL DEFAULT 0,          -- new-since-last-sync marker (Part 4/5)
+    actionable INTEGER,                       -- NULL=unclassified, 0/1 after flag (Part 4)
+    suggested_todo TEXT,                     -- JSON {text, due} suggestion (Part 4)
+    todo_id INTEGER                           -- set if user accepted the offer (Part 4)
+);
 """
 
 
