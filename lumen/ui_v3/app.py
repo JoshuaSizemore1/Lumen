@@ -9,6 +9,7 @@ Launch with: python -m lumen.ui_v3
 import os
 import sys
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from lumen.daemon.config import load_config
@@ -28,6 +29,9 @@ def main() -> None:
     if try_send(SOCKET_NAME, "toggle-launcher" if toggle else "show"):
         return          # a running instance handled it
 
+    # QtWebEngine (the Canvas login tab) needs GL context sharing enabled before
+    # the QApplication exists, or the embedded browser can crash on the iGPU.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     main_mod._apply_app_style(app)

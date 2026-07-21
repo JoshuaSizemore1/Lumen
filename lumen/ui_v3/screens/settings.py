@@ -157,6 +157,9 @@ class SettingsScreen(QWidget):
             "google_calendar", gcal.get("summary") or "not connected",
             status="connected" if gcal.get("connected") else "offline",
             status_color=T.OK if gcal.get("connected") else T.TEXT_FAINTER))
+        # Canvas login + live status live in the Canvas tab (the web view can't
+        # sit inside this config sheet); this row is just a pointer to it.
+        v.addWidget(self._row("canvas", "connect & manage in the Canvas tab"))
         v.addSpacing(22)
 
     def _mcp_section(self, v):

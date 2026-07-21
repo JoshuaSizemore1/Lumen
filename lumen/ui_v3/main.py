@@ -23,6 +23,7 @@ from .styles import app_palette, build_qss
 from .widgets import ClickRow, Dot, hbox, hline, label, qcolor, vbox
 from .screens.books import BooksScreen
 from .screens.calendar import CalendarScreen
+from .screens.canvas import CanvasScreen
 from .screens.chat import ChatScreen
 from .screens.files import FilesScreen
 from .screens.mail import MailScreen
@@ -34,7 +35,7 @@ from .screens.todos import TodosScreen
 NAV = (("today", "Today", "1"), ("calendar", "Calendar", "2"),
        ("mail", "Mail", "3"), ("todos", "Todos", "4"),
        ("books", "Books", "5"), ("chat", "Chat", "6"),
-       ("files", "Files", "7"))
+       ("files", "Files", "7"), ("canvas", "Canvas", "8"))
 SCREENS = tuple(k for k, _, _ in NAV) + ("settings",)
 
 _active_window = None   # keeps the rebuilt window alive across an accent switch
@@ -73,6 +74,7 @@ class LumenWindow(QWidget):
             "books": BooksScreen(self.state),
             "chat": ChatScreen(self.state, chat_client),
             "files": FilesScreen(self.state),
+            "canvas": CanvasScreen(self.state),
             "settings": SettingsScreen(self.state),
         }
         for key in SCREENS:
