@@ -73,3 +73,37 @@ def test_add_with_source_records_it(tmp_path):
     assert rows[-1]["source"] == "llm-extracted"
     rows = store.add("plain one")
     assert rows[-1]["source"] == "manual"
+
+
+def test_add_structured_sets_fields_and_returns_id(tmp_path):
+    store = make_store(tmp_path)
+    tid = store.add_structured("CS 3505 — HW1", "2026-09-01", ["CS3505", "canvas"])
+    assert isinstance(tid, int)
+    row = next(r for r in store.list_all() if r["id"] == tid)
+    assert row["text"] == "CS 3505 — HW1"
+    assert row["due_date"] == "2026-09-01"
+    assert row["source"] == "canvas"
+    assert row["tags"] == ["CS3505", "canvas"]
+
+
+def test_add_structured_accepts_null_due(tmp_path):
+    store = make_store(tmp_path)
+    tid = store.add_structured("no due", None, ["canvas"])
+    row = next(r for r in store.list_all() if r["id"] == tid)
+    assert row["due_date"] is None
+
+
+def test_exists_reflects_deletion(tmp_path):
+    store = make_store(tmp_path)
+    tid = store.add_structured("x", None, [])
+    assert store.exists(tid) is True
+    store.delete(tid)
+    assert store.exists(tid) is False
+
+
+def test_set_due_updates_only_due(tmp_path):
+    store = make_store(tmp_path)
+    tid = store.add_structured("x", "2026-09-01", [])
+    store.set_due(tid, "2026-09-05")
+    row = next(r for r in store.list_all() if r["id"] == tid)
+    assert row["due_date"] == "2026-09-05"
