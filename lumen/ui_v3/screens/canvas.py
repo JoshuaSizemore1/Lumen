@@ -47,12 +47,26 @@ class CanvasScreen(QWidget):
         controls.addStretch(1)
         root.addLayout(controls)
 
+        # --- content shown once connected: assignments + announcements ---
+        # A single batch confirm pushes every un-confirmed due date to the
+        # calendar (gated in the daemon); hidden when there's nothing pending.
+        self._cal_btn = QPushButton("")
+        self._cal_btn.clicked.connect(self._push_due_dates)
+        self._cal_btn.hide()
+        root.addWidget(self._cal_btn)
+
+        self._assign_box = vbox(s=4)
+        root.addLayout(self._assign_box)
+        self._ann_box = vbox(s=6)
+        root.addLayout(self._ann_box)
+
         self._host = QWidget()      # where the lazy web view mounts
         self._host_layout = QVBoxLayout(self._host)
         self._host_layout.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._host, 1)
 
         self._refresh_status()
+        self._refresh_content()
 
     # ---- ask-bar context -------------------------------------------------
     def context(self) -> dict:
@@ -60,9 +74,73 @@ class CanvasScreen(QWidget):
 
     def showEvent(self, ev):
         # Re-read the daemon's truth every time the tab is shown, so a poll that
-        # completed while the tab was hidden surfaces its "last sync" here.
+        # completed while the tab was hidden surfaces its "last sync" + content.
         super().showEvent(ev)
         self._refresh_status()
+        self._refresh_content()
+
+    # ---- assignments + announcements content ----------------------------
+    def _refresh_content(self):
+        self.state.canvas_assignments(self._render_assignments)
+        self.state.canvas_announcements(self._render_announcements)
+        self.state.canvas_pending_calendar(self._render_pending)
+
+    @staticmethod
+    def _clear(box):
+        while box.count():
+            item = box.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+            elif item.layout() is not None:
+                CanvasScreen._clear(item.layout())
+
+    def _render_assignments(self, res):
+        self._clear(self._assign_box)
+        items = (res or {}).get("assignments", [])
+        if not items:
+            self._assign_box.addWidget(
+                label("No assignments synced yet.", 12, T.TEXT_MUTED))
+            return
+        self._assign_box.addWidget(label("Assignments", 15, T.TEXT_PRIMARY, 600))
+        for a in items:
+            code = a.get("course_code") or "Canvas"
+            due = (a.get("due_at") or "")[:10] or "no due date"
+            self._assign_box.addWidget(
+                label(f"{code} — {a['name']}   ·   {due}", 12, T.TEXT_PRIMARY))
+
+    def _render_pending(self, res):
+        n = len((res or {}).get("markers", []))
+        if n:
+            self._cal_btn.setText(f"Add {n} due-date(s) to calendar")
+            self._cal_btn.show()
+        else:
+            self._cal_btn.hide()
+
+    def _render_announcements(self, res):
+        self._clear(self._ann_box)
+        items = (res or {}).get("announcements", [])
+        if not items:
+            return
+        self._ann_box.addWidget(label("Announcements", 15, T.TEXT_PRIMARY, 600))
+        for a in items:
+            code = a.get("course_code") or "Canvas"
+            row = hbox(s=8)
+            row.addWidget(label(f"{code}: {a['title']}", 12, T.TEXT_PRIMARY))
+            if a.get("actionable") and not a.get("todo_id"):
+                btn = QPushButton("Add as todo?")
+                btn.clicked.connect(
+                    lambda _, i=a["id"]: self._add_announcement_todo(i))
+                row.addWidget(btn)
+            row.addStretch(1)
+            self._ann_box.addLayout(row)
+
+    def _add_announcement_todo(self, ann_id: int):
+        self.state.canvas_add_announcement_todo(
+            ann_id, lambda _r: self._refresh_content())
+
+    def _push_due_dates(self):
+        self.state.canvas_push_due_dates(lambda _r: self._refresh_content())
 
     # ---- status ----------------------------------------------------------
     def _refresh_status(self):
