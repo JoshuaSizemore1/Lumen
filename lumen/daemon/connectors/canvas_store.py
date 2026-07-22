@@ -98,25 +98,41 @@ class CanvasStore:
         return [dict(r) for r in rows]
 
     def announcements(self, limit: int = 50) -> list[dict]:
-        # Hide announcements from archived courses (#28). An announcement whose
-        # course row is absent is NOT archived, so it still shows.
+        # Hide announcements from archived courses (#28) and ones the user
+        # dismissed. An announcement whose course row is absent is NOT archived,
+        # so it still shows.
         return [dict(r) for r in self._conn.execute(
             "SELECT * FROM canvas_announcements "
-            "WHERE course_id NOT IN "
+            "WHERE dismissed = 0 AND course_id NOT IN "
             "(SELECT id FROM canvas_courses WHERE included = 0) "
             "ORDER BY posted_at DESC, id DESC LIMIT ?", (limit,))]
+
+    # --- dismiss switch: user hides a single item from the tab, without
+    # deleting anything. Survives sync (UPSERTs never touch `dismissed`).
+    def set_assignment_dismissed(self, assignment_id: int, dismissed: bool) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET dismissed = ? WHERE id = ?",
+                (1 if dismissed else 0, assignment_id))
+
+    def set_announcement_dismissed(self, ann_id: int, dismissed: bool) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_announcements SET dismissed = ? WHERE id = ?",
+                (1 if dismissed else 0, ann_id))
 
     # --- reconciliation reads/writes (Part 4) ---
     def courses_by_id(self) -> dict[int, dict]:
         return {c["id"]: c for c in self.active_courses()}
 
     def active_assignments(self) -> list[dict]:
-        # Enrolled AND not archived (#28) — scopes the summary list, reconcile,
-        # and pending calendar markers all at once.
+        # Enrolled AND not archived (#28) AND not dismissed — scopes the summary
+        # list, reconcile, and pending calendar markers all at once, so a
+        # dismissed item declutters the tab and drops out of the pending count.
         return [dict(r) for r in self._conn.execute(
             "SELECT a.* FROM canvas_assignments a "
             "JOIN canvas_courses c ON c.id = a.course_id "
-            "WHERE c.active = 1 AND c.included = 1 "
+            "WHERE c.active = 1 AND c.included = 1 AND a.dismissed = 0 "
             "ORDER BY a.due_at IS NULL, a.due_at, a.id")]
 
     def link_todo(self, assignment_id: int, todo_id: int, first_seen: str) -> None:

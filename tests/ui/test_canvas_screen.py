@@ -15,6 +15,7 @@ class FakeCanvasState:
         self._courses = list(courses)
         self.added_announcement_todos = []
         self.included_calls = []            # (course_id, included) from the panel
+        self.dismissed = []                 # (kind, id, dismissed) from ✕ / Undo
         self.pushed = 0
 
     def canvas_status(self, cb):
@@ -46,6 +47,16 @@ class FakeCanvasState:
         self.pushed += 1
         if cb:
             cb({"added": len(self._markers), "updated": 0})
+
+    def canvas_dismiss_assignment(self, item_id, dismissed=True, cb=None):
+        self.dismissed.append(("assignment", item_id, dismissed))
+        if cb:
+            cb({"ok": True})
+
+    def canvas_dismiss_announcement(self, ann_id, dismissed=True, cb=None):
+        self.dismissed.append(("announcement", ann_id, dismissed))
+        if cb:
+            cb({"ok": True})
 
 
 def _all_label_text(widget):
@@ -231,6 +242,67 @@ def test_done_returns_from_browser_and_manage_to_content(qtbot):
     screen._stack.setCurrentIndex(screen._BROWSER_IDX)   # simulate browsing
     screen._done_browsing()
     assert screen._stack.currentIndex() == 0
+
+
+def test_dismiss_assignment_button_calls_state_and_offers_undo(qtbot):
+    state = FakeCanvasState(
+        assignments=[{"id": 10, "name": "HW1", "course_code": "CS3505",
+                      "due_at": "2026-09-01T06:59:59Z"}])
+    screen = CanvasScreen(state)
+    qtbot.addWidget(screen)
+    _buttons(screen, "✕")[0].click()
+    assert ("assignment", 10, True) in state.dismissed
+    # An Undo bar appears...
+    assert "dismissed" in _all_label_text(screen)
+    undo = _buttons(screen, "Undo")
+    assert len(undo) == 1
+    undo[0].click()
+    assert ("assignment", 10, False) in state.dismissed
+
+
+def test_dismiss_announcement_button_calls_state(qtbot):
+    state = FakeCanvasState(
+        announcements=[{"id": 5, "title": "Midterm", "course_code": "CS",
+                        "actionable": 0, "todo_id": None}])
+    screen = CanvasScreen(state)
+    qtbot.addWidget(screen)
+    _buttons(screen, "✕")[0].click()
+    assert ("announcement", 5, True) in state.dismissed
+
+
+def test_auto_connect_opens_login_when_armed_and_disconnected(qtbot):
+    screen = CanvasScreen(AppState())          # sample mode
+    qtbot.addWidget(screen)
+    started = []
+    screen._start_login = lambda: started.append(True)   # never spin up Chromium
+    # Not armed → a disconnected status must NOT auto-open the login.
+    screen._apply_status({"connected": False})
+    assert started == []
+    # Armed (as showEvent does) → a disconnected status opens the login once.
+    screen._auto_login_armed = True
+    screen._apply_status({"connected": False})
+    assert started == [True]
+    assert screen._auto_login_armed is False   # disarmed after firing
+    # Connected → never auto-opens.
+    screen._auto_login_armed = True
+    screen._apply_status({"connected": True, "last_sync": None})
+    assert started == [True]
+
+
+def test_browsing_session_refresh_stays_in_browser(qtbot):
+    screen = CanvasScreen(AppState())
+    qtbot.addWidget(screen)
+    # Simulate the user browsing (not a login), then a background session refresh.
+    screen._login_mode = False
+    screen._stack.setCurrentIndex(screen._BROWSER_IDX)
+    screen._on_connected({"connected": True, "last_sync": None})
+    assert screen._stack.currentIndex() == screen._BROWSER_IDX   # not yanked out
+    # A login, by contrast, returns to the content list on hand-off.
+    screen._login_mode = True
+    screen._stack.setCurrentIndex(screen._BROWSER_IDX)
+    screen._on_connected({"connected": True, "last_sync": None})
+    assert screen._stack.currentIndex() == screen._CONTENT_IDX
+    assert screen._login_mode is False
 
 
 def test_connected_header_shows_browse_and_manage(qtbot):

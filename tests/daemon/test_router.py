@@ -4010,6 +4010,41 @@ async def test_canvas_set_course_included_archives_and_hides(tmp_path):
     assert [a["id"] for a in shown[-1]["result"]["assignments"]] == [10]
 
 
+async def test_canvas_dismiss_assignment_hides_then_undo_restores(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)                  # course 1 + assignment 10 + todo
+    out = await collect(router, "canvas.dismiss_assignment",
+                        {"id": 10, "dismissed": True})
+    assert out[-1]["result"] == {"ok": True}
+    hidden = await collect(router, "canvas.assignments", {})
+    assert hidden[-1]["result"]["assignments"] == []
+    # The row + todo link survive; only hidden.
+    assert store.assignments(course_id=1)[0]["todo_id"] is not None
+    # Undo.
+    await collect(router, "canvas.dismiss_assignment", {"id": 10, "dismissed": False})
+    shown = await collect(router, "canvas.assignments", {})
+    assert [a["id"] for a in shown[-1]["result"]["assignments"]] == [10]
+
+
+async def test_canvas_dismiss_announcement_hides_then_undo_restores(tmp_path):
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    store.upsert_announcements([{"id": 5, "course_id": 1, "title": "Exam",
+        "posted_at": "2026-08-20T00:00:00Z", "message": "m", "html_url": "a"}])
+    await collect(router, "canvas.dismiss_announcement", {"id": 5, "dismissed": True})
+    hidden = await collect(router, "canvas.announcements", {})
+    assert hidden[-1]["result"]["announcements"] == []
+    await collect(router, "canvas.dismiss_announcement", {"id": 5, "dismissed": False})
+    shown = await collect(router, "canvas.announcements", {})
+    assert [a["id"] for a in shown[-1]["result"]["announcements"]] == [5]
+
+
+async def test_canvas_dismiss_routes_without_canvas_are_safe():
+    out = await collect(Router(FakeLLM(), FakeStore()),
+                        "canvas.dismiss_assignment", {"id": 1})
+    assert "error" in out[-1]
+
+
 def test_state_canvas_seam_defaults_without_daemon():
     from lumen.ui_v3.state import AppState
     st = AppState()   # sample mode, no daemon (_data is None)

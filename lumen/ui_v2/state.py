@@ -305,6 +305,22 @@ class AppState(QObject):
                            {"course_id": course_id, "included": included},
                            cb or (lambda _r: None))
 
+    def canvas_dismiss_assignment(self, assignment_id: int, dismissed: bool = True,
+                                  cb=None) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.dismiss_assignment",
+                           {"id": assignment_id, "dismissed": dismissed},
+                           cb or (lambda _r: None))
+
+    def canvas_dismiss_announcement(self, ann_id: int, dismissed: bool = True,
+                                    cb=None) -> None:
+        if self._data is None:
+            return
+        self._data.request("canvas.dismiss_announcement",
+                           {"id": ann_id, "dismissed": dismissed},
+                           cb or (lambda _r: None))
+
     # ---- google (re-consent when the token expires) ----
     def google_reconnect(self, cb) -> None:
         """Kick off the browser consent flow in the daemon. cb(snapshot) fires

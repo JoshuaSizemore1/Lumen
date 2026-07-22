@@ -154,7 +154,8 @@ CREATE TABLE IF NOT EXISTS canvas_assignments (
     calendar_event_id TEXT,                  -- linked calendar marker (Part 4)
     first_seen TEXT,                         -- ISO ts first observed (Part 4)
     handled INTEGER NOT NULL DEFAULT 0,       -- user deleted the todo -> don't recreate
-    marker_due TEXT                           -- local date the calendar marker represents (Part 4)
+    marker_due TEXT,                          -- local date the calendar marker represents (Part 4)
+    dismissed INTEGER NOT NULL DEFAULT 0       -- user hid it from the tab; survives sync
 );
 CREATE TABLE IF NOT EXISTS canvas_announcements (
     id INTEGER PRIMARY KEY,                  -- Canvas discussion_topic id
@@ -166,7 +167,8 @@ CREATE TABLE IF NOT EXISTS canvas_announcements (
     seen INTEGER NOT NULL DEFAULT 0,          -- new-since-last-sync marker (Part 4/5)
     actionable INTEGER,                       -- NULL=unclassified, 0/1 after flag (Part 4)
     suggested_todo TEXT,                     -- JSON {text, due} suggestion (Part 4)
-    todo_id INTEGER                           -- set if user accepted the offer (Part 4)
+    todo_id INTEGER,                          -- set if user accepted the offer (Part 4)
+    dismissed INTEGER NOT NULL DEFAULT 0      -- user hid it from the tab; survives sync
 );
 """
 
@@ -192,6 +194,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ca_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_assignments)")}
     if "marker_due" not in ca_cols:
         conn.execute("ALTER TABLE canvas_assignments ADD COLUMN marker_due TEXT")
+    if "dismissed" not in ca_cols:
+        conn.execute(
+            "ALTER TABLE canvas_assignments ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
+    can_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_announcements)")}
+    if "dismissed" not in can_cols:
+        conn.execute(
+            "ALTER TABLE canvas_announcements ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
     cc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_courses)")}
     if "included" not in cc_cols:
         conn.execute(

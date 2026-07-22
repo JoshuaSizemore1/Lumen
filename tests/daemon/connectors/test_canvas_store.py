@@ -180,6 +180,48 @@ def test_archive_hides_announcements_but_absent_course_still_shows(tmp_path):
     assert titles == ["Orphan"]
 
 
+def test_dismiss_assignment_hides_but_keeps_row_and_undo_restores(tmp_path):
+    s = make_store(tmp_path); _seed_reconcile(s)   # course 1 active, assignment 10
+    s.upsert_assignments([{"id": 11, "course_id": 1, "name": "HW2",
+                           "due_at": "2026-09-08T06:59:59Z", "points": 10.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    s.link_todo(10, 55, "2026-07-21T09:00:00")     # a linked todo already exists
+    s.set_assignment_dismissed(10, True)
+    # Dismissed drops out of the tab/reconcile read (declutter + no pending)...
+    assert [a["id"] for a in s.active_assignments()] == [11]
+    # ...but the row and its todo link are untouched.
+    kept = next(a for a in s.assignments(course_id=1) if a["id"] == 10)
+    assert kept["dismissed"] == 1 and kept["todo_id"] == 55
+    # Undo restores it.
+    s.set_assignment_dismissed(10, False)
+    assert [a["id"] for a in s.active_assignments()] == [10, 11]
+
+
+def test_dismiss_survives_resync(tmp_path):
+    s = make_store(tmp_path); _seed_reconcile(s)   # assignment 10 on active course 1
+    s.set_assignment_dismissed(10, True)
+    # A later poll re-upserts the same assignment; the dismissal must persist.
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": "2026-09-05T06:59:59Z", "points": 100.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    assert s.active_assignments() == []
+    assert next(a for a in s.assignments(course_id=1) if a["id"] == 10)["dismissed"] == 1
+
+
+def test_dismiss_announcement_hides_and_undo_restores(tmp_path):
+    s = make_store(tmp_path)
+    s.upsert_courses([{"id": 1, "name": "A", "course_code": "A"}])
+    s.upsert_announcements([
+        {"id": 1, "course_id": 1, "title": "Keep", "posted_at": "2026-05-07T00:00:00Z",
+         "message": "m", "html_url": "a1"},
+        {"id": 2, "course_id": 1, "title": "Hide", "posted_at": "2026-05-01T00:00:00Z",
+         "message": "m", "html_url": "a2"}])
+    s.set_announcement_dismissed(2, True)
+    assert [a["title"] for a in s.announcements()] == ["Keep"]
+    s.set_announcement_dismissed(2, False)
+    assert [a["title"] for a in s.announcements()] == ["Keep", "Hide"]
+
+
 def test_announcement_classification_roundtrip(tmp_path):
     s = make_store(tmp_path)
     s.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])

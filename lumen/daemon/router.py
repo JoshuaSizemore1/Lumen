@@ -1023,6 +1023,31 @@ class Router:
                     self._canvas.store.set_course_included(
                         int(cid), bool(payload.get("included")))
                     yield {"result": self._canvas_status()}
+        elif type_ == "canvas.dismiss_assignment":
+            # Hide / restore a single assignment from the tab (undo sends
+            # dismissed=false). Non-destructive: the flag survives sync and any
+            # linked todo/calendar marker is left alone.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                aid = payload.get("id")
+                if aid is None:
+                    yield {"error": "canvas.dismiss_assignment needs {id, dismissed}"}
+                else:
+                    self._canvas.store.set_assignment_dismissed(
+                        int(aid), bool(payload.get("dismissed", True)))
+                    yield {"result": {"ok": True}}
+        elif type_ == "canvas.dismiss_announcement":
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                aid = payload.get("id")
+                if aid is None:
+                    yield {"error": "canvas.dismiss_announcement needs {id, dismissed}"}
+                else:
+                    self._canvas.store.set_announcement_dismissed(
+                        int(aid), bool(payload.get("dismissed", True)))
+                    yield {"result": {"ok": True}}
         elif type_ == "sleep":
             await self._llm.unload()
             yield {"done": True}

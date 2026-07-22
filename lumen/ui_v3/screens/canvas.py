@@ -12,7 +12,7 @@ saved, lives only in the OS keyring via canvas_creds."""
 import logging
 from datetime import date, datetime
 
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtWidgets import (
     QCheckBox, QFrame, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -102,6 +102,10 @@ class CanvasScreen(QWidget):
         self._cookies: dict[str, str] = {}
         self._last_sent: dict | None = None   # dedup redundant session hand-offs
         self._connected = False               # drives the adaptive header (#27)
+        self._login_mode = False              # True only while the browser is a login
+        self._auto_login_armed = False        # armed on tab show → auto-open login
+        self._last_dismissed: tuple[str, int] | None = None   # (kind, id) for Undo
+        self._undo_timer = None               # QTimer that clears the undo bar
 
         outer = vbox(self, (0, 0, 0, 0), 0)
 
@@ -140,6 +144,10 @@ class CanvasScreen(QWidget):
         # content view (index 0)
         self._inner = QWidget()
         cv = vbox(self._inner, (34, 6, 34, 40), 0)
+        # Undo bar for a just-dismissed item — lives above the lists so a content
+        # refresh (which clears the lists) leaves it standing.
+        self._undo_box = vbox(s=0)
+        cv.addLayout(self._undo_box)
         self._assign_box = vbox(s=0)
         cv.addLayout(self._assign_box)
         cv.addSpacing(26)
@@ -204,6 +212,10 @@ class CanvasScreen(QWidget):
         # Re-read the daemon's truth every time the tab is shown, so a poll that
         # completed while the tab was hidden surfaces its "last sync" + content.
         super().showEvent(ev)
+        # Arm auto-connect: if the status callback comes back disconnected, open
+        # the login for the user (their choice — every visit while disconnected).
+        # Armed only here so a Disconnect click doesn't relaunch the login.
+        self._auto_login_armed = True
         self._refresh_status()
         self._refresh_content()
 
@@ -259,6 +271,7 @@ class CanvasScreen(QWidget):
             text, fg, border = _due_meta(a.get("due_at", ""))
             row.addWidget(Chip(text, fg, border, px=10, radius=3, hpad=7, vpad=2))
             self._add_open_button(row, a.get("html_url"))
+            self._add_dismiss_button(row, "assignment", a["id"], a.get("name", ""))
             pv.addLayout(row)
         self._assign_box.addWidget(panel)
 
@@ -269,6 +282,15 @@ class CanvasScreen(QWidget):
             return
         btn = button("Open ↗", "soft", px=11, height=24)
         btn.clicked.connect(lambda _, u=url: self._open_in_browser(u))
+        row.addWidget(btn)
+
+    def _add_dismiss_button(self, row, kind: str, item_id: int, name: str):
+        """A trailing '✕' that hides one assignment/announcement from the tab,
+        with an Undo bar (gone-but-restorable)."""
+        btn = button("✕", "ghost", px=12, height=24)
+        btn.setToolTip("Dismiss")
+        btn.clicked.connect(
+            lambda _, k=kind, i=item_id, n=name: self._dismiss(k, i, n))
         row.addWidget(btn)
 
     def _connect_hero(self) -> QWidget:
@@ -340,6 +362,7 @@ class CanvasScreen(QWidget):
             elif a.get("todo_id"):
                 row.addWidget(label("✓ added", 11, T.OK, mono=True))
             self._add_open_button(row, a.get("html_url"))
+            self._add_dismiss_button(row, "announcement", a["id"], a.get("title", ""))
             pv.addLayout(row)
         self._ann_box.addWidget(panel)
 
@@ -349,6 +372,57 @@ class CanvasScreen(QWidget):
 
     def _push_due_dates(self):
         self.state.canvas_push_due_dates(lambda _r: self._refresh_content())
+
+    # ---- dismiss / undo --------------------------------------------------
+    def _dismiss(self, kind: str, item_id: int, name: str):
+        """Hide one item (assignment/announcement) from the tab and offer Undo.
+        The daemon flag survives sync; nothing is deleted."""
+        self._last_dismissed = (kind, item_id)
+        self._set_dismissed(kind, item_id, True)
+        self._show_undo_bar(name)
+
+    def _undo_dismiss(self):
+        if self._last_dismissed is None:
+            self._clear_undo_bar()
+            return
+        kind, item_id = self._last_dismissed
+        self._set_dismissed(kind, item_id, False)
+        self._clear_undo_bar()
+
+    def _set_dismissed(self, kind: str, item_id: int, dismissed: bool):
+        cb = lambda _r: self._refresh_content()
+        if kind == "assignment":
+            self.state.canvas_dismiss_assignment(item_id, dismissed, cb)
+        else:
+            self.state.canvas_dismiss_announcement(item_id, dismissed, cb)
+
+    def _show_undo_bar(self, name: str):
+        clear_layout(self._undo_box)
+        f = QFrame()
+        f.setProperty("role", "panel")
+        v = hbox(f, (14, 8, 10, 8), 10)
+        shown = (name or "Item").strip()
+        if len(shown) > 48:
+            shown = shown[:47] + "…"
+        v.addWidget(label(f"“{shown}” dismissed", 12.5, T.TEXT_MUTED), 1)
+        undo = button("Undo", "soft", px=11, height=24)
+        undo.clicked.connect(self._undo_dismiss)
+        v.addWidget(undo)
+        self._undo_box.addWidget(f)
+        self._undo_box.addSpacing(14)
+        if self._undo_timer is not None:
+            self._undo_timer.stop()
+        self._undo_timer = QTimer(self)
+        self._undo_timer.setSingleShot(True)
+        self._undo_timer.timeout.connect(self._clear_undo_bar)
+        self._undo_timer.start(6000)
+
+    def _clear_undo_bar(self):
+        if self._undo_timer is not None:
+            self._undo_timer.stop()
+            self._undo_timer = None
+        self._last_dismissed = None
+        clear_layout(self._undo_box)
 
     # ---- status ----------------------------------------------------------
     def _refresh_status(self):
@@ -373,17 +447,25 @@ class CanvasScreen(QWidget):
 
     def _apply_status(self, st):
         # Shared by canvas.status / set_session / disconnect — all reply with
-        # this same {connected,last_sync,...} shape as a result.
+        # this same {connected,last_sync,...} shape as a result. Updates the pill
+        # + controls only; it deliberately never changes the visible page, so a
+        # background session refresh while browsing can't yank the user out of
+        # the in-app browser (#28). Returning to content after a *login* is
+        # handled by _on_connected, gated on _login_mode.
         connected = isinstance(st, dict) and st.get("connected")
         self._connected = bool(connected)
         if connected:
             last = st.get("last_sync") or "—"
             self._status_pill.set_status(f"last sync {last}", T.OK, T.OK)
-            # A successful hand-off ends the login: drop back to the content.
-            self._stack.setCurrentIndex(0)
         else:
             self._status_pill.set_status("Not connected", T.TEXT_MUTED,
                                          T.TEXT_GHOST)
+            # Auto-open the login when the tab was just shown and we're not
+            # connected — but only from the content page, never over an open
+            # browser/login view.
+            if self._auto_login_armed and self._stack.currentIndex() == self._CONTENT_IDX:
+                self._auto_login_armed = False
+                self._start_login()
         self._sync_controls()
 
     # ---- browser + login flow -------------------------------------------
@@ -395,26 +477,48 @@ class CanvasScreen(QWidget):
             return
         from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
         from PyQt6.QtWebEngineWidgets import QWebEngineView
+
+        class _Page(QWebEnginePage):
+            """Force target=_blank / window.open links to load in this same view
+            instead of a throwaway popup Qt instantly discards (the links that
+            "open for a split second then close" (#28))."""
+            def createWindow(self, _type):
+                return self
+
         # Named profile → persistent on disk: stay logged in across restarts.
         self._profile = QWebEngineProfile("lumen-canvas", self)
         self._profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
         self._profile.cookieStore().cookieAdded.connect(self._on_cookie)
+        self._profile.downloadRequested.connect(self._on_download)
         self._web = QWebEngineView(self)
-        self._web.setPage(QWebEnginePage(self._profile, self._web))
+        self._web.setPage(_Page(self._profile, self._web))
         self._web.loadFinished.connect(self._on_load_finished)
         self._web.urlChanged.connect(self._on_url_changed)
         self._host_layout.addWidget(self._web)
 
-    def _open_in_browser(self, url: str):
+    def _on_download(self, item):
+        """Save a Canvas file download to ~/Downloads instead of silently
+        dropping it (clicking a PDF/file used to do nothing) (#28)."""
+        from pathlib import Path
+        try:
+            item.setDownloadDirectory(str(Path.home() / "Downloads"))
+            item.accept()
+        except Exception:
+            log.exception("canvas download failed")
+
+    def _open_in_browser(self, url: str, login: bool = False):
         """Reveal the in-app browser at `url` (building it on first use). The
-        single entry point for Connect, Browse, and every Open ↗ link (#28)."""
+        single entry point for Connect, Browse, and every Open ↗ link (#28).
+        `login` marks the login flow so a successful session hand-off returns to
+        the content list; browsing stays put."""
+        self._login_mode = login
         self._ensure_web()
         self._web.setUrl(QUrl(url))
         self._stack.setCurrentIndex(self._BROWSER_IDX)
 
     def _start_login(self):
-        self._open_in_browser(_CANVAS_BASE + "/login")
+        self._open_in_browser(_CANVAS_BASE + "/login", login=True)
 
     def _start_browse(self):
         self._open_in_browser(_CANVAS_BASE)
@@ -495,6 +599,11 @@ class CanvasScreen(QWidget):
 
     def _on_connected(self, st):
         self._apply_status(st)
+        # Finishing a *login* returns to the content list; a session refresh that
+        # fired while merely browsing leaves the browser where it is (#28).
+        if self._login_mode and isinstance(st, dict) and st.get("connected"):
+            self._login_mode = False
+            self._stack.setCurrentIndex(self._CONTENT_IDX)
         self._refresh_content()
 
     def _on_load_finished(self, ok: bool):
