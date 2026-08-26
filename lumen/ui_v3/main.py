@@ -20,6 +20,7 @@ from .nav_history import NavController, NavEntry
 from .overlays import ComposeOverlay, ConfirmOverlay, EventOverlay, Toast
 from .rule_dialog import RuleDialog
 from .state import AppState
+from .suggest_review import SuggestReviewOverlay
 from .swipe_indicator import SwipeIndicator
 from .swipe_nav import SwipeNavigator
 from .styles import app_palette, build_qss
@@ -105,6 +106,7 @@ class LumenWindow(QWidget):
         self.compose = ComposeOverlay(self, self.state)
         self.event = EventOverlay(self, self.state)
         self.rules = RuleDialog(self, self.state)
+        self.suggest_review = SuggestReviewOverlay(self, self.state)
         self.toast = Toast(self)
 
         self.state.view_requested.connect(self.switch_to)
@@ -119,6 +121,7 @@ class LumenWindow(QWidget):
         self.state.accent_requested.connect(self._change_accent)
         self.state.font_scale_requested.connect(self._change_font_scale)
         self.state.open_file_requested.connect(self._open_file)
+        self.state.suggest_review_requested.connect(self.suggest_review.open)
         # An in-page navigation (e.g. the calendar changing view/date) records a
         # new location on the shared history, same as a section switch below.
         self.state.nav_location_changed.connect(self._record_location)
@@ -364,7 +367,8 @@ class LumenWindow(QWidget):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        for overlay in (self.confirm, self.compose, self.event, self.rules):
+        for overlay in (self.confirm, self.compose, self.event, self.rules,
+                        self.suggest_review):
             if overlay.isVisible():
                 overlay.setGeometry(self.rect())
         self.toast.reposition()

@@ -88,17 +88,34 @@ class SwipeNavigator(QObject):
         self._within = within
         self._gesture = SwipeGesture(threshold)
         self._active = False
+        # True once this gesture has seen a real Qt scroll phase. When the
+        # platform delivers phases we wait for the "end" (finger lift) to commit
+        # and never arm the idle timer, so holding at the edge no longer
+        # auto-navigates (#31). Stays False on NoScrollPhase touchpads, which
+        # rely on the timer as their only release signal.
+        self._has_phase = False
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(self.IDLE_MS)
         self._idle.timeout.connect(self._idle_timeout)
 
+    # A widget (or any ancestor) carrying this dynamic property owns its own
+    # two-finger scrolling and is never filtered — the embedded Canvas browser
+    # sets it, so a swipe inside a web page scrolls the page instead of
+    # navigating the app out from under it.
+    IGNORE_PROP = "lumen_swipe_ignore"
+
     # ---- Qt plumbing ------------------------------------------------------
     def _in_scope(self, obj) -> bool:
+        if not isinstance(obj, QWidget):
+            return self._within is None
+        w = obj
+        while w is not None:
+            if w.property(self.IGNORE_PROP):
+                return False
+            w = w.parentWidget()
         if self._within is None:
             return True
-        if not isinstance(obj, QWidget):
-            return False
         return obj is self._within or self._within.isAncestorOf(obj)
 
     def eventFilter(self, obj, event):
@@ -117,27 +134,38 @@ class SwipeNavigator(QObject):
         # Phase transitions carry no movement (dx/dy are often zero), so they
         # bypass the horizontal guard — otherwise a zero-delta ScrollEnd would
         # look "vertical" and never commit.
+        # Phase-only events (no movement) are tracked but NEVER consumed: the
+        # widget under the pointer builds its own scroll out of that phase
+        # stream, and QWebEngineView's Chromium drops every following update
+        # when the ScrollBegin goes missing — which is exactly what stopped the
+        # Canvas browser from scrolling on a phase-reporting touchpad.
         if phase == "end":
             if self._active:
                 self._finish()
-                return True
             return False
         if phase == "begin":
             self._begin()
-            return True
+            self._has_phase = True
+            return False
         # Movement (ScrollUpdate or the NoScrollPhase fallback): only act on a
         # horizontal-dominant delta so vertical scrolling is left untouched.
         if abs(dx) <= abs(dy):
             return False
         if not self._active:
             self._begin()
+        if phase is not None:              # ScrollUpdate — platform reports phases
+            self._has_phase = True
         self._gesture.update(dx)
         self._sync_indicator()
-        self._idle.start()                 # release fallback when phases are absent
+        # Only NoScrollPhase touchpads need the inactivity timer as a stand-in
+        # for release; where phases exist we wait for the real "end" (#31).
+        if not self._has_phase:
+            self._idle.start()
         return True
 
     def _begin(self) -> None:
         self._active = True
+        self._has_phase = False
         self._gesture.begin()
 
     def _can(self, side: str | None) -> bool:

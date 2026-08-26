@@ -95,10 +95,26 @@ class CanvasClient:
         sub = a.get("submission") or {}
         submitted = (bool(sub.get("submitted_at"))
                      or sub.get("workflow_state") in ("submitted", "graded", "complete"))
+        # score is present only once graded; None otherwise (drives the graded
+        # vs. submitted chip in the UI).
+        score = sub.get("score") if sub.get("workflow_state") == "graded" else None
+        # submission_types gives BASIC mode a deterministic type hint (a quiz is
+        # a quiz without asking a model); updated_at is Canvas's own mtime, which
+        # lets the AI pass re-classify only what actually changed.
+        types = a.get("submission_types")
+        if isinstance(types, list):
+            types = ",".join(str(t) for t in types)
+        is_quiz = bool(a.get("is_quiz_assignment")
+                       or a.get("quiz_id")
+                       or (types or "").find("quiz") >= 0)
         return {"id": a["id"], "course_id": course_id,
                 "name": a.get("name") or "(untitled)", "due_at": a.get("due_at"),
-                "points": a.get("points_possible"), "html_url": a.get("html_url"),
-                "description": a.get("description"), "submitted": submitted}
+                "points": a.get("points_possible"), "score": score,
+                "html_url": a.get("html_url"),
+                "description": a.get("description"), "submitted": submitted,
+                "updated_at": a.get("updated_at"),
+                "submission_types": types or None,
+                "is_quiz": is_quiz}
 
     def announcements(self, course_id: int) -> list[dict]:
         raw = self._paginate(f"/api/v1/courses/{course_id}/discussion_topics",

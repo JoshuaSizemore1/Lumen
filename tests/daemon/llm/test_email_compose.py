@@ -67,6 +67,22 @@ async def test_propose_email_parses_json_reply():
     assert "JSON" in llm.messages[0]["content"]
 
 
+async def test_propose_email_grounding_context_reaches_model_but_not_recipients():
+    # #39: real calendar grounding is appended to the request so the model
+    # writes from fact, but it must NOT be able to authorize a recipient — only
+    # addresses in the ORIGINAL message survive validation.
+    llm = FakeLLM('{"to": ["cal@x.com"], "cc": [], "subject": "S", '
+                  '"body": "B", "reply_hint": null, "to_hint": null}')
+    draft, err = await propose_email(
+        llm, "email Sam about our meeting",
+        context="Your events: Fri 2026-07-24 15:00 Budget sync (cal@x.com)")
+    assert err is None
+    # the grounding is in the user turn the model saw
+    assert "Budget sync" in llm.messages[1]["content"]
+    # but an address only present in the grounding is not a valid recipient
+    assert draft["to"] == []
+
+
 async def test_propose_email_unparseable_is_honest():
     draft, err = await propose_email(FakeLLM("sure, sending it now!"), "email bob")
     assert draft is None and "draft" in err

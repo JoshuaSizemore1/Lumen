@@ -34,20 +34,58 @@ class CanvasStore:
             else:
                 self._conn.execute("UPDATE canvas_courses SET active = 0")
 
-    def upsert_assignments(self, rows: list[dict]) -> None:
+    # Every synced column, with a default. executemany binds by name, so a
+    # caller (or a fixture) that predates a column would raise without these —
+    # and a widening upsert is exactly the change that quietly breaks a dozen
+    # hand-built test dicts at once.
+    _DEFAULTS = {"score": None, "updated_at": None, "submission_types": None,
+                 "is_quiz": False}
+
+    def upsert_assignments(self, rows: list[dict], stamp: str | None = None) -> None:
+        """Insert or refresh the synced fields. `stamp` marks these rows as seen
+        by this sync, which is how a vanished assignment is later detected — a
+        plain upsert can never notice an absence."""
         if not rows:
             return
+        rows = [{**self._DEFAULTS, **r,
+                 "is_quiz": 1 if r.get("is_quiz") else 0,
+                 "last_seen_sync": stamp} for r in rows]
         with self._conn:
             self._conn.executemany(
                 "INSERT INTO canvas_assignments "
-                "(id, course_id, name, due_at, points, html_url, description, submitted) "
-                "VALUES (:id, :course_id, :name, :due_at, :points, :html_url, "
-                ":description, :submitted) "
+                "(id, course_id, name, due_at, points, score, html_url, description, "
+                "submitted, updated_at, submission_types, is_quiz, last_seen_sync) "
+                "VALUES (:id, :course_id, :name, :due_at, :points, :score, :html_url, "
+                ":description, :submitted, :updated_at, :submission_types, :is_quiz, "
+                ":last_seen_sync) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "name=excluded.name, due_at=excluded.due_at, points=excluded.points, "
+                "score=excluded.score, "
                 "html_url=excluded.html_url, description=excluded.description, "
-                "submitted=excluded.submitted",
+                "submitted=excluded.submitted, updated_at=excluded.updated_at, "
+                "submission_types=excluded.submission_types, is_quiz=excluded.is_quiz, "
+                "last_seen_sync=COALESCE(excluded.last_seen_sync, last_seen_sync), "
+                "missing_syncs=0",
                 rows)
+
+    def mark_missing(self, course_ids: list[int], stamp: str) -> int:
+        """Count a consecutive absence for every assignment in a course we DID
+        successfully fetch but which the payload no longer mentions.
+
+        Two consecutive misses are required before anything is treated as gone
+        (see canvas_events.GONE_STREAK): one flaky response that returns an empty
+        list would otherwise read as "the whole term was deleted" and queue a
+        mass calendar removal."""
+        if not course_ids or not stamp:
+            return 0
+        marks = ",".join("?" * len(course_ids))
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE canvas_assignments SET missing_syncs = missing_syncs + 1 "
+                f"WHERE course_id IN ({marks}) "
+                f"AND (last_seen_sync IS NULL OR last_seen_sync != ?)",
+                [*course_ids, stamp])
+        return cur.rowcount
 
     def upsert_announcements(self, rows: list[dict]) -> None:
         if not rows:
@@ -155,11 +193,82 @@ class CanvasStore:
                 "SET calendar_event_id = ?, marker_due = ? WHERE id = ?",
                 (event_id, marker_due, assignment_id))
 
+    # --- calendar sync reads/writes -------------------------------------
+    def calendar_candidates(self) -> list[dict]:
+        """Every mirrored assignment joined to its course, WITHOUT the
+        active/included/dismissed filter, plus the course label.
+
+        Structural, not incidental: active_assignments() filters out precisely
+        the rows that are the removal cases (archived course, dismissed item), so
+        a diff engine fed from it would see them as absent rather than as
+        "linked to an event that should now go". It cannot be reused here."""
+        return [dict(r) for r in self._conn.execute(
+            "SELECT a.*, c.course_code, c.name AS course_name, "
+            "       COALESCE(c.active, 0) AS course_active, "
+            "       COALESCE(c.included, 1) AS course_included "
+            "FROM canvas_assignments a "
+            "LEFT JOIN canvas_courses c ON c.id = a.course_id "
+            "ORDER BY a.due_at IS NULL, a.due_at, a.id")]
+
+    def set_calendar_event(self, assignment_id: int, event_id: str | None,
+                           kind: str | None, start: str | None,
+                           sig: str | None) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET calendar_event_id = ?, "
+                "event_kind = ?, event_start = ?, event_sig = ? WHERE id = ?",
+                (event_id, kind, start, sig, assignment_id))
+
+    def clear_calendar_event(self, assignment_id: int) -> None:
+        """Forget the link without touching the assignment.
+
+        Declining a removal MUST come through here. Otherwise the diff engine
+        still sees an event linked to an ineligible assignment and re-queues the
+        same removal on every single sync, forever."""
+        self.set_calendar_event(assignment_id, None, None, None, None)
+
+    def linked_events(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM canvas_assignments WHERE calendar_event_id IS NOT NULL")]
+
+    # --- AI enrichment ---------------------------------------------------
+    def unclassified_for_ai(self, limit: int) -> list[dict]:
+        """Not-yet-classified rows worth spending a model call on: eligible-ish
+        (has a due date, not submitted) and unclassified or stale."""
+        return [dict(r) for r in self._conn.execute(
+            "SELECT a.*, c.course_code, c.name AS course_name "
+            "FROM canvas_assignments a "
+            "JOIN canvas_courses c ON c.id = a.course_id "
+            "WHERE a.ai_state = 0 AND a.due_at IS NOT NULL "
+            "AND a.submitted = 0 AND a.dismissed = 0 "
+            "AND c.active = 1 AND c.included = 1 "
+            "ORDER BY a.due_at LIMIT ?", (limit,))]
+
+    def set_ai_fields(self, assignment_id: int, summary: str | None,
+                      ai_type: str | None, state: int = 1) -> None:
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET ai_summary = ?, ai_type = ?, "
+                "ai_state = ? WHERE id = ?",
+                (summary, ai_type, state, assignment_id))
+
+    def reset_ai_state(self) -> None:
+        """Turning the AI switch on re-offers everything for classification."""
+        with self._conn:
+            self._conn.execute("UPDATE canvas_assignments SET ai_state = 0")
+
     def pending_markers(self, active_ids: list[int] | None = None) -> list[dict]:
         """Assignments that need a calendar marker created or updated: has a
         linked todo, has a due date, not submitted, not handled. 'create' when no
         event yet; 'update' when the stored marker_due no longer matches the
-        current local due date. active_ids scopes to the caller's active set."""
+        current local due date. active_ids scopes to the caller's active set.
+
+        Events owned by the Canvas→Calendar sync are skipped outright: both
+        paths share `calendar_event_id`, but only the sync sets `event_kind`,
+        and only the legacy path sets `marker_due`. Without the skip a
+        sync-created timed event reads as an "update" here (NULL marker_due
+        never equals the due date) and "Add to calendar" would patch_all_day it
+        into a flat all-day block behind the sync's back."""
         from lumen.daemon.connectors.canvas_reconcile import local_day
         out: list[dict] = []
         for a in self.active_assignments():
@@ -170,6 +279,8 @@ class CanvasStore:
             due = local_day(a["due_at"])
             if due is None:
                 continue
+            if a["calendar_event_id"] is not None and a.get("event_kind"):
+                continue                    # owned by the calendar sync
             if a["calendar_event_id"] is None:
                 out.append({**a, "action": "create", "due": due, "event_id": None})
             elif a["marker_due"] != due:

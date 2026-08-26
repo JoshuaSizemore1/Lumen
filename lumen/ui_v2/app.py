@@ -13,7 +13,9 @@ from PyQt6.QtWidgets import QApplication, QDialog
 
 from lumen.daemon.config import load_config
 from lumen.ui_v2.daemon_client import DaemonClient
-from lumen.ui_v2.single_instance import SOCKET_NAME, InstanceServer, try_send
+from lumen.ui_v2.single_instance import (
+    SOCKET_NAME, InstanceAlreadyRunning, InstanceServer, try_send,
+)
 
 from . import main as main_mod
 from . import theme as T
@@ -97,7 +99,11 @@ def main() -> None:
             w.raise_()
             w.activateWindow()
 
-    server = InstanceServer(SOCKET_NAME)
+    try:
+        server = InstanceServer(SOCKET_NAME)
+    except InstanceAlreadyRunning:
+        try_send(SOCKET_NAME, "toggle-launcher" if toggle else "show")
+        return          # lost a startup race — never run a second tray icon
     server.message.connect(dispatch)
 
     tray_mod.make_tray(app, on_show=lambda: dispatch("show"),

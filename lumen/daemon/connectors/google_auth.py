@@ -33,6 +33,16 @@ def connected(google_cfg, scopes=READ_SCOPES) -> bool:
     return load_credentials(google_cfg, scopes) is not None
 
 
+def disconnect(google_cfg) -> None:
+    """Remove the stored Google token (#38 Disconnect). Gmail and Calendar share
+    one login, so this drops both; reconnecting re-runs the consent flow. A
+    missing token file is already the disconnected state."""
+    try:
+        Path(google_cfg.token_path).unlink()
+    except FileNotFoundError:
+        pass
+
+
 def save_token(google_cfg, creds) -> None:
     path = Path(google_cfg.token_path)
     path.parent.mkdir(parents=True, exist_ok=True)

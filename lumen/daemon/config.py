@@ -49,6 +49,12 @@ def default_procedures_dir() -> Path:
     return root / "lumen" / "procedures"
 
 
+def default_canvas_dir() -> Path:
+    base = os.environ.get("XDG_DATA_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "lumen" / "canvas"
+
+
 def default_google_dir() -> Path:
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
@@ -128,8 +134,13 @@ class CanvasConfig:
     # Canvas import (new-features #10). Read-only session-cookie access; the
     # password lives in the OS keyring, never here. poll_minutes floored at 5.
     enabled: bool = False
-    poll_minutes: int = 45
+    poll_minutes: int = 20
     base_url: str = "https://utah.instructure.com"
+    # Where the session cookies are cached so a daemon restart doesn't force a
+    # re-login. A 0600 file, same treatment as google token_path — see
+    # connectors/canvas_session.py for why not the keyring.
+    session_path: Path = field(
+        default_factory=lambda: default_canvas_dir() / "session.json")
 
 
 @dataclass(frozen=True)
@@ -321,6 +332,8 @@ def load_config(path: Path | None = None) -> Config:
             c_kwargs["poll_minutes"] = int(canvas_raw["poll_minutes"])
         if "base_url" in canvas_raw:
             c_kwargs["base_url"] = str(canvas_raw["base_url"]).rstrip("/")
+        if "session_path" in canvas_raw:
+            c_kwargs["session_path"] = Path(canvas_raw["session_path"]).expanduser()
         canvas_cfg = CanvasConfig(**c_kwargs)
         if canvas_cfg.poll_minutes < 5:
             raise SystemExit(

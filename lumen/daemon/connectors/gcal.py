@@ -14,6 +14,16 @@ log = logging.getLogger(__name__)
 
 LAST_SYNC_KEY = "calendar_last_sync"
 
+
+def _status(exc) -> int | None:
+    """HTTP status off a googleapiclient HttpError, without importing it."""
+    resp = getattr(exc, "resp", None)
+    status = getattr(resp, "status", None) or getattr(exc, "status_code", None)
+    try:
+        return int(status)
+    except (TypeError, ValueError):
+        return None
+
 COLUMNS = ("id", "calendar_id", "calendar_name", "color", "title", "start_at",
            "end_at", "all_day", "location", "description", "attendees", "status")
 
@@ -78,6 +88,8 @@ class CalendarSync:
         self._google = google_cfg
         self._sync = sync_cfg
         self._service_factory = service_factory or self._build_service
+        # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
+        self.paused = lambda: False
 
     @property
     def connected(self) -> bool:
@@ -177,11 +189,74 @@ class CalendarSync:
         """Daemon background task; cancellation is the shutdown path."""
         interval = self._sync.calendar_poll_minutes * 60
         while True:
-            try:
-                await self.sync_once()
-            except Exception:
-                log.exception("calendar poll iteration failed")
+            await self._poll_iteration()
             await asyncio.sleep(interval)
+
+    async def _poll_iteration(self) -> None:
+        if self.paused():                # runtime Disable switch (#38)
+            return
+        try:
+            await self.sync_once()
+        except Exception:
+            log.exception("calendar poll iteration failed")
+
+
+LUMEN_TAG = "canvas"          # extendedProperties.private.lumen
+
+
+def local_tz_name() -> str | None:
+    """The machine's IANA zone name. Google interprets a bare dateTime against
+    the CALENDAR's default zone, so an event whose offset disagrees with that
+    default silently lands at the wrong hour. Sending the zone explicitly is what
+    makes "15 minutes before the due time" mean it."""
+    import os
+    try:
+        real = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in real:
+            return real.split(marker, 1)[1]
+    except OSError:
+        pass
+    return os.environ.get("TZ") or None
+
+
+def canvas_event_body(title: str, start: str, end: str, *, kind: str = "timed",
+                      description: str = "", color_id: str | None = None,
+                      html_url: str | None = None,
+                      assignment_id: int | None = None,
+                      tz_name: str | None = None) -> dict:
+    """The Google event body for one Canvas due date. A module-level pure builder
+    so body-shape tests need no fake service at all.
+
+    extendedProperties.private is the safety net: it marks an event as Lumen's,
+    which is what guarantees a future cleanup pass can never delete something the
+    user created by hand."""
+    body: dict = {"summary": title}
+    if kind == "all_day":
+        body["start"] = {"date": start}
+        body["end"] = {"date": end}
+    else:
+        tz = tz_name if tz_name is not None else local_tz_name()
+        body["start"] = {"dateTime": start}
+        body["end"] = {"dateTime": end}
+        if tz:
+            body["start"]["timeZone"] = tz
+            body["end"]["timeZone"] = tz
+    if description:
+        body["description"] = description
+    if color_id:
+        body["colorId"] = str(color_id)
+    if html_url:
+        body["source"] = {"title": "Canvas", "url": html_url}
+    # The event IS the reminder — a default popup an hour ahead would fire before
+    # the 15-minute window even opens.
+    body["reminders"] = {"useDefault": False,
+                         "overrides": [{"method": "popup", "minutes": 0}]}
+    private = {"lumen": LUMEN_TAG}
+    if assignment_id is not None:
+        private["assignment_id"] = str(assignment_id)
+    body["extendedProperties"] = {"private": private}
+    return body
 
 
 class CalendarMarkerWriter:
@@ -206,28 +281,58 @@ class CalendarMarkerWriter:
         end_excl = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
         return {"start": {"date": day}, "end": {"date": end_excl}}
 
-    def create_all_day(self, title: str, day: str) -> str | None:
+    # --- generic event writes (Canvas -> Calendar) ---
+    def create_event(self, body: dict) -> str | None:
         service = self._service_factory()
         if service is None:
             return None
-        body = {"summary": title, **self._span(day)}
         try:
             created = service.events().insert(
                 calendarId="primary", body=body, sendUpdates="none").execute()
         except Exception:
-            log.exception("canvas marker insert failed")
+            log.exception("canvas event insert failed")
             return None
         return created.get("id")
 
-    def patch_all_day(self, event_id: str, day: str) -> bool:
+    def patch_event(self, event_id: str, body: dict) -> bool:
+        """False on failure. A 404 here means the user deleted the event by hand;
+        the caller demotes to create rather than retrying forever."""
         service = self._service_factory()
         if service is None:
             return False
         try:
             service.events().patch(
-                calendarId="primary", eventId=event_id, body=self._span(day),
+                calendarId="primary", eventId=event_id, body=body,
                 sendUpdates="none").execute()
-        except Exception:
-            log.exception("canvas marker patch failed")
+        except Exception as exc:
+            if _status(exc) == 404:
+                log.info("canvas event %s is gone — will recreate", event_id)
+            else:
+                log.exception("canvas event patch failed")
             return False
         return True
+
+    def delete_event(self, event_id: str) -> bool:
+        """Already-absent counts as success: 404/410 mean the calendar is in the
+        state we wanted, and treating them as failure wedges the queue on a row
+        that can never be resolved."""
+        service = self._service_factory()
+        if service is None:
+            return False
+        try:
+            service.events().delete(
+                calendarId="primary", eventId=event_id,
+                sendUpdates="none").execute()
+        except Exception as exc:
+            if _status(exc) in (404, 410):
+                return True
+            log.exception("canvas event delete failed")
+            return False
+        return True
+
+    # --- the original all-day markers, now thin delegates ---
+    def create_all_day(self, title: str, day: str) -> str | None:
+        return self.create_event({"summary": title, **self._span(day)})
+
+    def patch_all_day(self, event_id: str, day: str) -> bool:
+        return self.patch_event(event_id, self._span(day))

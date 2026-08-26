@@ -53,3 +53,40 @@ def test_forget_when_empty_is_safe(mem_keyring):
 def test_load_none_when_password_missing(mem_keyring):
     keyring.set_password("lumen-canvas", "unid", "u1")   # uNID only, no password
     assert canvas_creds.load() is None
+
+
+class BrokenKeyring(keyring.backend.KeyringBackend):
+    """Stands in for a locked collection / absent D-Bus session — the failure
+    mode that used to raise out of a Qt slot and look like an autofill miss."""
+    priority = 1
+
+    def set_password(self, service, user, password):
+        raise keyring.errors.KeyringError("locked")
+
+    def get_password(self, service, user):
+        raise keyring.errors.KeyringError("locked")
+
+    def delete_password(self, service, user):
+        raise keyring.errors.KeyringError("locked")
+
+
+@pytest.fixture
+def broken_keyring():
+    prev = keyring.get_keyring()
+    keyring.set_keyring(BrokenKeyring())
+    yield
+    keyring.set_keyring(prev)
+
+
+def test_load_returns_none_when_the_backend_raises(broken_keyring):
+    assert canvas_creds.load() is None
+
+
+def test_save_and_forget_report_failure_without_raising(broken_keyring):
+    assert canvas_creds.save("u1", "p1") is False
+    assert canvas_creds.forget() is False
+
+
+def test_save_reports_success(mem_keyring):
+    assert canvas_creds.save("u1", "p1") is True
+    assert canvas_creds.forget() is True

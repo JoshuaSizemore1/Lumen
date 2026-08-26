@@ -327,7 +327,7 @@ def test_scheduling_rejects_bad_hours(tmp_path):
 def test_canvas_defaults_when_section_absent(tmp_path):
     cfg = load_config(tmp_path / "nope.toml")
     assert cfg.canvas.enabled is False
-    assert cfg.canvas.poll_minutes == 45
+    assert cfg.canvas.poll_minutes == 20
     assert cfg.canvas.base_url == "https://utah.instructure.com"
 
 

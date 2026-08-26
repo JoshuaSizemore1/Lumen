@@ -28,6 +28,10 @@ class AppState(_AppState):
     # The shell records the new location onto the app-wide back/forward history
     # (#18); a plain section switch is caught separately off the stack.
     nav_location_changed = pyqtSignal()
+    # "✦ suggest labels" finished with at least one suggestion — the shell opens
+    # the two-pane review popup over the whole window (#32). Window-level like
+    # the confirm/compose overlays so it can dim the app behind it.
+    suggest_review_requested = pyqtSignal()
 
     def open_memory_file(self) -> None:
         """Open memory.md in Lumen's own Files screen (#15).

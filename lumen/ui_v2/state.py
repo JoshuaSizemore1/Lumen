@@ -163,6 +163,7 @@ class AppState(QObject):
         self.mail_scope = "inbox"      # "inbox" | "unread" | a label name
         self.mail_labels: list[str] = []
         self.mail_suggestions: dict[str, str] = {}
+        self.mail_suggestion_meta: dict[str, dict] = {}   # id -> preview row (#32)
         # Remote images load on open (todo-fixes #18). Mirrors
         # [mail] load_remote_images; refreshed from the daemon on startup so a
         # user who turns it off gets the click-to-load bar back.
@@ -266,6 +267,21 @@ class AppState(QObject):
             return
         self._data.request("canvas.disconnect", {}, cb or (lambda _r: None))
 
+    def set_connection_enabled(self, name: str, enabled: bool, cb=None) -> None:
+        """#38 Disable/Enable a connection (Gmail/Calendar/Canvas)."""
+        if self._data is None:
+            return
+        self._data.request("connections.set_enabled",
+                           {"name": name, "enabled": enabled},
+                           cb or (lambda _r: None))
+
+    def disconnect_connection(self, name: str, cb=None) -> None:
+        """#38 Disconnect a connection — removes its stored login."""
+        if self._data is None:
+            return
+        self._data.request("connections.disconnect", {"name": name},
+                           cb or (lambda _r: None))
+
     def canvas_assignments(self, cb) -> None:
         if self._data is None:
             cb({"assignments": []}); return
@@ -291,6 +307,67 @@ class AppState(QObject):
             return
         self._data.request("canvas.add_announcement_todo", {"id": ann_id},
                            cb or (lambda _r: None))
+
+    # --- Canvas -> Calendar -----------------------------------------------
+    # Each needs a sample-mode fallback: CanvasScreen is constructed with no
+    # daemon throughout the UI tests and the screenshot script.
+    def canvas_calendar_status(self, cb) -> None:
+        if self._data is None:
+            cb({"sync": False, "ai": False, "events": 0, "queued": 0,
+                "proposals": 0, "alerts": 0})
+            return
+        self._data.request("canvas.calendar_status", {}, cb)
+
+    def canvas_set_calendar_sync(self, enabled: bool, cb=None) -> None:
+        if self._data is None:
+            if cb:
+                cb({"sync": bool(enabled), "ai": False})
+            return
+        self._data.request("canvas.set_calendar_sync", {"enabled": bool(enabled)},
+                           cb or (lambda _r: None))
+
+    def canvas_set_calendar_ai(self, enabled: bool, cb=None) -> None:
+        if self._data is None:
+            if cb:
+                cb({"sync": False, "ai": bool(enabled)})
+            return
+        self._data.request("canvas.set_calendar_ai", {"enabled": bool(enabled)},
+                           cb or (lambda _r: None))
+
+    def canvas_calendar_queue(self, cb) -> None:
+        if self._data is None:
+            cb({"items": []}); return
+        self._data.request("canvas.calendar_queue", {}, cb)
+
+    def canvas_resolve_removal(self, qid: int, approve: bool, cb=None) -> None:
+        if self._data is None:
+            if cb:
+                cb({"ok": False})
+            return
+        self._data.request("canvas.resolve_removal",
+                           {"id": qid, "approve": bool(approve)},
+                           cb or (lambda _r: None))
+
+    def canvas_proposals(self, cb) -> None:
+        if self._data is None:
+            cb({"items": []}); return
+        self._data.request("canvas.proposals", {}, cb)
+
+    def canvas_resolve_proposal(self, pid: int, approve: bool, cb=None) -> None:
+        if self._data is None:
+            if cb:
+                cb({"ok": False})
+            return
+        self._data.request("canvas.resolve_proposal",
+                           {"id": pid, "approve": bool(approve)},
+                           cb or (lambda _r: None))
+
+    def canvas_sync_now(self, cb=None) -> None:
+        if self._data is None:
+            if cb:
+                cb({"started": False})
+            return
+        self._data.request("canvas.sync_now", {}, cb or (lambda _r: None))
 
     def canvas_courses(self, cb) -> None:
         if self._data is None:
@@ -588,6 +665,7 @@ class AppState(QObject):
             return
         self.mail_scope = scope
         self.mail_suggestions.clear()
+        self.mail_suggestion_meta.clear()
         if self.live:
             self.refresh_mails()
         else:
@@ -674,10 +752,27 @@ class AppState(QObject):
 
         def handle(result):
             self.mail_suggestions = dict((result or {}).get("suggestions", {}))
+            # Normalized preview row per suggestion (#32 review popup): carries
+            # sender/subject/date for the list even when the message is past the
+            # loaded page. Body stays lazy — fetched via fetch_mail on open.
+            self.mail_suggestion_meta = {
+                mid: _norm_mail(row)
+                for mid, row in (result or {}).get("previews", {}).items()}
             self.mails_changed.emit()
             if cb:
                 cb(result)
         self._data.request("mail.suggest_labels", {}, handle)
+
+    def fetch_mail(self, mid: str, cb) -> None:
+        """Pull one message's full row (with body_html) by id, for a reader that
+        isn't the main inbox pane — the #32 review popup opens suggested mail
+        that may not be in the loaded page, so it can't lean on `self.mails`."""
+        if self._data is None:
+            cb(None)
+            return
+        self._data.request(
+            "emails.get", {"id": mid},
+            lambda row: cb(_norm_mail(row) if row else None))
 
     def apply_label(self, mid: str, name: str) -> None:
         """Manual label pick from the reading pane (#9): the same
@@ -713,6 +808,7 @@ class AppState(QObject):
 
     def apply_suggestion(self, mid: str) -> None:
         name = self.mail_suggestions.pop(mid, None)
+        self.mail_suggestion_meta.pop(mid, None)
         if name is None:
             return
         if self._data is not None:
@@ -724,11 +820,40 @@ class AppState(QObject):
     def reject_suggestion(self, mid: str) -> None:
         """Review-pass reject (suggest-labels v2): local only — nothing was
         ever written, so there is nothing to undo."""
+        self.mail_suggestion_meta.pop(mid, None)
         if self.mail_suggestions.pop(mid, None) is not None:
             self.mails_changed.emit()
 
+    def accept_all_suggestions(self) -> None:
+        """Review popup 'Accept all' (#32): file every pending suggestion under
+        its own suggested label — one apply per message, a single toast/refresh
+        when the last lands."""
+        pending = dict(self.mail_suggestions)
+        self.mail_suggestions.clear()
+        self.mail_suggestion_meta.clear()
+        if not pending:
+            return
+        if self._data is None:
+            self.mails_changed.emit()
+            return
+        left, filed = [len(pending)], [0]
+
+        def done(res):
+            left[0] -= 1
+            if isinstance(res, dict) and res.get("ok"):
+                filed[0] += 1
+            if left[0] == 0:
+                self.toast_requested.emit(
+                    f"✓ Filed {filed[0]} — moved out of inbox")
+                self.refresh_mails()
+
+        for mid, name in pending.items():
+            self._data.request("emails.apply_label",
+                               {"id": mid, "label": name}, done)
+
     def dismiss_suggestions(self) -> None:
         """Clear the whole review pass without writing anything."""
+        self.mail_suggestion_meta.clear()
         if self.mail_suggestions:
             self.mail_suggestions.clear()
             self.mails_changed.emit()
@@ -740,6 +865,7 @@ class AppState(QObject):
         mids = [m for m, n in self.mail_suggestions.items() if n == label]
         for mid in mids:
             self.mail_suggestions.pop(mid, None)
+            self.mail_suggestion_meta.pop(mid, None)
         if not mids:
             return
         if self._data is None:

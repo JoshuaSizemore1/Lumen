@@ -2,7 +2,12 @@
 runs the UI in-process, and stops the daemon it started when the UI exits.
 In this mode closing the main window quits the whole app (LUMEN_UNIFIED).
 A daemon that was already running (systemd, `uv run lumen-daemon`) is left
-alone on exit — the launcher only stops what it started."""
+alone on exit — the launcher only stops what it started.
+
+`lumen --quit` is the manual kill switch: it asks a running instance to quit
+and then sweeps anything left behind, including an instance that has lost its
+socket and can no longer be reached any other way.
+"""
 
 import os
 import signal
@@ -12,8 +17,12 @@ import sys
 import time
 from pathlib import Path
 
+from lumen import instance_lock
+
 START_TIMEOUT_S = 20.0
 STOP_TIMEOUT_S = 10.0
+HANDOFF_TIMEOUT_S = 25.0    # covers a cold daemon start (START_TIMEOUT_S) + UI
+HANDOFF_POLL_S = 0.1
 
 
 def daemon_alive(socket_path) -> bool:
@@ -81,30 +90,78 @@ def stop_daemon(proc) -> None:
         proc.wait()
 
 
-def main() -> None:
+def quit_running() -> None:
+    """`lumen --quit`. Ask first, then sweep: an instance whose socket name was
+    taken over answers nothing, and used to be unkillable short of hunting it
+    down in `ps`."""
+    from lumen.ui_v2.single_instance import try_send
+    from lumen.ui_v3 import SOCKET_NAME
+    asked = try_send(SOCKET_NAME, "quit")
+    if asked:
+        print("lumen: asked the running instance to quit")
+        deadline = time.monotonic() + STOP_TIMEOUT_S
+        while instance_lock.lumen_pids() and time.monotonic() < deadline:
+            time.sleep(HANDOFF_POLL_S)
+    left = instance_lock.lumen_pids()
+    if left:
+        instance_lock.terminate(left)
+        print(f"lumen: stopped {len(left)} leftover process(es)")
+    elif not asked:
+        print("lumen: nothing running")
+
+
+def main(handoff_timeout: float = HANDOFF_TIMEOUT_S) -> None:
     from lumen.ui_v2.single_instance import try_send   # shared IPC plumbing
     from lumen.ui_v3 import SOCKET_NAME                 # cheap: no UI stack imported
+    if "--quit" in sys.argv:
+        quit_running()
+        return
+
     toggle = "--toggle-launcher" in sys.argv
-    if try_send(SOCKET_NAME, "toggle-launcher" if toggle else "show"):
+    command = "toggle-launcher" if toggle else "show"
+    if try_send(SOCKET_NAME, command):
         return   # already running — it handled the command; its daemon is its own
 
-    from lumen.daemon.config import load_config
-    cfg = load_config()
-    proc = None
-    if not daemon_alive(cfg.socket_path):
-        proc = spawn_daemon()
-        if not wait_for_socket(cfg.socket_path, proc):
-            stop_daemon(proc)
-            raise SystemExit(
-                f"lumen: the daemon did not come up — see {daemon_log_path()}")
+    # A press we answer late is impatience with a slow start, not a dismissal:
+    # summon, never toggle, or the second press closes the launcher the first
+    # one just opened.
+    waited_command = "show-launcher" if toggle else "show"
+    lock = instance_lock.acquire()
+    deadline = time.monotonic() + handoff_timeout
+    while lock is None:
+        # An instance is *starting* — seconds of daemon spawn and UI import
+        # before it can answer anything. Waiting for its server is the whole
+        # point: two presses in that window used to start two full instances,
+        # and the loser stole the Qt socket name from the winner.
+        if try_send(SOCKET_NAME, waited_command):
+            return
+        if time.monotonic() >= deadline:
+            print("lumen: another instance is still starting up — gave up",
+                  file=sys.stderr)
+            return
+        time.sleep(HANDOFF_POLL_S)
+        lock = instance_lock.acquire()   # it died mid-start: we take over
 
-    os.environ["LUMEN_UNIFIED"] = "1"   # closing the window quits the app
-    from lumen.ui_v3.app import main as ui_main
     try:
-        ui_main()   # blocks until quit; exits via SystemExit with the UI's code
+        from lumen.daemon.config import load_config
+        cfg = load_config()
+        proc = None
+        if not daemon_alive(cfg.socket_path):
+            proc = spawn_daemon()
+            if not wait_for_socket(cfg.socket_path, proc):
+                stop_daemon(proc)
+                raise SystemExit(
+                    f"lumen: the daemon did not come up — see {daemon_log_path()}")
+
+        os.environ["LUMEN_UNIFIED"] = "1"   # closing the window quits the app
+        from lumen.ui_v3.app import main as ui_main
+        try:
+            ui_main()   # blocks until quit; exits via SystemExit with the UI's code
+        finally:
+            if proc is not None:
+                stop_daemon(proc)
     finally:
-        if proc is not None:
-            stop_daemon(proc)
+        instance_lock.release(lock)
 
 
 if __name__ == "__main__":

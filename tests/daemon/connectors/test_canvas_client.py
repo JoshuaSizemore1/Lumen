@@ -33,13 +33,16 @@ def test_assignments_derive_submitted_from_submission(tmp_path):
              "submission": {"workflow_state": "unsubmitted", "submitted_at": None}},
             {"id": 11, "name": "HW2", "due_at": None, "points_possible": 40.0,
              "html_url": "u2", "description": None,
-             "submission": {"workflow_state": "graded", "submitted_at": "2026-02-01T00:00:00Z"}},
+             "submission": {"workflow_state": "graded", "submitted_at": "2026-02-01T00:00:00Z",
+                            "score": 38.5}},
         ])
     got = client_for(handler).assignments(1)
     assert got[0] == {"id": 10, "course_id": 1, "name": "HW1",
-                      "due_at": "2026-01-17T06:59:59Z", "points": 110.0,
-                      "html_url": "u1", "description": "<p>do it</p>", "submitted": False}
+                      "due_at": "2026-01-17T06:59:59Z", "points": 110.0, "score": None,
+                      "html_url": "u1", "description": "<p>do it</p>", "submitted": False,
+                      "updated_at": None, "submission_types": None, "is_quiz": False}
     assert got[1]["submitted"] is True
+    assert got[1]["score"] == 38.5        # graded → the earned score is captured
 
 
 def test_announcements_normalized(tmp_path):
@@ -69,3 +72,28 @@ def test_pagination_follows_link_next(tmp_path):
             headers={"Link": f'<{BASE}/api/v1/courses?page=2>; rel="next"'})
     got = client_for(handler).courses()
     assert [c["id"] for c in got] == [1, 2]
+
+
+def test_assignments_capture_type_hints_for_calendar_sync():
+    """submission_types + is_quiz let BASIC mode name the kind of thing an
+    assignment is without asking a model."""
+    def handler(req):
+        return httpx.Response(200, json=[
+            {"id": 12, "name": "Midterm", "submission_types": ["online_quiz"],
+             "quiz_id": 77, "updated_at": "2026-08-01T00:00:00Z"},
+            {"id": 13, "name": "Essay", "submission_types": ["online_upload"]},
+        ])
+    got = client_for(handler).assignments(1)
+    assert got[0]["submission_types"] == "online_quiz"
+    assert got[0]["is_quiz"] is True
+    assert got[0]["updated_at"] == "2026-08-01T00:00:00Z"
+    assert got[1]["submission_types"] == "online_upload"
+    assert got[1]["is_quiz"] is False
+
+
+def test_assignments_tolerate_a_string_submission_type():
+    """Canvas has been seen returning a bare string here, not a list."""
+    def handler(req):
+        return httpx.Response(200, json=[
+            {"id": 14, "name": "X", "submission_types": "online_text_entry"}])
+    assert client_for(handler).assignments(1)[0]["submission_types"] == "online_text_entry"

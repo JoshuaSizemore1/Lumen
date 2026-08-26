@@ -1746,3 +1746,45 @@ def test_canvas_status_stub_when_sample_mode():
 
 def test_canvas_disconnect_is_safe_without_client():
     AppState().canvas_disconnect()                # must not raise
+
+
+# ---- #32: suggest-labels review popup — state plumbing --------------------
+
+def test_suggest_labels_stores_previews(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.suggest_labels()
+    data.cb_for("mail.suggest_labels")({
+        "suggestions": {"m1": "Bills"},
+        "previews": {"m1": {"id": "m1", "sender": "Ada <a@x.com>",
+                            "subject": "Engines",
+                            "received_at": "2026-07-10T10:00:00+00:00"}}})
+    assert st.mail_suggestions == {"m1": "Bills"}
+    # Preview normalized to the screen shape the popup renders.
+    assert st.mail_suggestion_meta["m1"]["from"] == "Ada"
+    assert st.mail_suggestion_meta["m1"]["subj"] == "Engines"
+
+
+def test_fetch_mail_normalizes_any_row(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    got = []
+    st.fetch_mail("m9", got.append)
+    assert data.requests[-1][0] == "emails.get"
+    assert data.requests[-1][1] == {"id": "m9"}
+    data.requests[-1][2]({"id": "m9", "sender": "Bob <b@y.com>",
+                          "subject": "Hi", "body_html": "<p>x</p>", "labels": []})
+    assert got[0]["subj"] == "Hi" and got[0]["from"] == "Bob"
+
+
+def test_accept_all_suggestions_files_each(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mail_suggestions = {"m1": "Bills", "m2": "Work"}
+    st.mail_suggestion_meta = {"m1": {}, "m2": {}}
+    data.requests.clear()
+    st.accept_all_suggestions()
+    applied = {p["id"]: p["label"] for t, p, _ in data.requests
+               if t == "emails.apply_label"}
+    assert applied == {"m1": "Bills", "m2": "Work"}
+    assert st.mail_suggestions == {} and st.mail_suggestion_meta == {}

@@ -210,6 +210,11 @@ class AskBar(QFrame):
         self._busy = False
         self._wake.stop()
         if not self._acc:
+            # No text came back (e.g. a turn whose whole output was a tool call
+            # or a hand-off): settle the status so the "◇ thinking" dots stop
+            # animating — otherwise the spinner runs forever over "(no answer)"
+            # (#34). _on_chunk already sets it static when text does arrive.
+            self._status("◇ no answer", T.TEXT_FAINT)
             self.answer.setText("(no answer)")
         self.foot.setText(f"answered on-device · {T.MODEL_NAME} · "
                           "0 tokens sent externally")

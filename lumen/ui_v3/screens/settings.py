@@ -22,6 +22,7 @@ class SettingsScreen(QWidget):
         self.state = state
         self._snapshot: dict = {}
         self._learned: dict = {}
+        self._rules: list[dict] = []
 
         outer = hbox(self, (0, 0, 0, 0), 0)
         host = QWidget()
@@ -46,6 +47,11 @@ class SettingsScreen(QWidget):
         self.state.fetch_settings(self._on_settings)
         self.state.fetch_learned(self._on_learned)
         self.state.refresh_procedures()
+        self.state.list_rules(self._on_rules)
+
+    def _on_rules(self, result):
+        self._rules = (result or {}).get("rules", []) if isinstance(result, dict) else []
+        self.rebuild()
 
     def _on_settings(self, snapshot):
         self._snapshot = snapshot if isinstance(snapshot, dict) else {}
@@ -75,6 +81,7 @@ class SettingsScreen(QWidget):
 
         self._accent_section(v)
         self._accounts_section(v)
+        self._rules_section(v)
         self._mcp_section(v)
         self._memory_section(v)
         self._config_section(v)
@@ -152,33 +159,67 @@ class SettingsScreen(QWidget):
         # Gmail + Calendar share one Google login, so one Connect covers both;
         # only offer it when something is actually disconnected.
         need_google = not (gmail_on and gcal_on)
-        v.addWidget(self._account_row("gmail", gmail_on,
-                                      connect=need_google and not gmail_on))
-        v.addWidget(self._account_row("google_calendar", gcal_on,
-                                      connect=need_google and not gcal_on))
-        # Canvas login + live status live in the Canvas tab (the web view can't
-        # sit inside this config sheet); this row is just a pointer to it.
-        v.addWidget(self._row("canvas", "connect & manage in the Canvas tab"))
+        v.addWidget(self._account_row(
+            "gmail", gmail_on, connect=need_google and not gmail_on,
+            enabled=bool((accounts.get("gmail") or {}).get("enabled", True))))
+        v.addWidget(self._account_row(
+            "google_calendar", gcal_on, connect=need_google and not gcal_on,
+            enabled=bool((accounts.get("google_calendar") or {}).get("enabled", True))))
+        # Canvas: login/connect still happens in the Canvas tab (the web view
+        # can't sit inside this config sheet), but the connected/not-connected
+        # status now shows here just like Gmail/Calendar (#37). When it is down
+        # the row points to the Canvas tab instead of a dead Connect button.
+        canvas_on = bool((accounts.get("canvas") or {}).get("connected"))
+        v.addWidget(self._account_row(
+            "canvas", canvas_on, connect=False,
+            hint_tab=None if canvas_on else "canvas",
+            enabled=bool((accounts.get("canvas") or {}).get("enabled", True))))
         v.addSpacing(22)
 
-    def _account_row(self, key: str, connected: bool, connect: bool) -> QWidget:
+    def _account_row(self, key: str, connected: bool, connect: bool,
+                     hint_tab: str | None = None, enabled: bool = True) -> QWidget:
         """One account line: name, then a dot+word status grouped tight on the
-        left (no lonely far-right chip). A Connect button appears only when the
-        account is disconnected — a connected account has nothing to press (#6)."""
+        left. A disconnected account offers Connect (#6) or a tab pointer (#37);
+        a connected one offers Disable/Enable (pause sync, keep login) and
+        Disconnect (remove login) — #38."""
         w = QWidget()
         v = vbox(w, (0, 0, 0, 0), 0)
         row = hbox(m=(12, 10, 12, 10), s=10)
         k = label(key, 12.5, T.TEXT_BODY, mono=True)
         k.setFixedWidth(T.sc(150))
         row.addWidget(k)
-        row.addWidget(Dot(7, T.OK if connected else T.TEXT_FAINTER))
-        row.addWidget(label("Connected" if connected else "Not connected", 12.5,
-                            T.TEXT_BODY if connected else T.TEXT_FAINTER))
+        if connected and not enabled:
+            status, color = "Paused", T.WARN
+        elif connected:
+            status, color = "Connected", T.TEXT_BODY
+        else:
+            status, color = "Not connected", T.TEXT_FAINTER
+        dot = T.WARN if (connected and not enabled) else (
+            T.OK if connected else T.TEXT_FAINTER)
+        row.addWidget(Dot(7, dot))
+        row.addWidget(label(status, 12.5, color))
         row.addStretch(1)
         if connect:
             b = button("Connect", "soft", px=11, height=24)
             b.clicked.connect(lambda: self._reconnect_google(b))
             row.addWidget(b)
+        elif not connected and hint_tab is not None:
+            row.addWidget(ClickLabel(
+                "connect in the Canvas tab ↗", 11, T.ACCENT, mono=True,
+                on_click=lambda: self.state.view_requested.emit(hint_tab)))
+        if connected:
+            # The routes reply with just {accounts}; re-fetch the whole snapshot
+            # so every section stays intact when the row rebuilds.
+            refresh = lambda _r=None: self.state.fetch_settings(self._on_settings)
+            toggle = button("Enable" if not enabled else "Disable", "soft",
+                            px=11, height=24)
+            toggle.clicked.connect(
+                lambda: self.state.set_connection_enabled(key, not enabled, refresh))
+            row.addWidget(toggle)
+            disc = button("Disconnect", "ghost", px=11, height=24)
+            disc.clicked.connect(
+                lambda: self.state.disconnect_connection(key, refresh))
+            row.addWidget(disc)
         v.addLayout(row)
         v.addWidget(hline(T.BORDER_FAINT))
         return w
@@ -205,6 +246,55 @@ class SettingsScreen(QWidget):
 
         self.state.status_requested.connect(recover)
         self.state.google_reconnect(done)
+
+    def _rules_section(self, v):
+        # #41: mail rules were only creatable/editable from the mail screen and
+        # the chat path; there was no place to see them all and turn one off or
+        # remove it. This lists every rule with an enable switch and a delete,
+        # and a click opens the existing editor for changes.
+        v.addWidget(self._section_label("mail_rules"))
+        v.addSpacing(9)
+        if not self._rules:
+            v.addWidget(self._row("—", "no mail rules yet"))
+        for r in self._rules:
+            v.addWidget(self._rule_row(r))
+        add = button("+ New rule", "soft", px=11, height=26)
+        add.clicked.connect(lambda: self.state.open_rule_editor())
+        wrap = hbox(m=(12, 8, 12, 4), s=0)
+        wrap.addWidget(add)
+        wrap.addStretch(1)
+        v.addLayout(wrap)
+        v.addSpacing(22)
+
+    def _rule_row(self, r: dict) -> QWidget:
+        rid = r.get("id")
+        conds = []
+        for key, pfx in (("from_addrs", "from "), ("domains", "@"),
+                         ("subject_kw", "subject~"), ("body_kw", "body~")):
+            if r.get(key):
+                conds.append(pfx + ", ".join(r[key]))
+        summary = "; ".join(conds) or "no conditions"
+
+        w = QWidget()
+        outer = vbox(w, (0, 0, 0, 0), 0)
+        row = hbox(m=(12, 8, 12, 8), s=10)
+        # Clicking the label/summary opens the editor (edit/rename/retune).
+        name = ClickLabel(r.get("label", "?"), 12.5, T.TEXT_BODY, weight=600,
+                          on_click=lambda: self.state.open_rule_editor(r))
+        name.setFixedWidth(T.sc(150))
+        row.addWidget(name)
+        row.addWidget(label(summary, 11.5, T.TEXT_MUTED), 1)
+        sw = Switch(bool(r.get("enabled", True)))
+        sw.toggled.connect(lambda on: self.state.toggle_rule(
+            rid, on, self._on_rules))
+        row.addWidget(sw)
+        row.addWidget(ClickLabel("✕", 12, T.TEXT_GHOST,
+                                 on_click=lambda: self.state.delete_rule(
+                                     rid, self._on_rules),
+                                 tooltip="Delete rule"))
+        outer.addLayout(row)
+        outer.addWidget(hline(T.BORDER_FAINT))
+        return w
 
     def _mcp_section(self, v):
         v.addWidget(self._section_label("mcp_servers"))

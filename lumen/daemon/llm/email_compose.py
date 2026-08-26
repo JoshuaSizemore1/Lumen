@@ -42,7 +42,13 @@ DRAFT_SYSTEM = (
     "name and/or subject words); otherwise null. If the user wants the "
     "recipient's address found in their existing email, to_hint is that "
     "person's name (e.g. \"find Sam Doe's address from his last email, then "
-    "email him X\" -> to_hint \"Sam Doe\"); otherwise null."
+    "email him X\" -> to_hint \"Sam Doe\"); otherwise null.\n"
+    "Never invent specifics you were not given — no made-up events, dates, "
+    "times, places, names, amounts, or links. If the request refers to "
+    "something concrete you have not been told (an event on their calendar, a "
+    "document) and it is not provided below, write around it in plain terms "
+    "instead of fabricating details. When calendar events are provided below, "
+    "describe only those — do not invent a different event (#39)."
 )
 
 REVISE_SYSTEM = (
@@ -78,9 +84,15 @@ async def _generate(llm, system: str, user: str) -> dict | None:
     return parse_proposal(text)
 
 
-async def propose_email(llm, message: str) -> tuple[dict | None, str | None]:
-    """One structured generation on the fast model — no tools, no chain."""
-    raw = await _generate(llm, writing_style.styled(DRAFT_SYSTEM), message)
+async def propose_email(llm, message: str,
+                        context: str | None = None) -> tuple[dict | None, str | None]:
+    """One structured generation on the fast model — no tools, no chain.
+    `context` is optional real grounding (e.g. the user's actual calendar
+    events) appended to the request so the model writes from fact instead of
+    fabricating (#39). Recipients are still validated against the ORIGINAL
+    message only, so grounding text can never authorize a new address."""
+    user = message if not context else f"{message}\n\n{context}"
+    raw = await _generate(llm, writing_style.styled(DRAFT_SYSTEM), user)
     if raw is None:
         return None, ("I couldn't put a draft together from that — tell me "
                       "who it's for and roughly what to say.")

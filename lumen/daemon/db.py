@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS sync_state (     -- KV; email sync shares it in Phase
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS connection_state (  -- #38: per-connection enable/disable, persists across restarts
+    name TEXT PRIMARY KEY,                      -- 'gmail' | 'google_calendar' | 'canvas'
+    enabled INTEGER NOT NULL DEFAULT 1          -- absent row = enabled
+);
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,                    -- derived from first user message, truncated
@@ -146,7 +150,8 @@ CREATE TABLE IF NOT EXISTS canvas_assignments (
     course_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     due_at TEXT,                             -- RFC3339 UTC as given, nullable
-    points REAL,
+    points REAL,                             -- points_possible (max), nullable
+    score REAL,                              -- earned score once graded, nullable
     html_url TEXT,
     description TEXT,                         -- HTML body, nullable
     submitted INTEGER NOT NULL DEFAULT 0,
@@ -155,7 +160,20 @@ CREATE TABLE IF NOT EXISTS canvas_assignments (
     first_seen TEXT,                         -- ISO ts first observed (Part 4)
     handled INTEGER NOT NULL DEFAULT 0,       -- user deleted the todo -> don't recreate
     marker_due TEXT,                          -- local date the calendar marker represents (Part 4)
-    dismissed INTEGER NOT NULL DEFAULT 0       -- user hid it from the tab; survives sync
+    dismissed INTEGER NOT NULL DEFAULT 0,      -- user hid it from the tab; survives sync
+    -- Calendar sync (Canvas -> Calendar). event_start supersedes marker_due as
+    -- the drift key: markers were all-day, these are timed.
+    event_kind TEXT,                          -- 'timed' | 'all_day'
+    event_start TEXT,                         -- local ISO start the event represents
+    event_sig TEXT,                           -- hash of the rendered content; detects drift
+    last_seen_sync TEXT,                      -- stamp of the last sync that saw it
+    missing_syncs INTEGER NOT NULL DEFAULT 0, -- consecutive syncs it was absent from
+    updated_at TEXT,                          -- Canvas's own mtime; gates re-classification
+    submission_types TEXT,                    -- comma-joined; a deterministic type hint
+    is_quiz INTEGER NOT NULL DEFAULT 0,
+    ai_summary TEXT,
+    ai_type TEXT,                             -- exam | project | reading | ...
+    ai_state INTEGER NOT NULL DEFAULT 0        -- 0 unclassified | 1 done | 2 failed
 );
 CREATE TABLE IF NOT EXISTS canvas_announcements (
     id INTEGER PRIMARY KEY,                  -- Canvas discussion_topic id
@@ -169,6 +187,54 @@ CREATE TABLE IF NOT EXISTS canvas_announcements (
     suggested_todo TEXT,                     -- JSON {text, due} suggestion (Part 4)
     todo_id INTEGER,                          -- set if user accepted the offer (Part 4)
     dismissed INTEGER NOT NULL DEFAULT 0      -- user hid it from the tab; survives sync
+);
+-- Proposed calendar REMOVALS awaiting the user. The background sync only ever
+-- proposes: a modal fired from a headless poll loop would hit ConfirmBroker's
+-- timeout-is-deny path with nobody watching, so removals queue here and are
+-- actioned inside a request the user initiated.
+CREATE TABLE IF NOT EXISTS canvas_calendar_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER,
+    kind TEXT NOT NULL DEFAULT 'assignment',
+    event_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    reason TEXT NOT NULL,                     -- gone|submitted|dismissed|archived|no_due
+    detail TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | removed | declined
+    created_at TEXT NOT NULL
+);
+-- One pending row per event, so a background poll cannot re-queue the same
+-- removal forever.
+CREATE UNIQUE INDEX IF NOT EXISTS canvas_queue_pending
+    ON canvas_calendar_queue (kind, event_id) WHERE status = 'pending';
+-- AI-inferred events (exam dates mined from announcements, study blocks). These
+-- NEVER auto-create — the user approves each one.
+CREATE TABLE IF NOT EXISTS canvas_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER,
+    kind TEXT NOT NULL,                       -- exam | study
+    title TEXT NOT NULL,
+    start_at TEXT NOT NULL,                   -- local ISO
+    end_at TEXT,
+    detail TEXT,
+    source_kind TEXT,                         -- announcement | assignment
+    source_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | accepted | dismissed
+    event_id TEXT,                            -- set once accepted and created
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS canvas_proposals_pending
+    ON canvas_proposals (kind, source_kind, source_id, start_at)
+    WHERE status = 'pending';
+-- Deterministic notes: a due date moved, or a due window collides with an
+-- existing calendar event. Informational; nothing is written from these.
+CREATE TABLE IF NOT EXISTS canvas_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    assignment_id INTEGER,
+    kind TEXT NOT NULL,                       -- due_moved | conflict
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    seen INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -197,6 +263,18 @@ def connect(db_path: Path) -> sqlite3.Connection:
     if "dismissed" not in ca_cols:
         conn.execute(
             "ALTER TABLE canvas_assignments ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
+    if "score" not in ca_cols:
+        conn.execute("ALTER TABLE canvas_assignments ADD COLUMN score REAL")
+    for col, decl in (("event_kind", "TEXT"), ("event_start", "TEXT"),
+                      ("event_sig", "TEXT"), ("last_seen_sync", "TEXT"),
+                      ("missing_syncs", "INTEGER NOT NULL DEFAULT 0"),
+                      ("updated_at", "TEXT"), ("submission_types", "TEXT"),
+                      ("is_quiz", "INTEGER NOT NULL DEFAULT 0"),
+                      ("ai_summary", "TEXT"), ("ai_type", "TEXT"),
+                      ("ai_state", "INTEGER NOT NULL DEFAULT 0")):
+        if col not in ca_cols:
+            conn.execute(
+                f"ALTER TABLE canvas_assignments ADD COLUMN {col} {decl}")
     can_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_announcements)")}
     if "dismissed" not in can_cols:
         conn.execute(

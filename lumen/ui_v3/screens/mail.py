@@ -4,13 +4,15 @@ The mock's tag-filter chips become Lumen's scopes (inbox / unread / sent) plus
 its Gmail labels, and its "✦ auto-tag" becomes the real suggest-labels pass:
 suggestions render as dashed chips that write nothing until tapped.
 """
-from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import QFrame, QLineEdit, QProgressBar, QWidget
 
 # Body rendering is pure HTML normalization with no theme coupling, so ui_v3
 # shares ui_v2's module rather than forking it.
 from ...ui_v2 import mail_html
 from .. import theme as T
+# One image loader for both the inbox pane and the suggest-review popup (#32).
+from ..mail_body import ImageLoader as _ImageLoader
 from ..components import MailRow, accent_fill
 from ..widgets import (
     Avatar, Chip, ClickChip, ClickLabel, ClickRow, Dot, FlowLayout, Glyph,
@@ -21,20 +23,6 @@ from ..widgets import (
 
 # Width of the collapsible mailbox column (#10).
 NAV_W = 190
-
-
-class _ImageLoader(QThread):
-    """Fetches an email's remote images off the GUI thread, handing back the
-    HTML with them inlined as data: URIs."""
-
-    loaded = pyqtSignal(str, str)   # (message_id, inlined_html)
-
-    def __init__(self, mid: str, html: str):
-        super().__init__()
-        self._mid, self._html = mid, html
-
-    def run(self):
-        self.loaded.emit(self._mid, mail_html.inline_remote_images(self._html))
 
 
 class _BusyOverlay(QWidget):
@@ -232,13 +220,6 @@ class MailScreen(QWidget):
         cwrap.addWidget(self.chip_host)
         v.addLayout(cwrap)
 
-        self.review = QFrame()
-        self.review.setProperty("role", "panel")
-        self.review_lay = hbox(self.review, (11, 7, 11, 7), 8)
-        self.review.hide()
-        rwrap = hbox(m=(16, 0, 16, 10), s=0)
-        rwrap.addWidget(self.review)
-        v.addLayout(rwrap)
         return w
 
     # ---- build ------------------------------------------------------------
@@ -255,7 +236,6 @@ class MailScreen(QWidget):
         yoff = self.list_scroll.verticalScrollBar().value() if keep_scroll else 0
         self._last_mail_ids = ids
         self._build_chips()
-        self._build_review()
         self._build_list()
         self._build_pane()
         # Restore after the layout settles: the scrollbar's range isn't valid
@@ -277,27 +257,6 @@ class MailScreen(QWidget):
             "⚑ rules", T.TEXT_SECONDARY, T.BORDER_STRONG, px=9,
             tooltip="Mail rules", on_click=self.state.open_rule_editor))
 
-    def _build_review(self):
-        clear_layout(self.review_lay)
-        sug = self.state.mail_suggestions
-        if not sug:
-            self.review.hide()
-            return
-        self.review.show()
-        by_label: dict[str, int] = {}
-        for name in sug.values():
-            by_label[name] = by_label.get(name, 0) + 1
-        self.review_lay.addWidget(label(f"{len(sug)} suggested", 10, T.ACCENT,
-                                        mono=True))
-        for name, n in sorted(by_label.items()):
-            self.review_lay.addWidget(ClickChip(
-                f"file {n} → {name}", T.ACCENT, T.ACCENT, bg=T.ACCENT_SOFT,
-                px=9, on_click=lambda l=name: self.state.accept_all_for_label(l)))
-        self.review_lay.addStretch(1)
-        self.review_lay.addWidget(ClickLabel(
-            "✕", 11, T.TEXT_GHOST, on_click=self.state.dismiss_suggestions,
-            tooltip="Dismiss all suggestions"))
-
     def _build_list(self):
         clear_layout(self.list_lay)
         mails = self.state.mails
@@ -309,17 +268,10 @@ class MailScreen(QWidget):
         sel = self.state.selected_mail
         for m in mails:
             mid = m["id"]
-            sug = self.state.mail_suggestions.get(mid)
-            suggestion = None
-            if sug:
-                suggestion = (sug,
-                              lambda i=mid: self.state.apply_suggestion(i),
-                              lambda i=mid: self.state.reject_suggestion(i))
             self.list_lay.addWidget(MailRow(
                 m, selected=(mid == sel),
                 on_click=lambda i=mid: self.state.select_mail(i),
-                on_delete=lambda i=mid: self.state.delete_mail(i),
-                suggestion=suggestion))
+                on_delete=lambda i=mid: self.state.delete_mail(i)))
         self.list_lay.addStretch(1)
 
     # ---- reading pane -----------------------------------------------------
@@ -486,4 +438,13 @@ class MailScreen(QWidget):
         # Classifying is one model call per unlabeled message, so it can run for
         # a while — dim the inbox and show a busy bar until it returns (#7).
         self.busy.start("Classifying inbox mail…")
-        self.state.suggest_labels(cb=lambda _r: self.busy.hide())
+        self.state.suggest_labels(cb=self._suggest_done)
+
+    def _suggest_done(self, _result):
+        # Results now open a two-pane review popup rather than inline chips
+        # (#32): the shell owns that window-level overlay, so ask it to open when
+        # there's at least one suggestion.
+        self.busy.hide()
+        if self.state.mail_suggestions and hasattr(
+                self.state, "suggest_review_requested"):
+            self.state.suggest_review_requested.emit()

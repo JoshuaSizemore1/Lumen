@@ -233,6 +233,27 @@ RULE_HINT = re.compile(
     r"|\balways\s+(?:label|file|move|filter)\b",
     re.IGNORECASE | re.DOTALL)
 
+# "make a new label/tag for emails from X" (todo-fixes #35) is a labeling RULE,
+# just phrased with "label"/"tag" instead of the word "rule" — so it never hit
+# RULE_HINT and the model refused ("I can't modify labels"). Route it to the
+# same rule-authoring flow. Gated on a mail word (lookahead) so "add a tag to
+# my todo" — todos also carry tags — is left to the todo route, and requires a
+# create verb so "label this email as Work" stays with the apply-to-open-message
+# path (MAIL_LABEL_HINT), which is checked just after.
+#
+# The create verb alone is NOT enough to separate the two: "add a label to this
+# email" / "add the Work label to this email" are apply-to-the-open-message
+# asks that carry both a create verb and a mail word. What actually splits them
+# is the deictic target — a rule labels a CLASS of mail ("emails from X"), while
+# the apply path names THIS message — so a leading negative lookahead hands
+# those back to MAIL_LABEL_HINT.
+MAKE_LABEL_HINT = re.compile(
+    r"(?!.*\b(?:this|that|the\s+open|the\s+current|currently\s+open)\s+"
+    r"(?:e-?mail|message|mail|thread)\b)"
+    r"(?=.*\b(?:e-?mails?|inbox|senders?|from)\b)"
+    r"\b(?:create|add|make|set\s*up|new)\b.{0,40}\b(?:label|tag)s?\b",
+    re.IGNORECASE | re.DOTALL)
+
 # Compose-shaped requests jump to the draft → popup path before every other
 # chat route (EVENT_HINT would steal "draft an email to schedule a meeting").
 # Compose requires an explicit write verb (todo-fixes #1): the bare-"email"
@@ -450,6 +471,30 @@ def _event_when(e: dict) -> str:
     return when
 
 
+CONFIRM_ROW_CAP = 8
+
+
+def _due_dates_confirm(pending: list[dict], courses: dict) -> dict:
+    """The ConfirmOverlay payload for a batch due-date push. Must use the
+    overlay's real schema (icon/title/intro/rows/confirm_label) — an earlier
+    kind/summary/items shape rendered an empty dialog."""
+    rows = []
+    for p in pending[:CONFIRM_ROW_CAP]:
+        c = courses.get(p["course_id"], {})
+        label = c.get("course_code") or c.get("name") or "Canvas"
+        rows.append((p["due"], f"{label} — {p['name']}"))
+    extra = len(pending) - len(rows)
+    if extra > 0:
+        rows.append(("+", f"{extra} more"))
+    n = len(pending)
+    return {"icon": "\u25b2", "title": "Add Canvas due dates",
+            "intro": f"Lumen will add {n} due-date "
+                     f"{'marker' if n == 1 else 'markers'} to your Google "
+                     "Calendar.",
+            "rows": rows,
+            "confirm_label": f"Add {n} to calendar"}
+
+
 def _sender_address(sender: str) -> str | None:
     """'Ada Lovelace <a@x.com>' or bare 'a@x.com' -> the address."""
     m = re.search(r"<([^<>@\s]+@[^<>@\s]+)>", sender or "")
@@ -564,6 +609,10 @@ def todo_context(todos: list[dict], today: date, has_tool: bool = False) -> str:
     return "\n".join(lines)
 
 
+# The connections Settings can Disable/Disconnect (#38).
+_CONN_NAMES = ("gmail", "google_calendar", "canvas")
+
+
 class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
                  canvas=None,
@@ -574,6 +623,9 @@ class Router:
                  memory=None, memory_path=None, memory_cap=4000,
                  procedures=None, distill_trigger=None,
                  config=None, rules=None, marker_writer=None,
+                 canvas_prefs=None, canvas_queue=None, canvas_alerts=None,
+                 canvas_proposals=None,
+                 connection_state=None,
                  max_iterations=4):
         self._llm = llm
         self._todos = todos
@@ -581,6 +633,7 @@ class Router:
         self._calendar = calendar   # CalendarSync facade: list_range/last_sync/connected
         self._mail = mail           # GmailSync facade: poll_forever/connected
         self._canvas = canvas       # CanvasSync: set_session/clear_session/connected/last_sync
+        self._bg_syncs: set = set()  # strong refs for _kick_canvas_sync tasks
         self._mail_store = mail_store   # EmailStore — local mirror the UI/chat read from
         self._bridge = bridge
         self._confirm = confirm     # ConfirmBroker — gates every external write
@@ -604,12 +657,49 @@ class Router:
         self._config = config    # loaded Config for the read-only settings.get
         self._rules = rules      # RuleStore — deterministic inbox rules
         self._marker_writer = marker_writer  # CalendarMarkerWriter (gated) — lazy
+        self._canvas_prefs = canvas_prefs
+        self._canvas_queue = canvas_queue
+        self._canvas_alerts = canvas_alerts
+        self._canvas_proposals = canvas_proposals
+        self._connection_state = connection_state  # ConnectionState — #38 Disable
         self._max_iterations = max_iterations
 
     def on_disconnect(self) -> None:
         """A UI connection died — deny anything still waiting on a dialog."""
         if self._confirm is not None:
             self._confirm.deny_all()
+
+    def _accounts_state(self) -> dict:
+        """Settings accounts block: connected + enabled per connection
+        (#37 status / #38 Disable). One shape shared by settings.get and the
+        connections.* routes so the UI updates consistently."""
+        from .connectors import google_auth
+        g = self._config.google if self._config is not None else None
+
+        def enabled(name: str) -> bool:
+            return (self._connection_state.enabled(name)
+                    if self._connection_state is not None else True)
+        cs = self._canvas_status()
+        return {
+            "gmail": {"connected": bool(g) and google_auth.connected(
+                g, google_auth.GMAIL_READ_SCOPES), "enabled": enabled("gmail")},
+            "google_calendar": {"connected": bool(g) and google_auth.connected(g),
+                                 "enabled": enabled("google_calendar")},
+            "canvas": {"connected": cs["connected"], "enabled": enabled("canvas")},
+        }
+
+    def _kick_canvas_sync(self) -> None:
+        """Run a sync in the background, ignoring the outcome. A strong ref is
+        kept until it finishes — a bare create_task() may be garbage-collected
+        mid-flight."""
+        if self._canvas is None or self._canvas.busy:
+            return
+        try:
+            task = asyncio.create_task(self._canvas.sync_once())
+        except RuntimeError:                # no running loop (sync test call)
+            return
+        self._bg_syncs.add(task)
+        task.add_done_callback(self._bg_syncs.discard)
 
     def _canvas_status(self) -> dict:
         """Live poller state for the Canvas tab + Settings row. Every canvas.*
@@ -623,6 +713,31 @@ class Router:
             "enabled": (self._config.canvas.enabled
                         if self._config is not None else False),
         }
+
+    async def _accept_proposal(self, pid: int, approve: bool) -> dict:
+        """Put one AI-inferred event on the calendar, or bury it for good.
+
+        This is deliberately the ONLY path that creates a proposal: a date a
+        model read out of announcement prose is a guess, and a wrong guess
+        written straight to the real calendar is worse than no feature."""
+        from .connectors import canvas_calendar
+        row = self._canvas_proposals.get(pid)
+        if row is None:
+            return {"ok": False, "reason": "not pending"}
+        if not approve:
+            self._canvas_proposals.dismiss(pid)
+            return {"ok": True, "created": False,
+                    "proposals": self._canvas_proposals.count()}
+        writer = self._markers()
+        if writer is None:
+            return {"ok": False, "reason": "calendar unavailable"}
+        eid = await asyncio.to_thread(writer.create_event,
+                                      canvas_calendar.proposal_body(row))
+        if eid is None:
+            return {"ok": False, "reason": "could not create the event"}
+        self._canvas_proposals.accept(pid, eid)
+        return {"ok": True, "created": True, "event_id": eid,
+                "proposals": self._canvas_proposals.count()}
 
     def _markers(self):
         """Lazily build the gated calendar-marker writer (real writes) unless a
@@ -782,9 +897,9 @@ class Router:
                 self._conv.add_message(conv_id, "user", message)   # write-through on arrival
             # aclosing: closing this generator must synchronously close whatever
             # sub-path it drives (the tool loop owns a pump task), not defer to GC.
+            cwd, open_file = self._files_grounding(payload)
             async with aclosing(self._chat(
-                    message, conv_id, cwd=payload.get("cwd"),
-                    open_file=payload.get("open_file"),
+                    message, conv_id, cwd=cwd, open_file=open_file,
                     open_email=payload.get("open_email"),
                     surface=(payload.get("context") or {}).get("screen"))) as gen:
                 async for ev in gen:
@@ -855,7 +970,21 @@ class Router:
                 yield {"error": "settings unavailable"}
             else:
                 from .settings_snapshot import build_settings_snapshot
-                yield {"result": build_settings_snapshot(self._config)}
+                snap = build_settings_snapshot(self._config)
+                accounts = snap.setdefault("accounts", {})
+                # Canvas "connected" is live poller state, not config, so the
+                # snapshot builder can't know it — inject it here so Settings
+                # shows Canvas the same way it shows Gmail/Calendar (#37).
+                cs = self._canvas_status()
+                accounts["canvas"] = {"connected": cs["connected"],
+                                      "last_sync": cs["last_sync"]}
+                # Per-connection runtime Disable state (#38) rides alongside
+                # `connected`: a connection can be logged in but paused.
+                for name, acct in accounts.items():
+                    acct["enabled"] = (self._connection_state.enabled(name)
+                                       if self._connection_state is not None
+                                       else True)
+                yield {"result": snap}
         elif type_ == "google.reconnect":
             # Settings 'Reconnect' button — re-run the Google consent flow when
             # the refresh token has expired/been revoked. Blocks on the browser
@@ -884,6 +1013,10 @@ class Router:
                 yield {"error": "canvas unavailable"}
             else:
                 self._canvas.set_session(payload.get("cookies", {}))
+                # Sync at once instead of leaving the tab empty until the next
+                # poll tick — connecting one minute after a tick otherwise means
+                # a whole poll interval of nothing (live bug 2026-08-25).
+                self._kick_canvas_sync()
                 yield {"result": self._canvas_status()}
         elif type_ == "canvas.status":
             # Live poller state (not config) for the Canvas tab + Settings row.
@@ -892,6 +1025,31 @@ class Router:
             if self._canvas is not None:
                 self._canvas.clear_session()
             yield {"result": self._canvas_status()}
+        elif type_ == "connections.set_enabled":
+            # #38 Disable/Enable: pause or resume a connection's sync without
+            # touching its login. Persisted, so it survives a restart; the poll
+            # loops read this on their next tick via the `paused` predicate.
+            name = str(payload.get("name") or "")
+            if self._connection_state is None or name not in _CONN_NAMES:
+                yield {"error": "connections.set_enabled needs a known {name}"}
+            else:
+                self._connection_state.set_enabled(name, bool(payload.get("enabled")))
+                yield {"result": {"accounts": self._accounts_state()}}
+        elif type_ == "connections.disconnect":
+            # #38 Disconnect: remove the stored login. Gmail/Calendar share one
+            # Google token (dropping it disconnects both); Canvas clears its
+            # browser session. Re-enabling a disabled account is separate.
+            name = str(payload.get("name") or "")
+            if name in ("gmail", "google_calendar") and self._config is not None:
+                from .connectors import google_auth
+                google_auth.disconnect(self._config.google)
+                yield {"result": {"accounts": self._accounts_state()}}
+            elif name == "canvas":
+                if self._canvas is not None:
+                    self._canvas.clear_session()
+                yield {"result": {"accounts": self._accounts_state()}}
+            else:
+                yield {"error": "connections.disconnect needs a known {name}"}
         elif type_ == "canvas.pending_calendar":
             # Assignments whose due-date marker the user hasn't confirmed onto
             # the calendar yet (create), or whose due date drifted (update). Read
@@ -925,11 +1083,8 @@ class Router:
                 yield {"result": {"added": 0, "updated": 0}}
                 return
             confirm_id = self._confirm.begin()
-            yield {"confirm_request": {
-                "kind": "canvas_due_dates",
-                "summary": f"Add {len(pend)} Canvas due-date(s) to your calendar?",
-                "items": [{"name": p["name"], "due": p["due"]} for p in pend]},
-                "confirm_id": confirm_id}
+            yield {"confirm_request": _due_dates_confirm(pend, courses),
+                   "confirm_id": confirm_id}
             ok = await self._confirm.wait(confirm_id)
             if not ok:
                 yield {"result": {"added": 0, "updated": 0, "cancelled": True}}
@@ -963,6 +1118,7 @@ class Router:
                 for a in store.active_assignments():
                     c = courses.get(a["course_id"], {})
                     items.append({**a, "course_code": c.get("course_code"),
+                                  "course_name": c.get("name"),
                                   "pending_marker": a["id"] in pending})
                 yield {"result": {"assignments": items}}
         elif type_ == "canvas.announcements":
@@ -1002,6 +1158,80 @@ class Router:
             tid = self._todos.add_structured(text, due, tags)
             store.link_announcement_todo(ann["id"], tid)
             yield {"result": {"todo_id": tid}}
+        # --- Canvas -> Calendar -------------------------------------------
+        elif type_ == "canvas.calendar_status":
+            # One call feeds every toggle and strip in the Canvas tab.
+            if self._canvas is None or self._canvas_prefs is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                store = self._canvas.store
+                yield {"result": {
+                    **self._canvas_prefs.all(),
+                    "events": len(store.linked_events()),
+                    "queued": self._canvas_queue.count() if self._canvas_queue else 0,
+                    "proposals": (self._canvas_proposals.count()
+                                  if self._canvas_proposals else 0),
+                    "alerts": (self._canvas_alerts.count()
+                               if self._canvas_alerts else 0)}}
+        elif type_ == "canvas.set_calendar_sync":
+            if self._canvas_prefs is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                self._canvas_prefs.set_sync_enabled(bool(payload.get("enabled")))
+                yield {"result": self._canvas_prefs.all()}
+        elif type_ == "canvas.set_calendar_ai":
+            if self._canvas_prefs is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                on = bool(payload.get("enabled"))
+                self._canvas_prefs.set_ai_mode(on)
+                if on and self._canvas is not None:
+                    # Re-offer everything for classification: the switch was off
+                    # when these rows were first seen, so none were ever looked at.
+                    self._canvas.store.reset_ai_state()
+                yield {"result": self._canvas_prefs.all()}
+        elif type_ == "canvas.calendar_queue":
+            # Proposed removals awaiting review. Read-only.
+            if self._canvas_queue is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                yield {"result": {"items": self._canvas_queue.pending()}}
+        elif type_ == "canvas.resolve_removal":
+            # A removal executed INSIDE a request the user just made — the poll
+            # loop only ever proposes (see canvas_queue.py).
+            if self._canvas is None or self._canvas_queue is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                from .connectors import canvas_calendar
+                out = await canvas_calendar.resolve_removal(
+                    self._markers(), self._canvas.store, self._canvas_queue,
+                    int(payload.get("id", 0)), bool(payload.get("approve")))
+                yield {"result": {**out,
+                                  "queued": self._canvas_queue.count()}}
+        elif type_ == "canvas.proposals":
+            if self._canvas_proposals is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                yield {"result": {"items": self._canvas_proposals.pending()}}
+        elif type_ == "canvas.resolve_proposal":
+            # AI-inferred events never auto-create; this is the only path that
+            # puts one on the calendar, and it is one click per item.
+            if self._canvas_proposals is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                yield {"result": await self._accept_proposal(
+                    int(payload.get("id", 0)), bool(payload.get("approve")))}
+        elif type_ == "canvas.sync_now":
+            # Flipping a toggle has to do something visible without waiting out
+            # the next poll tick. Guarded by the existing sync lock.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            elif self._canvas.busy:
+                yield {"result": {"started": False, "reason": "already syncing"}}
+            else:
+                ok = await self._canvas.sync_once()
+                yield {"result": {"started": True, "ok": bool(ok),
+                                  "last_sync": self._canvas.last_sync()}}
         elif type_ == "canvas.courses":
             # The Manage-courses panel (#28): every enrolled course + its archive
             # flag, so archived ones can be switched back on.
@@ -1369,6 +1599,7 @@ class Router:
                 rows = [r for r in self._mail_store.list_page(
                             "inbox", limit=SUGGEST_SCAN_LIMIT)
                         if not ids.intersection(r["labels"])][:SUGGEST_LIMIT]
+                by_id = {r["id"]: r for r in rows}
                 suggestions = {}
                 try:
                     for r in rows:
@@ -1379,7 +1610,15 @@ class Router:
                 except LLMUnavailable as e:
                     yield {"error": str(e)}
                     return
+                # Previews let the review popup (#32) list every suggested
+                # message — sender/subject/date — even those past the UI's loaded
+                # page (scan is 200, the mail list holds ~50). Built from rows we
+                # already have in hand, so no extra fetch; the full body is
+                # pulled lazily via emails.get when a row is opened.
+                previews = {mid: self._with_label_names(
+                                [by_id[mid]])[0] for mid in suggestions}
                 yield {"result": {"suggestions": suggestions,
+                                  "previews": previews,
                                   "scanned": len(rows)}}
             elif type_ == "emails.apply_label":
                 # One-tap accept (suggestions): the tap IS the confirmation.
@@ -1539,6 +1778,22 @@ class Router:
         else:
             yield {"error": f"unknown request type: {type_}"}
 
+    @staticmethod
+    def _files_grounding(payload: dict) -> tuple[str | None, str | None]:
+        """Resolve the Files-screen grounding (cwd, open_file) from a chat
+        payload. The Chat/ui_v2 files ask sends cwd/open_file at the top level;
+        the ui_v3 Ask bar sends them inside context {screen: files, dir/file},
+        so the open folder/file never reached the file-grounded path (#43).
+        Accept both, and when only an open file is known (editing, no dir),
+        ground on its parent folder so the tool path still engages."""
+        ctx = payload.get("context") or {}
+        files_ctx = ctx if ctx.get("screen") == "files" else {}
+        open_file = payload.get("open_file") or files_ctx.get("file")
+        cwd = payload.get("cwd") or files_ctx.get("dir")
+        if not cwd and open_file:
+            cwd = str(Path(open_file).parent)
+        return cwd, open_file
+
     def _open_email_context(self, open_email: dict | None) -> str | None:
         """Context line naming the email the user has open in the mail screen
         (#11), so 'label this email' resolves to label_email against its id."""
@@ -1591,7 +1846,7 @@ class Router:
             sub, subsystem = self._briefing_chat(), "chat"
         elif (self._rules is not None and self._mail is not None
                 and self._mail_store is not None and self._confirm is not None
-                and RULE_HINT.search(message)):
+                and (RULE_HINT.search(message) or MAKE_LABEL_HINT.search(message))):
             sub, subsystem = self._create_rule_chat(message), "email"
         elif (self._mail is not None and self._mail_store is not None
                 and MAIL_LABEL_HINT.search(message)):
@@ -2362,8 +2617,18 @@ class Router:
         """NL draft → editable compose popup → send/cancel. The popup is the
         confirmation: the daemon sends exactly the fields the UI returns, and
         only on an explicit Send."""
+        # When the request references the calendar ("email X about the meeting
+        # we have tomorrow"), hand the model the user's REAL upcoming events so
+        # it writes from fact instead of inventing one (#39).
+        cal_ctx = None
+        if self._calendar is not None and CAL_HINT.search(message):
+            now = datetime.now().astimezone()
+            end = now.date() + timedelta(days=CAL_CONTEXT_DAYS)
+            cal_ctx = calendar_context(
+                self._calendar.list_range(now.date().isoformat(),
+                                          end.isoformat()), now, end)
         try:
-            draft, err = await propose_email(self._llm, message)
+            draft, err = await propose_email(self._llm, message, context=cal_ctx)
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2528,11 +2793,15 @@ class Router:
         return rows
 
     def _present_user_labels(self) -> list[str]:
-        """User-label names present on at least one mirrored message —
-        the chip row's vocabulary."""
-        m = {l["id"]: l["name"] for l in self._mail_store.user_labels()}
-        present = self._mail_store.present_label_ids()
-        return sorted((m[i] for i in present if i in m), key=str.casefold)
+        """Every user label the mail nav should offer as a section (#36): all
+        Gmail user labels — not only those already on some mirrored message —
+        UNION the label of every mail rule, so a freshly-created rule/label gets
+        its section immediately instead of only once mail lands under it. The
+        empty ones simply list zero mail until a rule or the user files some."""
+        names = {l["name"] for l in self._mail_store.user_labels()}
+        if self._rules is not None:
+            names.update(r["label"] for r in self._rules.list_all())
+        return sorted(names, key=str.casefold)
 
     async def _gated_mail_action(self, type_: str, payload: dict):
         """Confirm-over-IPC then execute a mail write against Gmail. Read-state

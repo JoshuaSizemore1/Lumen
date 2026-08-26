@@ -441,6 +441,25 @@ async def test_refresh_labels_and_apply_label(tmp_path):
     assert store.label_id("BSA") == "Label_9"
 
 
+async def test_remove_label_returns_message_to_inbox(tmp_path):
+    # #42: taking a user label off a message must put it back in the Inbox — the
+    # inverse of apply_label (which moves it out). Gmail and the mirror both.
+    svc = FakeService({}, {}, labels=[
+        {"id": "INBOX", "name": "INBOX", "type": "system"},
+        {"id": "Label_7", "name": "Bills", "type": "user"}])
+    store, sync = make_sync(tmp_path, svc)
+    store.upsert([msg(1)])
+    await sync.refresh_labels()
+    await sync.apply_label("m1", "Bills")               # filed out of the inbox
+    svc._messages.modify_calls.clear()
+
+    assert await sync.remove_label("m1", "Bills") is True
+    assert svc._messages.modify_calls == [
+        ("m1", {"removeLabelIds": ["Label_7"], "addLabelIds": ["INBOX"]})]
+    got = store.get("m1")
+    assert "Label_7" not in got["labels"] and "INBOX" in got["labels"]
+
+
 async def test_incremental_applies_rules_to_new_inbox_mail(tmp_path):
     # A new INBOX message arriving via the History delta gets the matching
     # rule's label and loses INBOX; SENT mail is untouched.

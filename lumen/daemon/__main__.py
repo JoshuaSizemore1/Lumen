@@ -9,12 +9,18 @@ from lumen.daemon import db
 from lumen.daemon.config import load_config
 from lumen.daemon.confirm import ConfirmBroker
 from lumen.daemon.connectors.books import BookStore
+from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
+from lumen.daemon.connectors.canvas_prefs import CanvasPrefs
+from lumen.daemon.connectors.canvas_proposals import CanvasProposals
+from lumen.daemon.connectors.canvas_queue import CanvasQueue
 from lumen.daemon.connectors.canvas_store import CanvasStore
 from lumen.daemon.connectors.canvas_sync import CanvasSync
+from lumen.daemon.connectors.connection_state import ConnectionState
 from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.mail_rules import RuleStore
-from lumen.daemon.connectors.gcal import CalendarSync, EventStore
+from lumen.daemon.connectors.gcal import (CalendarMarkerWriter, CalendarSync,
+                                          EventStore)
 from lumen.daemon.connectors.manabi import ManabiStatus
 from lumen.daemon.connectors.memory_log import MemoryLog
 from lumen.daemon.connectors.notes import NotesStore
@@ -45,8 +51,27 @@ async def run() -> None:
     emails = EmailStore(conn)
     rules = RuleStore(conn)
     mail = GmailSync(emails, cfg.google, cfg.sync, rules=rules)
+    # One writer, shared by the poll loop and the router's user-initiated routes.
+    markers = CalendarMarkerWriter(cfg.google)
+    canvas_prefs = CanvasPrefs(conn)
+    canvas_queue = CanvasQueue(conn)
+    canvas_alerts = CanvasAlerts(conn)
+    canvas_proposals = CanvasProposals(conn)
     canvas = CanvasSync(CanvasStore(conn), cfg.canvas,
-                        todos=TodoStore(conn), llm=llm)
+                        todos=TodoStore(conn), llm=llm,
+                        session_path=cfg.canvas.session_path,
+                        markers=markers, prefs=canvas_prefs,
+                        queue=canvas_queue, alerts=canvas_alerts,
+                        proposals=canvas_proposals, events=events)
+    # Before any task starts, so `connected` is already true for the first
+    # status query a freshly-launched UI makes.
+    canvas.restore_session()
+    # #38: persistent per-connection Disable. The poll loops read this each tick
+    # via `paused`, so a Settings toggle pauses/resumes sync with no restart.
+    connections = ConnectionState(conn)
+    mail.paused = lambda: not connections.enabled("gmail")
+    calendar.paused = lambda: not connections.enabled("google_calendar")
+    canvas.paused = lambda: not connections.enabled("canvas")
     memory_log = MemoryLog(conn)
     procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
     memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,
@@ -58,6 +83,9 @@ async def run() -> None:
     router = Router(llm, TodoStore(conn), BookStore(conn), calendar=calendar,
                     mail=mail, mail_store=emails, canvas=canvas,
                     bridge=bridge, confirm=broker, write_gate=write_gate,
+                    marker_writer=markers, canvas_prefs=canvas_prefs,
+                    canvas_queue=canvas_queue, canvas_alerts=canvas_alerts,
+                    canvas_proposals=canvas_proposals,
                     model_router=model_router, tool_log=tool_log,
                     conversations=ConversationStore(conn),
                     suggestions=SuggestionStore(conn),
@@ -72,7 +100,7 @@ async def run() -> None:
                     memory_cap=cfg.memory.blob_cap_chars,
                     procedures=procedures,
                     distill_trigger=memory_worker.schedule,
-                    config=cfg, rules=rules,
+                    config=cfg, rules=rules, connection_state=connections,
                     max_iterations=cfg.mcp.max_iterations)
     server = IPCServer(cfg.socket_path, router)
     await server.start()

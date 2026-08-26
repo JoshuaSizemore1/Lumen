@@ -524,7 +524,10 @@ about how Lumen should respond at all.
       `state.refresh_todos()` on turn completion, which re-runs `todos.list` and
       emits `todos_changed`, so the Todos screen updates immediately after the
       prompt. Regression-tested in `tests/ui/test_chat_screen_v3.py`.
-21. I want be able to click on a todo, and a card popup appears with a more indepth explination of the todo, including a description, and all its tags
+21. I want be able to click on a todo, and a card popup appears with a more indepth explination of the todo, including a description, and all its tags — ✔ done (verified 2026-07-21)
+    - Already shipped: `TodoDetailDialog` in `ui_v3/screens/todos.py` opens on a
+      todo click (`_open_detail`) and shows the full text, description, due date
+      and all tags. Covered by `tests/ui/test_todo_detail_v3.py` (passing).
 22. Whenever I give a prompt to lumen it says something along the lines of "cold start", verify if it is cold starting every single time I give it a new prompt, and if it is fix that, and if not remove the confusing message so it only says cold start if it is truely cold starting — ✔ fixed
     - **Verified:** it was NOT cold-starting every time. The message came from a
       blind 1.5s `QTimer` (`WAKE_THRESHOLD_MS`) in each chat surface that fired
@@ -538,8 +541,17 @@ about how Lumen should respond at all.
       model it says "◇ working…" instead. Live-verified against the real daemon
       + Ollama: cold turn → cold_start emitted; immediate warm turn → not
       emitted; after unload → emitted again.
-23. Lumen says it cannot add tags to todo list items, verify this, and then add a way to edit already made todos, thus a way to add / remove tags, and give Lumen a tool to do all this
-24. For any chat done in the "Ask Lumen" bar do not automatically create a chat instance in the "Chat" section of the application, only create a chat if the user clicks the "open chat" button
+23. Lumen says it cannot add tags to todo list items, verify this, and then add a way to edit already made todos, thus a way to add / remove tags, and give Lumen a tool to do all this — ✔ done (verified 2026-07-21)
+    - Already shipped end to end: the `todos` table carries `tags` + `description`;
+      `TodoStore.update()` edits text/description/due/tags; the `edit_todo` tool
+      in `local_tools.py` (attached via TODO_TOOLS) lets Lumen change text, due,
+      description and add/remove tags by id; the `todos.update` IPC route and the
+      in-place-editable `TodoDetailDialog` cover the UI. Router + UI tests pass.
+24. For any chat done in the "Ask Lumen" bar do not automatically create a chat instance in the "Chat" section of the application, only create a chat if the user clicks the "open chat" button — ✔ done (verified 2026-07-21)
+    - Already shipped: the Ask bar sends `ephemeral: True`, and the daemon only
+      emits a `conversation_id` / persists when `not ephemeral` (router `_chat`).
+      A thread is created solely by "open in Chat ↗" (`askbar._open_in_chat` →
+      `seed_conversation`). Asserted in `tests/daemon/test_router.py` (ephemeral).
 25. There is no button to go back a directoy in the file manager — ✔ fixed
     - **Done:** the ui_v3 Files screen now has a "↑ Up" button at the left of the
       breadcrumb bar that steps up one level (`self.path.parent`), disabled at the
@@ -563,23 +575,232 @@ about how Lumen should respond at all.
       red, ≤3 days = amber) and per-course colour chips; announcements share the
       course colouring. Regression-tested in `tests/ui/test_canvas_screen.py`.
 
-28. And idea for the canvas UI, I want a button to press to view the canvas webpage and brows it like a normal website; each assignment should have a button / link in it to click to open it in canvas; I want to be able to turn on and off certain classes / courses so I do not pull information from past classes
-29. The new swipe back/forward navigation should go up and down directories in the file viewer similar to the calendar nav
+28. And idea for the canvas UI, I want a button to press to view the canvas webpage and brows it like a normal website; each assignment should have a button / link in it to click to open it in canvas; I want to be able to turn on and off certain classes / courses so I do not pull information from past classes — ✔ done (commits 9739da0 / a94179f)
+    - Shipped as the Canvas UI rework: "Browse Canvas ↗" opens the in-app
+      QWebEngine browser, each assignment/announcement row opens in Canvas on
+      click, and a "Manage courses" panel archives courses on/off (non-destructive
+      `included` flag; two-phase sync skips archived). Verified present in
+      `canvas.py` (`_start_browse`, `_open_in_browser`, the Manage panel).
+29. The new swipe back/forward navigation should go up and down directories in the file viewer similar to the calendar nav — ✔ fixed (2026-07-21)
+    - **Done:** the Files screen now joins the unified back/forward history the
+      same way the calendar does — `FilesScreen.nav_token()`/`nav_restore()`
+      expose its in-page location `(folder, open_file)`, and every settle emits
+      `nav_location_changed`. Per Josh's choice, every step is undoable: entering
+      a folder, going up, AND opening/closing a text file (back from an open file
+      returns to its folder). `_open` now routes through `_go`, which dedups a
+      re-open of the current folder so no empty history steps land. `nav_restore`
+      re-reads the file's content and falls back to the folder if the file
+      vanished since it was visited. The shell's `_current_entry` already calls
+      `nav_token()` on any screen that has it, so Files was picked up with no
+      main-window change. Regression-tested in `tests/ui/test_files_nav_v3.py`;
+      verified end-to-end headlessly (home → folder → subfolder, back-swipe
+      restores the parent).
 30. Look at the rendering for the email with subject "Your receipt from Anthropic, PBC #2727-6826-8411", as it does not render good at all
-31. If I swipe left or right to navigae back/forward pages, if I fully swipe then hold it at the end, it does not wait for me to let go, it will auto go back/forward after a second or so
-32. The auto suggusted email tags, after finishinf clasifying them it makes a little X suggusted button on the top of the inbox that you click to accept the changes, however I want it to instead when done with the work auto pull up a mini inbox popup that lets you look through the emails it suggusted tags for and accept or deny
-33. As emails come in, they should automatically be ran through the lumen AI to determine the tag for it, and be auto added without me confirming, thus I can look at each inbox and see any with unread mail, then look there
-34. Ran into an issue where I asked lumen in the "ask lumen" bottom bar "I want to create a new email tag for fidelity emails", and it responded immediatly with "(no answer)", with the thinking... still playing the animation 
-35. I asked lumen if it could make a new label for emails from fidelity, and it said it can't as it does not have the capabilities to modify email labels or settings directly; check if this is true, and if it is then add a tool so it can
-36. It created a new rule, but the inbox did not create a new section for the new label, and the emails did not show that they now have a new label; this means the inbox, and labels need to be managed dynamically so when lumen craetes new rules, and new labels it can handel it seamlessly (It does appear but only if there are emails with that label)
-37. In the settings tab it says that the connection is managed in the canvas tab for the canvas connectiong, however I want it to show if it is connected or not connected, in the settings like the gmail, and google calendar
-38. Add a button next to each connection in the settings to disable the connection, and another button for deleting the connection
-39. When I asked lumen to find the email address of X and send an email about the event we have tommorow on my calendar, it 1. set an email to a random email address, and 2. made up some random event to talk about in the email body
+31. If I swipe left or right to navigae back/forward pages, if I fully swipe then hold it at the end, it does not wait for me to let go, it will auto go back/forward after a second or so — ✔ fixed (2026-07-21)
+    - **Root cause:** `SwipeNavigator` armed its `IDLE_MS` inactivity timer on
+      *every* movement event, even on platforms that deliver real Qt scroll
+      phases. That timer is only meant as a release stand-in for NoScrollPhase
+      touchpads — but a movement pause can't tell "fingers held still" from
+      "fingers lifted", so holding at the edge tripped the timer and committed
+      the navigation instead of waiting for the real finger-lift (`ScrollEnd`).
+    - **Done:** the navigator now tracks whether the current gesture has seen a
+      real phase (`_has_phase`); when phases are present it waits for `ScrollEnd`
+      and never arms the idle timer, so a held swipe stays put until release. The
+      timer fallback is unchanged for NoScrollPhase touchpads (phase `None`).
+      Regression-tested (`test_phase_platform_waits_for_release_not_idle_timer`);
+      the NoScrollPhase fallback test still passes. **Real two-finger-trackpad
+      feel on Wayland is Josh-only** (same hardware caveat as #18).
+32. The auto suggusted email tags, after finishinf clasifying them it makes a little X suggusted button on the top of the inbox that you click to accept the changes, however I want it to instead when done with the work auto pull up a mini inbox popup that lets you look through the emails it suggusted tags for and accept or deny — ✔ done (2026-07-22)
+    - **Design (chosen by Josh):** a two-pane mini-inbox popup, not just a list.
+      LEFT: every message that got a suggested label — sender, subject, the
+      proposed-label chip, and ✓ accept / ✕ deny per row, clustered by label.
+      RIGHT: click a row and its FULL body renders exactly like the normal inbox
+      (shared `MailBodyView`), so the label is judged after reading the mail;
+      an inline "File under X / Skip" decision sits above the body. Footer:
+      "N to review", Accept all, Dismiss all.
+    - **Done:** the old inline dashed-chips + "file N → label" bar are gone. When
+      "✦ suggest labels" finishes with ≥1 suggestion the shell opens
+      `SuggestReviewOverlay` (a window-level `_Scrim`, dimming the app like the
+      confirm/compose overlays) via a new `suggest_review_requested` signal.
+      Nothing is written during classification, so ✕ is purely local and ✓ is the
+      same `emails.apply_label` a manual label uses (moves the mail out of inbox);
+      the popup closes once every suggestion is handled. The daemon's
+      `mail.suggest_labels` now returns a lightweight `previews` map (sender/
+      subject/date, built from rows already in hand) so the popup can list mail
+      past the UI's loaded page; the full body is pulled lazily via `emails.get`
+      (`state.fetch_mail`) on open. New reusable `MailBodyView` (shared image
+      loader with the inbox pane). Tested: daemon previews, state plumbing
+      (`accept_all_suggestions`, `fetch_mail`, preview storage), and the popup
+      (list/cluster/accept/reject/close/dismiss). Screenshot-verified.
+33. As emails come in, they should automatically be ran through the lumen AI to determine the tag for it, and be auto added without me confirming, thus I can look at each inbox and see any with unread mail, then look there — ✗ won't do (Josh's decision, 2026-07-22)
+    - **Decision:** Josh chose NOT to auto-classify incoming mail with the local
+      model (it would load the model on every batch of new mail — the exact
+      power/thermal cost the project treats as a hard constraint). Incoming mail
+      keeps getting only the deterministic `_apply_rules` pass (no LLM); Josh
+      files the rest by making rules. No code change.
+34. Ran into an issue where I asked lumen in the "ask lumen" bottom bar "I want to create a new email tag for fidelity emails", and it responded immediatly with "(no answer)", with the thinking... still playing the animation — ✔ fixed (2026-07-22)
+    - **Two parts.** The routing that produced no answer for that exact phrasing
+      was already closed by #35 ("create/make a new label/tag for emails from X"
+      now routes to the rule-authoring flow, which always answers). What remained
+      was the UI defect Josh actually described: a turn that ends with NO text
+      left the "◇ thinking" dots spinning forever over "(no answer)".
+    - **Root cause:** on all three prompt surfaces (Ask-Lumen bar, Chat,
+      launcher), `_on_chunk` and `_on_error` settle the status animation but
+      `_on_done` did not — so an empty-answer completion never stopped the dots.
+    - **Done:** `_on_done` now sets a static "◇ no answer" status (stopping the
+      TypingDots timer) when the turn produced no text, on all three surfaces.
+      Regression-tested (`test_empty_answer_settles_v3.py`): after an empty done,
+      the status timer is stopped and the text reads "(no answer)".
+35. I asked lumen if it could make a new label for emails from fidelity, and it said it can't as it does not have the capabilities to modify email labels or settings directly; check if this is true, and if it is then add a tool so it can — ✔ fixed (2026-07-21)
+    - **Root cause (a routing gap, not a missing capability):** the rule-creation
+      flow (`_create_rule_chat` → `propose_rule` → gated save, which creates the
+      Gmail label) already existed, but `RULE_HINT` only matched the words
+      "rule"/"filter". "make a new **label** for emails from fidelity" says
+      "label", so it never routed there and the model answered from ignorance.
+    - **Done:** new `MAKE_LABEL_HINT` catches "create/make/add/new/set up … a
+      label/tag" and routes it to the same rule-authoring flow. It is gated on a
+      mail word (email/inbox/sender/from) so "add a tag to my todo" — todos also
+      carry tags — is NOT captured, and it requires a leading create verb so
+      "label this email as Work" stays with the apply-to-open-message path
+      (MAIL_LABEL_HINT). Regression-tested in `test_router.py`.
+36. It created a new rule, but the inbox did not create a new section for the new label, and the emails did not show that they now have a new label; this means the inbox, and labels need to be managed dynamically so when lumen craetes new rules, and new labels it can handel it seamlessly (It does appear but only if there are emails with that label) — ✔ fixed (2026-07-21)
+    - **Root cause:** the mail nav's label vocabulary (`_present_user_labels`)
+      listed only labels present on at least one mirrored message, so a
+      just-created label/rule had no section until mail landed under it.
+    - **Done:** it now returns ALL Gmail user labels UNION every mail rule's
+      label, so a fresh rule/label gets its nav section immediately (empty until
+      mail arrives). Flows to the UI through `state.mail_labels`. Regression-
+      tested (`test_emails_list_labels_include_empty_user_labels`).
+37. In the settings tab it says that the connection is managed in the canvas tab for the canvas connectiong, however I want it to show if it is connected or not connected, in the settings like the gmail, and google calendar — ✔ fixed (2026-07-21)
+    - **Done:** the `settings.get` route injects the live Canvas poller status
+      into the snapshot's accounts (the snapshot builder only sees config, not the
+      live session), so the Canvas row now shows a Connected/Not-connected dot +
+      word exactly like Gmail/Calendar. Connect still lives in the Canvas tab
+      (the web view can't sit in the config sheet), so a disconnected Canvas row
+      shows a "connect in the Canvas tab ↗" pointer instead of a dead button.
+      Tested in `test_settings_screen_v3.py` + the daemon snapshot tests.
+38. Add a button next to each connection in the settings to disable the connection, and another button for deleting the connection — ✔ fixed (2026-07-21)
+    - **Design (chosen by Josh):** "Disable" pauses a connection's syncing but
+      keeps its login (reversible with "Enable"), and it PERSISTS across restarts;
+      "Disconnect" removes the stored login (reconnect to use again).
+    - **Done:** persistence lives in SQLite (`connection_state` table +
+      `ConnectionState` store) rather than rewriting config.toml. Each poll loop
+      (Gmail/Calendar/Canvas) grew a `paused` predicate wired to it in `__main__`,
+      checked every tick, so a toggle pauses/resumes with no daemon restart. New
+      IPC routes `connections.set_enabled` (persist + report) and
+      `connections.disconnect` (Google → delete the shared token via new
+      `google_auth.disconnect`; Canvas → clear_session). Settings renders per
+      connection: Disable/Enable + Disconnect on a connected row, the status shows
+      "Paused" when disabled. Unit-tested across store, poll-gating, routes, and
+      UI. NOTE: the live pause of the real Gmail/Calendar pollers needs Josh to
+      confirm on the running daemon (same background-loop caveat as #16/#18).
+39. When I asked lumen to find the email address of X and send an email about the event we have tommorow on my calendar, it 1. set an email to a random email address, and 2. made up some random event to talk about in the email body — ✔ fixed (2026-07-21)
+    - **Bug 2 (invented event) — fixed:** when a compose request references the
+      calendar ("about the event we have tomorrow"), the daemon now hands the
+      model the user's REAL upcoming events (`calendar_context`) as grounding so
+      it writes from fact, plus an explicit anti-fabrication rule in the draft
+      system prompt ("never invent events/dates/names… describe only the events
+      provided"). Recipients are still validated against the ORIGINAL message
+      only, so grounding text can never authorize an address. Regression-tested
+      (`test_compose_grounds_draft_with_real_calendar_events`, compose unit test).
+    - **Bug 1 (random recipient) — bounded:** `validate_draft` already drops any
+      address not literally typed by the user, and `_lookup_address` is
+      sender-scoped + word-anchored (audit 2026-07-19); the compose window always
+      shows the To field for confirmation before Send. The residual fuzzy-match
+      risk on find-then-send is inherent to matching a name against the mirror and
+      is gated by that confirmation — no change beyond the existing hardening.
 40. Stared emails in gmail need to be accessable, and a stared email systme needs to be added so I can star important emails
-41. There is no way to manage / remove email rules manually
-42. If you remove a label from an email it should automatically get the inbox label again and appear in the inbox
-43. Review the way that context about the currently opened page is given to the "ask lumen" bar as it does not seem to help give it context for the file manager page
-
+41. There is no way to manage / remove email rules manually — ✔ fixed (2026-07-21)
+    - **Root cause:** rules could be created (mail screen, chat, "always label…")
+      and edited/deleted one at a time via `RuleDialog`, but nothing LISTED every
+      rule to manage them; Settings had no rules section at all (the daemon routes
+      `rules.list/toggle/delete` already existed).
+    - **Done:** a `[mail_rules]` section in Settings lists every rule with a
+      one-line condition summary, an enable/disable switch (`rules.toggle`), and a
+      ✕ delete (`rules.delete`); clicking a rule opens the existing editor, and a
+      "+ New rule" button creates one. Fetched on show via `state.list_rules`.
+      Regression-tested in `test_settings_screen_v3.py`.
+42. If you remove a label from an email it should automatically get the inbox label again and appear in the inbox — ✔ fixed (2026-07-21)
+    - **Root cause:** `remove_label` deliberately did NOT restore INBOX (a prior
+      design: "removing a label is not un-filing"). Josh wants the opposite.
+    - **Done:** `remove_label` is now the exact inverse of `apply_label` (label =
+      move out of inbox) — it removes the label AND re-adds INBOX, in Gmail and
+      the mirror, so the message reappears in the inbox. Regression-tested
+      (`test_remove_label_returns_message_to_inbox`).
+43. Review the way that context about the currently opened page is given to the "ask lumen" bar as it does not seem to help give it context for the file manager page — ✔ fixed (2026-07-21)
+    - **Root cause:** the daemon read the Files grounding from TOP-LEVEL payload
+      keys `cwd`/`open_file` (the old ui_v2 files-ask shape), but the ui_v3 Ask
+      bar sends the open folder/file INSIDE `context` ({screen: files, dir/file}).
+      So the Ask bar's file context never reached the file-grounded tool path, and
+      an open file (which has no `dir`) was ignored entirely.
+    - **Done:** a `_files_grounding(payload)` helper resolves cwd/open_file from
+      BOTH shapes and, when only an open file is known, grounds on its parent
+      folder so the tool path still engages. Regression-tested
+      (`test_files_grounding_reads_ui_v3_context_and_top_level`).
+44. The auto saved canvas login is not auto filling in the browser when loging in — ✔ fixed
+    - **Cause (four separate faults, all silent):** `autofill_js` did a one-shot
+      `el.value = x` at `loadFinished`, with no `input`/`change` events (so a
+      framework-controlled form ignored the write and submitted blanks), no retry
+      (a form mounted after load was simply missed), no iframe traversal, and no
+      `input[type=password]` fallback selector. The *capture* side used its own
+      copy of the selector string, so a form it missed was never saved to the
+      keyring either — autofill then had nothing to fill, forever. Nothing was
+      logged on any of those paths.
+    - **Done:** shared `USER_/PASS_/SUBMIT_SELECTORS`; assignment through the
+      native `HTMLInputElement.value` setter plus bubbling `input`/`change`;
+      retry on an interval *and* a `MutationObserver` up to a deadline;
+      same-origin frame walk; a JSON report per injection (selectors and counts
+      only, never values) that is logged every time. Fill-and-submit is spent
+      once per session (`AutoSubmitPolicy`), and a password field reappearing
+      after a submit locks to fill-only permanently — a second automatic attempt
+      with wrong credentials is a university account lockout. Autofill is now
+      gated on login mode, so it no longer types the password into any Canvas
+      page carrying a password field. `canvas_creds` is self-guarded (a locked
+      keyring used to raise out of a Qt slot and look exactly like a selector
+      miss). `LUMEN_CANVAS_DEBUG=1` adds Probe / Test-fill for the live form.
+    - **Verification:** the generated JS is executed against a stub DOM in node
+      (`tests/ui/js/`), because every string a structural test would look for was
+      already present in the broken version. Still needs one live run on the real
+      CAS + Duo form — only Josh can drive that.
+44b. Canvas session did not survive a daemon restart, forcing a full CAS + Duo
+    login several times a week — ✔ fixed
+    - **Done:** the daemon persists the session jar to a mode-0600 JSON file
+      (`[canvas] session_path`), matching how `google_auth` already stores the
+      strictly more powerful Google refresh token. Not the keyring: systemd can
+      start the daemon before the Secret Service is unlocked, and a keyring read
+      would then return None and bring the daemon up silently disconnected. The
+      password still never leaves the UI. A 401 deletes the file rather than
+      only marking the session dead — otherwise a stale cookie is restored on
+      every restart forever and the UI never asks for a new login. Cookies are
+      now filtered to the Canvas host at capture, so IdP/Duo cookies neither
+      reach the daemon nor land on disk.
+44c. Canvas → Calendar due-date sync — ✔ built
+    - Two switches in Canvas settings, both **off** by default. Basic mode writes
+      a timed event ending at each due time and starting 15 minutes before it
+      (all-day when the due time is local midnight), with course, points and a
+      link in the body. Creates, updates and reschedules happen silently; only a
+      disappearance is queued for review, because the background poll cannot
+      raise a modal (ConfirmBroker's timeout is a *deny*). "Lumen-powered" adds a
+      summary and colour by type, mines exam dates out of announcements, and
+      proposes prep blocks — none of which ever auto-create; each is approved
+      item by item. The old blank confirm dialog on `canvas.push_due_dates` is
+      fixed, and that manual strip now hides itself when auto-sync is on.
+45. Look into why Lumen says "(no awnser)" sometimes, and how we can get rid of this possiblity forever
+46. One time when I ran the auto catagories emails, it just put everthing as FIDELITY
+47. Maybe add a keybind for quiting all lumen deaemons if any are left running 
+48. When I went to add a edit a todo list and add a tag like "AbellCRM", it removed the item from the todolist
+49. Sometimes when clicking tthrough emails quickly before they even load, it will send be backwards in the list and I have to scroll back down
+50. I want to be able to use the up and down arrow key to change through emails rather than to move the scroll bar
+51. For the classifying and auto labeling emails look first into developing a dictonary based on emails already in that label as they are added then use regex or something to give unlabeled emails a label, then if uncertain / it does not contain enough of the keywords to be confident it will use the lumen local AI. This should speed up the process but still give the user the ability to choose if the algorithm / lumen was correct
+52. One time the UI for approving suggusteed labels was really slow, make sure that all the UI's are efficent and not slow.
+53. I think part of the issue with issue #52 is that emails slow down the process when they are being loaded, make sure they are loaded using a different thread or something like this so thee main program does nto become slow. Another thing is the loading the emails in the suggusted labels approval popup, is slow. Overall there needs to be better email loading so its more smooth and efficent, as well as they look more normal / have the correct styling applied
+54. Fine tune the tab based context so it better understand that if I am on the email screen anything I ask it to do is probably going to be in the context of emails
+55. Clarify the tooling, as lumen said it cannot remove lables from emails it only has the tool "label_email", which it thinks means it can only add labels not remove them. If it is true that it cannot remove labels, we need to change the tooling to allow it to, or add a new tool so it can 
+56. After the user accpets the suggusted labels it should not use the local Lumen AI to apply them using tooling, it should inst
+ead do it programatically, where the email id / whatever signifies that email is given to some labeling function with the new label it should have, this way the lumen AI is only being useed for the decission making, and using the tool is specific cases when needed such as indivdual user requests.
+57. When I logged into canvas using the browse canvas button in the canvas tab, it took me to a white screen with the url simply of https://utah.instructure.com/ (it finally loaded after a long time, so I am guessing ti is the correct url but took a long time for some reason)
+58. The auto sync for canvas scrapping might be broken as well as it is not showing my new classes.
+59. I had to close lumen fully to get the calendar to fully update with the new canvas assignments
 ---
 
 ## Josh's Finds — status 2026-07-21

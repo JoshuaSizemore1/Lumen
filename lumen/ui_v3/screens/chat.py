@@ -300,6 +300,9 @@ class ChatScreen(QWidget):
         self._busy = False
         self._wake.stop()
         if not self._acc:
+            # Settle the status so the "◇ thinking" dots stop when a turn ends
+            # with no text — otherwise the spinner runs forever (#34).
+            self._status("◇ no answer", T.TEXT_FAINT)
             self.resp_label.setText("(no answer)")
         self._messages.append({"role": "assistant", "text": self._acc})
         self._refresh_list()

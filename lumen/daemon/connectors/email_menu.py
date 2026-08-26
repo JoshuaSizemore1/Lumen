@@ -445,6 +445,8 @@ class GmailSync:
         self._injected = service_factory is not None
         self._service_factory = service_factory or self._build_service
         self._sync_lock = asyncio.Lock()
+        # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
+        self.paused = lambda: False
 
     @property
     def connected(self) -> bool:
@@ -632,11 +634,19 @@ class GmailSync:
         """Daemon background task; cancellation is the shutdown path."""
         interval = self._sync.gmail_poll_minutes * 60
         while True:
-            try:
-                await self.sync_once()
-            except Exception:
-                log.exception("gmail poll iteration failed")
+            await self._poll_iteration()
             await asyncio.sleep(interval)
+
+    async def _poll_iteration(self) -> None:
+        # `paused` is the runtime Disable switch (#38): when the connection is
+        # turned off in Settings we skip the sync but keep the loop alive so a
+        # re-enable resumes on the next tick without restarting the daemon.
+        if self.paused():
+            return
+        try:
+            await self.sync_once()
+        except Exception:
+            log.exception("gmail poll iteration failed")
 
     async def fetch_html(self, mid: str) -> str | None:
         """Lazy HTML backfill: mail mirrored before the body_html column gets
@@ -761,15 +771,17 @@ class GmailSync:
         return True
 
     async def remove_label(self, mid: str, label_name: str) -> bool:
-        """Take a user label off a message (#9). Unlike apply_label this does
-        NOT restore INBOX — removing a label is not the same as un-filing —
-        so the message stays wherever it currently lives, minus the label."""
+        """Take a user label off a message and return it to the Inbox (#42) —
+        the exact inverse of apply_label (label = move out of inbox). Removing
+        the label un-files the message, so it reappears in the inbox. Gmail
+        first, then the mirror."""
         label_id = self._store.label_id(label_name)
         if label_id is None:
             return False
-        if not await self._modify(mid, {"removeLabelIds": [label_id]}):
+        if not await self._modify(mid, {"removeLabelIds": [label_id],
+                                        "addLabelIds": ["INBOX"]}):
             return False
-        self._store.update_labels(mid, add=[], remove=[label_id])
+        self._store.update_labels(mid, add=["INBOX"], remove=[label_id])
         return True
 
     async def _apply_rules(self, msgs: list[dict]) -> None:

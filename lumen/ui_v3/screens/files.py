@@ -79,19 +79,34 @@ class FilesScreen(QWidget):
 
     # ---- navigation -------------------------------------------------------
     def _open(self, p: Path):
+        changed = self._go(p)
+        self.rebuild()
+        # Every place the Files screen settles — a folder step or opening a
+        # text file — is a location on the app-wide back/forward history (#29),
+        # exactly like the calendar's in-page steps.
+        if changed:
+            self.state.nav_location_changed.emit()
+
+    def _go(self, p: Path) -> bool:
+        """Move to `p` (a dir to browse or a text file to open). Returns True if
+        the location actually changed, so `_open` only records real steps."""
         if p.is_dir():
+            if self.path == p and self.open_file is None:
+                return False
             self.path = p
             self.open_file = None
             self.dirty = False
-        elif p.suffix.lower() in TEXT_SUFFIXES:
+            return True
+        if p.suffix.lower() in TEXT_SUFFIXES:
             result = self.state.read_file(p)
             if result.get("error"):
                 self.state.toast_requested.emit(f"⚠ {result['error']}")
-                return
+                return False
             self.open_file = p
             self.editor_text = result.get("content", "")
             self.dirty = False
-        self.rebuild()
+            return True
+        return False
 
     def open_path(self, p) -> None:
         """Open a file requested from elsewhere in the shell, e.g. Settings'
@@ -108,6 +123,32 @@ class FilesScreen(QWidget):
             return {"screen": "files", "file": str(self.open_file),
                     "content": self.editor.toPlainText()[:8000]}
         return {"screen": "files", "dir": str(self.path)}
+
+    # ---- app-wide back/forward hook (#29) ---------------------------------
+    # Mirrors the calendar: the shell's SwipeNavigator owns the gesture and the
+    # unified history; Files just exposes its in-page location (which folder,
+    # which open file) so back/forward can restore it.
+    def nav_token(self) -> tuple:
+        return (self.path, self.open_file)
+
+    def nav_restore(self, token: tuple) -> None:
+        # The shell replaying history, not a fresh navigation — apply the
+        # location WITHOUT emitting nav_location_changed.
+        path, open_file = token
+        self.path = path
+        self.dirty = False
+        if open_file is None:
+            self.open_file = None
+        else:
+            result = self.state.read_file(open_file)
+            if result.get("error"):
+                # Vanished/unreadable since it was visited — fall back to the
+                # folder rather than restoring a broken editor.
+                self.open_file = None
+            else:
+                self.open_file = open_file
+                self.editor_text = result.get("content", "")
+        self.rebuild()
 
     # ---- build ------------------------------------------------------------
     def rebuild(self):
@@ -323,6 +364,8 @@ class FilesScreen(QWidget):
         self.dirty = False
         self._proposal = None
         self.rebuild()
+        # Closing returns to the folder — a new location on the history (#29).
+        self.state.nav_location_changed.emit()
 
     # ---- assisted edit ----------------------------------------------------
     def _ask_edit(self):

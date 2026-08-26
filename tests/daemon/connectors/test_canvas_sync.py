@@ -4,6 +4,7 @@ import pytest
 
 from lumen.daemon import db
 from lumen.daemon.config import CanvasConfig
+from lumen.daemon.connectors import canvas_session
 from lumen.daemon.connectors.canvas_client import CanvasSessionExpired
 from lumen.daemon.connectors.canvas_store import CanvasStore
 from lumen.daemon.connectors.canvas_sync import CanvasSync
@@ -176,3 +177,209 @@ async def test_archived_course_is_not_fetched(tmp_path):
     sync._client_factory = lambda: rec2
     await sync.sync_once()
     assert set(rec2.queried) == {1, 2}
+
+
+# --- session persistence (Workstream P) --------------------------------------
+def make_persistent(tmp_path, client, session_path=None):
+    """Like make(), but with a session file — and NO session set, so each test
+    decides whether one exists."""
+    store = CanvasStore(db.connect(tmp_path / "p.db"))
+    path = session_path or (tmp_path / "session.json")
+    sync = CanvasSync(store, CanvasConfig(enabled=True), session_path=path,
+                      client_factory=lambda: client)
+    return store, sync, path
+
+
+def test_set_session_persists_the_jar(tmp_path):
+    _store, sync, path = make_persistent(tmp_path, FakeClient(courses=[]))
+    sync.set_session({"canvas_session": "abc"})
+    assert canvas_session.load(path) == {"canvas_session": "abc"}
+
+
+def test_clear_session_removes_the_file(tmp_path):
+    _store, sync, path = make_persistent(tmp_path, FakeClient(courses=[]))
+    sync.set_session({"canvas_session": "abc"})
+    sync.clear_session()
+    assert not path.exists()
+    assert sync.connected is False
+
+
+def test_restore_session_reconnects_without_a_login(tmp_path):
+    """The whole point: a daemon restart must not send the user back to Duo."""
+    _store, sync, path = make_persistent(tmp_path, FakeClient(courses=[]))
+    canvas_session.save(path, {"canvas_session": "abc"})
+    assert sync.connected is False
+    assert sync.restore_session() is True
+    assert sync.connected is True
+
+
+def test_restore_session_with_no_file_stays_disconnected(tmp_path):
+    _store, sync, _path = make_persistent(tmp_path, FakeClient(courses=[]))
+    assert sync.restore_session() is False
+    assert sync.connected is False
+
+
+def test_restore_session_is_a_noop_without_a_path(tmp_path):
+    """Every pre-existing construction passes no session_path — unchanged."""
+    store = CanvasStore(db.connect(tmp_path / "n.db"))
+    sync = CanvasSync(store, CanvasConfig(enabled=True))
+    assert sync.restore_session() is False
+    sync.set_session({"canvas_session": "abc"})
+    sync.clear_session()                       # must not raise
+
+
+async def test_a_401_deletes_the_persisted_session(tmp_path):
+    """The rule that makes persistence safe. Without it a dead cookie is
+    restored on every restart forever: `connected` reports True until each first
+    sync fails, and the UI never tells the user to log in again."""
+    client = FakeClient(courses=[], raise_on="courses")
+    _store, sync, path = make_persistent(tmp_path, client)
+    sync.set_session({"canvas_session": "stale"})
+    assert path.exists()
+    assert await sync.sync_once() is False
+    assert not path.exists()
+    assert sync.connected is False
+    assert sync.restore_session() is False     # and it stays gone across restarts
+
+
+async def test_a_transient_error_KEEPS_the_persisted_session(tmp_path):
+    """A flaky network is not a logout. Only a 401 may discard the session —
+    otherwise one bad Wi-Fi moment costs a full CAS + Duo round trip."""
+
+    class Flaky(FakeClient):
+        def courses(self, state="active"):
+            raise OSError("connection reset")
+
+    _store, sync, path = make_persistent(tmp_path, Flaky(courses=[]))
+    sync.set_session({"canvas_session": "good"})
+    assert await sync.sync_once() is False
+    assert path.exists()
+    assert canvas_session.load(path) == {"canvas_session": "good"}
+    assert sync.connected is True
+
+
+async def test_a_401_during_phase_two_also_deletes_the_session(tmp_path):
+    """The item fetch is a second, separate 401 site."""
+
+    class ExpiringItems(FakeClient):
+        def assignments(self, cid):
+            raise CanvasSessionExpired("assignments")
+
+    client = ExpiringItems(courses=[{"id": 1, "name": "CS", "course_code": "CS"}])
+    _store, sync, path = make_persistent(tmp_path, client)
+    sync.set_session({"canvas_session": "stale"})
+    assert await sync.sync_once() is False
+    assert not path.exists()
+
+
+# --- calendar sync inside the poll loop --------------------------------------
+class FakeWriter:
+    def __init__(self):
+        self.created, self.patched, self.deleted = [], [], []
+
+    def create_event(self, body):
+        self.created.append(body)
+        return f"evt_{len(self.created)}"
+
+    def patch_event(self, event_id, body):
+        self.patched.append(event_id)
+        return True
+
+    def delete_event(self, event_id):
+        self.deleted.append(event_id)
+        return True
+
+
+def calendar_sync(tmp_path, client, *, sync_on=True):
+    from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
+    from lumen.daemon.connectors.canvas_prefs import CanvasPrefs
+    from lumen.daemon.connectors.canvas_queue import CanvasQueue
+    conn = db.connect(tmp_path / "cal.db")
+    store, prefs = CanvasStore(conn), CanvasPrefs(conn)
+    prefs.set_sync_enabled(sync_on)
+    queue, alerts, writer = CanvasQueue(conn), CanvasAlerts(conn), FakeWriter()
+    sync = CanvasSync(store, CanvasConfig(enabled=True),
+                      client_factory=lambda: client, markers=writer,
+                      prefs=prefs, queue=queue, alerts=alerts)
+    sync.set_session({"canvas_session": "abc"})
+    return store, sync, queue, writer
+
+
+def _future(days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+
+def _client(**over):
+    return FakeClient(
+        courses=[{"id": 1, "name": "CS 3505", "course_code": "CS3505"}],
+        assignments={1: [{"id": 10, "course_id": 1, "name": "HW1",
+                          "due_at": _future(7), "points": 100.0,
+                          "html_url": "u", "description": None,
+                          "submitted": False, **over}]},
+        announcements={1: []})
+
+
+async def test_a_fresh_sync_creates_events_silently(tmp_path):
+    """No confirmation anywhere in this path — that is the agreed behaviour for
+    create/update, and the reason removals need a different mechanism."""
+    store, sync, queue, writer = calendar_sync(tmp_path, _client())
+    assert await sync.sync_once() is True
+    assert len(writer.created) == 1
+    assert queue.count() == 0
+    assert store.calendar_candidates()[0]["calendar_event_id"] == "evt_1"
+
+
+async def test_the_switch_off_writes_nothing(tmp_path):
+    """Merging this feature must not surprise-write to a real calendar."""
+    _store, sync, queue, writer = calendar_sync(tmp_path, _client(), sync_on=False)
+    assert await sync.sync_once() is True
+    assert writer.created == [] and queue.count() == 0
+
+
+async def test_submitting_queues_a_removal_through_the_poll_loop(tmp_path):
+    store, sync, queue, writer = calendar_sync(tmp_path, _client())
+    await sync.sync_once()
+    sync._client_factory = lambda: _client(submitted=True)
+    assert await sync.sync_once() is True
+    assert queue.count() == 1
+    assert writer.deleted == []          # the loop only ever proposes
+
+
+async def test_a_vanished_assignment_needs_two_syncs_to_count_as_gone(tmp_path):
+    """One flaky fetch returning a short list must not read as a deleted term."""
+    store, sync, queue, writer = calendar_sync(tmp_path, _client())
+    await sync.sync_once()
+    empty = FakeClient(courses=[{"id": 1, "name": "CS 3505", "course_code": "CS3505"}],
+                       assignments={1: []}, announcements={1: []})
+    sync._client_factory = lambda: empty
+    await sync.sync_once()
+    assert queue.count() == 0            # one miss is not gone
+    await sync.sync_once()
+    assert queue.count() == 1
+    assert queue.pending()[0]["reason"] == "gone"
+
+
+async def test_reappearing_resets_the_missing_streak(tmp_path):
+    store, sync, _queue, _writer = calendar_sync(tmp_path, _client())
+    await sync.sync_once()
+    empty = FakeClient(courses=[{"id": 1, "name": "CS", "course_code": "CS"}],
+                       assignments={1: []}, announcements={1: []})
+    sync._client_factory = lambda: empty
+    await sync.sync_once()
+    assert store.calendar_candidates()[0]["missing_syncs"] == 1
+    sync._client_factory = lambda: _client()
+    await sync.sync_once()
+    assert store.calendar_candidates()[0]["missing_syncs"] == 0
+
+
+async def test_a_calendar_failure_does_not_fail_the_sync(tmp_path):
+    """The mirror is the valuable part; a Google outage must not cost it."""
+    class Boom(FakeWriter):
+        def create_event(self, body):
+            raise RuntimeError("google is down")
+
+    store, sync, _queue, _writer = calendar_sync(tmp_path, _client())
+    sync._markers = Boom()
+    assert await sync.sync_once() is True
+    assert [a["name"] for a in store.assignments()] == ["HW1"]

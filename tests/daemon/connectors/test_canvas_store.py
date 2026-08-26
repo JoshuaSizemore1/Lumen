@@ -125,6 +125,20 @@ def test_pending_markers_create_then_update(tmp_path):
     assert pend[0]["event_id"] == "evt_1"
 
 
+def test_pending_markers_skip_events_owned_by_the_calendar_sync(tmp_path):
+    # Both paths share calendar_event_id, but only the sync sets event_kind and
+    # only the legacy marker path sets marker_due. Without the skip the sync's
+    # timed event reads as an "update" here (NULL marker_due != due) and
+    # "Add to calendar" would patch_all_day it into a flat all-day block.
+    s = make_store(tmp_path); _seed_reconcile(s)
+    s.link_todo(10, 55, "2026-07-21T09:00:00")
+    s.set_calendar_event(10, "evt_sync", "timed", "2026-09-01T05:59:59", "sig")
+    assert s.pending_markers([1]) == []
+    # Clearing the sync's link hands the assignment back to the marker path.
+    s.clear_calendar_event(10)
+    assert [p["action"] for p in s.pending_markers([1])] == ["create"]
+
+
 def test_set_course_included_roundtrip_and_pull_ids(tmp_path):
     store = make_store(tmp_path)
     store.upsert_courses([{"id": 1, "name": "A", "course_code": "A"},

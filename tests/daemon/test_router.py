@@ -573,6 +573,32 @@ def test_mail_label_hint_matches_labeling_phrases():
     assert not MAIL_LABEL_HINT.search("what did Ada email me about")
 
 
+def test_make_label_hint_routes_label_creation_not_todo_tags():
+    # #35: "make a new label for emails from fidelity" is a labeling rule — it
+    # must reach the rule-authoring flow, not be refused. But todo-tag phrasing
+    # ("add a tag to my todo") and applying a label to the open message
+    # ("label this email as Work") must NOT be captured here.
+    from lumen.daemon.router import MAKE_LABEL_HINT, MAIL_LABEL_HINT
+    for m in ("make a new label for emails from fidelity",
+              "create a label for emails from my bank",
+              "set up a new tag for messages from the IRS",
+              "add a label for emails from the sender chris@x.com"):
+        assert MAKE_LABEL_HINT.search(m), m
+    # todos also have tags — a todo request must not route to mail-rule creation
+    assert not MAKE_LABEL_HINT.search("add a tag urgent to my todo")
+    assert not MAKE_LABEL_HINT.search("make a new tag for this task")
+    # applying an existing label to the open email stays with MAIL_LABEL_HINT —
+    # including the phrasings that DO carry a create verb, which is why the
+    # create-verb requirement alone is not enough to separate the two.
+    for m in ("label this email as Work",
+              "add a label to this email",
+              "add the Work label to this email",
+              "add a Bills tag to the open message",
+              "put a new label on this message"):
+        assert not MAKE_LABEL_HINT.search(m), m
+        assert MAIL_LABEL_HINT.search(m), m
+
+
 def test_tool_hint_matches_lookup_phrases():
     from lumen.daemon.router import TOOL_HINT
     assert TOOL_HINT.search("what files are in my notes")
@@ -2314,6 +2340,38 @@ async def test_emails_list_search_get_unread():
     assert len(out[-1]["result"]["emails"]) == 1
 
 
+def test_files_grounding_reads_ui_v3_context_and_top_level():
+    # #43: the ui_v3 Ask bar puts the open folder/file inside `context`, while
+    # the Chat/ui_v2 files ask sends them top-level. Both must ground the model.
+    from lumen.daemon.router import Router
+    # ui_v3 Ask bar, browsing a folder
+    assert Router._files_grounding(
+        {"context": {"screen": "files", "dir": "/home/u/Projects"}}) == (
+        "/home/u/Projects", None)
+    # ui_v3 Ask bar, a file open (no dir) -> ground on the file's parent folder
+    assert Router._files_grounding(
+        {"context": {"screen": "files", "file": "/home/u/Projects/a.md"}}) == (
+        "/home/u/Projects", "/home/u/Projects/a.md")
+    # legacy top-level shape still works
+    assert Router._files_grounding(
+        {"cwd": "/home/u", "open_file": "/home/u/a.md"}) == (
+        "/home/u", "/home/u/a.md")
+    # a non-files surface must NOT trigger file grounding
+    assert Router._files_grounding(
+        {"context": {"screen": "mail"}}) == (None, None)
+
+
+async def test_emails_list_labels_include_empty_user_labels():
+    # #36: a user label with no mail on it yet (here "Bills") must still be in
+    # the nav's label vocabulary so its section appears the moment the label
+    # (or a rule for it) exists — not only once mail carries it.
+    store, sync = FakeMailStore(), FakeMailSync()
+    assert "Label_7" not in store.present_label_ids()      # Bills has no mail
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.list", {})
+    assert "Bills" in out[-1]["result"]["labels"]
+
+
 async def test_emails_get_lazily_backfills_html():
     store, sync = FakeMailStore(), FakeMailSync()
     router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
@@ -2563,6 +2621,19 @@ async def test_mail_suggest_labels_classifies_unlabeled_inbox_only():
     # v2 grounding: the system turn carries each label's profile derived from
     # mail already filed under it (m2 is the one Bills message: sender a@x.com).
     assert "- Bills: mail from x.com" in llm.messages[0]["content"]
+
+
+async def test_mail_suggest_labels_returns_previews_for_review_popup():
+    # #32: each suggestion carries a lightweight preview (sender/subject) so the
+    # review popup can list mail past the UI's loaded page without extra fetches.
+    store, sync = FakeMailStore(), FakeMailSync()
+    llm = FakeLLM(chunks=('{"label": "Bills", "fit": "strong"}',))
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "mail.suggest_labels", {})
+    res = out[-1]["result"]
+    assert set(res["previews"]) == set(res["suggestions"])   # one per suggestion
+    prev = res["previews"]["m1"]
+    assert prev["sender"] == "Ada <a@x.com>" and prev["subject"] == "Engines"
 
 
 async def test_mail_suggest_labels_weak_fit_below_floor():
@@ -3313,6 +3384,96 @@ async def test_find_then_send_unknown_person_leaves_to_empty():
     assert seen["to"] == []
 
 
+class _CapturingLLM:
+    """Records the message lists it is asked to complete, yields a fixed reply."""
+    model = None
+
+    def __init__(self, reply):
+        self.reply, self.seen = reply, []
+
+    async def chat(self, messages):
+        self.seen.append(messages)
+        yield self.reply
+
+
+async def test_connections_set_enabled_persists_and_reports(tmp_path):
+    # #38 Disable/Enable: toggling a connection persists via ConnectionState and
+    # the route reports the new accounts state so the UI updates.
+    from lumen.daemon import db
+    from lumen.daemon.config import Config, GoogleConfig
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    cfg = Config(google=GoogleConfig(token_path=tmp_path / "token.json"))
+    conns = ConnectionState(db.connect(tmp_path / "s.db"))
+    router = Router(FakeLLM(), FakeStore(), config=cfg, connection_state=conns)
+
+    out = await collect(router, "connections.set_enabled",
+                        {"name": "gmail", "enabled": False})
+    assert out[-1]["result"]["accounts"]["gmail"]["enabled"] is False
+    assert conns.enabled("gmail") is False                 # persisted
+    # calendar untouched, still enabled
+    assert out[-1]["result"]["accounts"]["google_calendar"]["enabled"] is True
+
+    out = await collect(router, "connections.set_enabled",
+                        {"name": "gmail", "enabled": True})
+    assert out[-1]["result"]["accounts"]["gmail"]["enabled"] is True
+
+
+async def test_connections_set_enabled_rejects_unknown_name(tmp_path):
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "s.db"))
+    router = Router(FakeLLM(), FakeStore(), connection_state=conns)
+    out = await collect(router, "connections.set_enabled",
+                        {"name": "dropbox", "enabled": False})
+    assert "error" in out[-1]
+
+
+async def test_connections_disconnect_removes_google_token(tmp_path):
+    # #38 Disconnect: drops the shared Google token (Gmail + Calendar).
+    from lumen.daemon.config import Config, GoogleConfig
+    token = tmp_path / "token.json"
+    token.write_text('{"refresh_token": "x"}')
+    cfg = Config(google=GoogleConfig(token_path=token))
+    router = Router(FakeLLM(), FakeStore(), config=cfg)
+
+    out = await collect(router, "connections.disconnect", {"name": "gmail"})
+    assert "accounts" in out[-1]["result"]
+    assert not token.exists()                              # login removed
+
+
+async def test_compose_grounds_draft_with_real_calendar_events():
+    # #39: "email X about the event on my calendar" must hand the model the
+    # user's REAL events so it writes from fact instead of inventing one.
+    cal = FakeCal(rows=[{"title": "Budget sync", "all_day": False,
+                         "start_at": "2026-07-24T15:00:00",
+                         "end_at": "2026-07-24T16:00:00"}])
+    llm = _CapturingLLM(DRAFT_JSON)
+    router = Router(llm, FakeStore(), mail=SendingMailSync(),
+                    mail_store=FakeMailStore(), confirm=ConfirmBroker(),
+                    calendar=cal)
+    await _drive_compose(
+        router, "email sam@x.com about the event we have on my calendar",
+        lambda ev: router._confirm.resolve(ev["compose_id"], False))
+    assert cal.seen                                    # the calendar was consulted
+    user_turn = llm.seen[0][1]["content"]              # [system, user]
+    assert "Budget sync" in user_turn                  # real event reached the model
+
+
+async def test_compose_without_calendar_reference_skips_grounding():
+    # A plain compose (no calendar words) must not drag in calendar context.
+    cal = FakeCal(rows=[{"title": "Budget sync", "all_day": False,
+                         "start_at": "2026-07-24T15:00:00"}])
+    llm = _CapturingLLM(DRAFT_JSON)
+    router = Router(llm, FakeStore(), mail=SendingMailSync(),
+                    mail_store=FakeMailStore(), confirm=ConfirmBroker(),
+                    calendar=cal)
+    await _drive_compose(
+        router, "send an email to sam@x.com about friday",
+        lambda ev: router._confirm.resolve(ev["compose_id"], False))
+    assert cal.seen == []                              # no calendar lookup
+    assert "Budget sync" not in llm.seen[0][1]["content"]
+
+
 class PlainThenToolLLM:
     """Fake LLM serving a plain first turn, then a tool-loop second turn."""
     model = None
@@ -3823,6 +3984,7 @@ class FakeCanvas:
         self._last = last_sync
         self.session = None
         self.cleared = False
+        self.syncs = 0
 
     def set_session(self, cookies):
         self.session = cookies
@@ -3839,6 +4001,14 @@ class FakeCanvas:
     def last_sync(self):
         return self._last
 
+    @property
+    def busy(self):
+        return False
+
+    async def sync_once(self):
+        self.syncs += 1
+        return True
+
 
 async def test_canvas_set_session_hands_cookies_to_sync():
     canvas = FakeCanvas()
@@ -3850,6 +4020,18 @@ async def test_canvas_set_session_hands_cookies_to_sync():
     # request's per-id callback on "result", so a bare done would never refresh
     # the Canvas tab after login (live bug 2026-07-20).
     assert out[-1]["result"]["connected"] is True
+
+
+async def test_canvas_set_session_syncs_immediately():
+    """Connecting mid-poll-cycle used to mean an empty tab until the next tick
+    (live bug: logged in at 21:58, the poller had already run at 21:56 and the
+    next was 45 minutes out). A fresh session syncs at once."""
+    import asyncio
+    canvas = FakeCanvas()
+    await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
+                  "canvas.set_session", {"cookies": {"canvas_session": "x"}})
+    await asyncio.sleep(0)               # let the kicked-off task run
+    assert canvas.syncs == 1
 
 
 async def test_canvas_status_reports_live_state():
@@ -3938,6 +4120,34 @@ async def test_push_due_dates_confirm_writes_marker(tmp_path):
     assert writer.created == [("CS3505 — HW1 due", "2026-09-01")]
     a = store.active_assignments()[0]
     assert a["calendar_event_id"] == "evt_1" and a["marker_due"] == "2026-09-01"
+
+
+async def test_push_due_dates_confirm_uses_the_overlay_schema(tmp_path):
+    """B0: the payload used to be kind/summary/items, which ConfirmOverlay reads
+    none of — the dialog rendered blank. It must speak the real schema."""
+    router, store, todos, broker, writer = canvas_router(tmp_path)
+    _seed_pending(store, todos)
+    req = None
+    async for ev in router.handle("canvas.push_due_dates", {}):
+        if "confirm_request" in ev:
+            req = ev["confirm_request"]
+            broker.resolve(ev["confirm_id"], False)
+    assert req is not None
+    assert set(req) == {"icon", "title", "intro", "rows", "confirm_label"}
+    assert req["title"] == "Add Canvas due dates"
+    assert req["rows"] == [("2026-09-01", "CS3505 — HW1")]
+    assert "1 due-date marker" in req["intro"]     # singular
+    assert req["confirm_label"] == "Add 1 to calendar"
+
+
+def test_due_dates_confirm_caps_rows_and_pluralises():
+    from lumen.daemon.router import CONFIRM_ROW_CAP, _due_dates_confirm
+    pend = [{"course_id": 1, "name": f"HW{i}", "due": "2026-09-01"}
+            for i in range(CONFIRM_ROW_CAP + 3)]
+    payload = _due_dates_confirm(pend, {1: {"course_code": "CS"}})
+    assert len(payload["rows"]) == CONFIRM_ROW_CAP + 1
+    assert payload["rows"][-1] == ("+", "3 more")
+    assert "markers" in payload["intro"]
 
 
 async def test_push_due_dates_decline_writes_nothing(tmp_path):
@@ -4053,3 +4263,193 @@ def test_state_canvas_seam_defaults_without_daemon():
     st.canvas_announcements(lambda r: got.setdefault("n", r))
     assert got["a"] == {"assignments": []}
     assert got["n"] == {"announcements": []}
+
+
+# --- Canvas -> Calendar routes -----------------------------------------------
+class _FakeEventWriter:
+    def __init__(self, *, create="evt_new", delete=True):
+        self.created, self.deleted = [], []
+        self._create, self._delete = create, delete
+
+    def create_event(self, body):
+        self.created.append(body)
+        return self._create
+
+    def patch_event(self, event_id, body):
+        return True
+
+    def delete_event(self, event_id):
+        self.deleted.append(event_id)
+        return self._delete
+
+
+def calendar_router(tmp_path, writer=None):
+    from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
+    from lumen.daemon.connectors.canvas_prefs import CanvasPrefs
+    from lumen.daemon.connectors.canvas_proposals import CanvasProposals
+    from lumen.daemon.connectors.canvas_queue import CanvasQueue
+    conn = db.connect(tmp_path / "cal.db")
+    store = _CanvasStore(conn)
+    prefs, queue = CanvasPrefs(conn), CanvasQueue(conn)
+    alerts, proposals = CanvasAlerts(conn), CanvasProposals(conn)
+    canvas = _CanvasSync(store, _CanvasConfig(enabled=True), prefs=prefs,
+                         queue=queue, alerts=alerts, proposals=proposals,
+                         markers=writer)
+    router = Router(FakeLLM(), _TodoStore(conn), canvas=canvas,
+                    marker_writer=writer or _FakeEventWriter(),
+                    canvas_prefs=prefs, canvas_queue=queue,
+                    canvas_alerts=alerts, canvas_proposals=proposals)
+    return router, store, prefs, queue, proposals
+
+
+async def test_calendar_status_defaults_to_off(tmp_path):
+    """Both switches default off so merging can never surprise-write to a real
+    calendar."""
+    router, *_ = calendar_router(tmp_path)
+    res = (await collect(router, "canvas.calendar_status", {}))[-1]["result"]
+    assert res["sync"] is False and res["ai"] is False
+    assert res["events"] == 0 and res["queued"] == 0
+    assert res["proposals"] == 0 and res["alerts"] == 0
+
+
+async def test_toggling_calendar_sync_persists(tmp_path):
+    router, _store, prefs, *_ = calendar_router(tmp_path)
+    res = (await collect(router, "canvas.set_calendar_sync",
+                         {"enabled": True}))[-1]["result"]
+    assert res["sync"] is True and prefs.sync_enabled() is True
+    await collect(router, "canvas.set_calendar_sync", {"enabled": False})
+    assert prefs.sync_enabled() is False
+
+
+async def test_enabling_ai_reoffers_everything_for_classification(tmp_path):
+    router, store, prefs, *_ = calendar_router(tmp_path)
+    store.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    store.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+        "due_at": "2026-09-01T06:59:59Z", "points": 1.0, "html_url": "u",
+        "description": None, "submitted": False}])
+    store.set_ai_fields(10, "old summary", "reading")
+    assert store.calendar_candidates()[0]["ai_state"] == 1
+    await collect(router, "canvas.set_calendar_ai", {"enabled": True})
+    assert store.calendar_candidates()[0]["ai_state"] == 0
+
+
+def _queue_one(queue):
+    return queue.add(10, "evt_1", "CS — HW1 due", "submitted")
+
+
+async def test_calendar_queue_lists_pending_removals(tmp_path):
+    router, _store, _prefs, queue, _p = calendar_router(tmp_path)
+    _queue_one(queue)
+    items = (await collect(router, "canvas.calendar_queue", {}))[-1]["result"]["items"]
+    assert [i["reason"] for i in items] == ["submitted"]
+
+
+async def test_approving_a_removal_deletes_the_event(tmp_path):
+    writer = _FakeEventWriter()
+    router, _store, _prefs, queue, _p = calendar_router(tmp_path, writer)
+    qid = _queue_one(queue)
+    res = (await collect(router, "canvas.resolve_removal",
+                         {"id": qid, "approve": True}))[-1]["result"]
+    assert res == {"ok": True, "removed": True, "queued": 0}
+    assert writer.deleted == ["evt_1"]
+
+
+async def test_declining_a_removal_clears_the_link_and_deletes_nothing(tmp_path):
+    """The re-queue-forever bug: declining must clear calendar_event_id too."""
+    writer = _FakeEventWriter()
+    router, store, _prefs, queue, _p = calendar_router(tmp_path, writer)
+    store.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    store.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+        "due_at": "2026-09-01T06:59:59Z", "points": 1.0, "html_url": "u",
+        "description": None, "submitted": True}])
+    store.set_calendar_event(10, "evt_1", "timed", "s", "sig")
+    qid = _queue_one(queue)
+    res = (await collect(router, "canvas.resolve_removal",
+                         {"id": qid, "approve": False}))[-1]["result"]
+    assert res["removed"] is False
+    assert writer.deleted == []
+    assert store.calendar_candidates()[0]["calendar_event_id"] is None
+
+
+async def test_resolving_a_stale_removal_is_refused(tmp_path):
+    router, _store, _prefs, queue, _p = calendar_router(tmp_path)
+    res = (await collect(router, "canvas.resolve_removal",
+                         {"id": 999, "approve": True}))[-1]["result"]
+    assert res["ok"] is False
+
+
+async def test_proposals_are_listed_and_accepted_one_at_a_time(tmp_path):
+    writer = _FakeEventWriter()
+    router, _store, _prefs, _queue, proposals = calendar_router(tmp_path, writer)
+    pid = proposals.add("exam", "CS — Midterm", "2026-09-10T10:00:00",
+                        course_id=1, end_at="2026-09-10T11:00:00",
+                        source_kind="announcement", source_id=5)
+    items = (await collect(router, "canvas.proposals", {}))[-1]["result"]["items"]
+    assert [i["title"] for i in items] == ["CS — Midterm"]
+    res = (await collect(router, "canvas.resolve_proposal",
+                         {"id": pid, "approve": True}))[-1]["result"]
+    assert res["created"] is True and res["event_id"] == "evt_new"
+    assert writer.created[0]["summary"] == "CS — Midterm"
+    assert proposals.count() == 0
+
+
+async def test_dismissing_a_proposal_writes_nothing_and_never_returns(tmp_path):
+    writer = _FakeEventWriter()
+    router, _store, _prefs, _queue, proposals = calendar_router(tmp_path, writer)
+    pid = proposals.add("exam", "CS — Midterm", "2026-09-10T10:00:00",
+                        source_kind="announcement", source_id=5)
+    res = (await collect(router, "canvas.resolve_proposal",
+                         {"id": pid, "approve": False}))[-1]["result"]
+    assert res["created"] is False
+    assert writer.created == []
+    # the next sync re-reads the same announcement; it must not come back
+    assert proposals.add("exam", "CS — Midterm", "2026-09-10T10:00:00",
+                         source_kind="announcement", source_id=5) is None
+
+
+async def test_sync_now_runs_a_sync(tmp_path):
+    """Flipping a toggle must do something visible without waiting out a poll."""
+    router, *_ = calendar_router(tmp_path)
+    res = (await collect(router, "canvas.sync_now", {}))[-1]["result"]
+    assert res["started"] is True
+    assert res["ok"] is False          # no session in this fixture
+
+
+async def test_every_calendar_route_replies_with_a_result(tmp_path):
+    """House rule: a route that answers {"done": True} strands the UI callback."""
+    router, _store, _prefs, queue, proposals = calendar_router(tmp_path)
+    qid = _queue_one(queue)
+    pid = proposals.add("exam", "T", "2026-09-10T10:00:00")
+    for type_, payload in (("canvas.calendar_status", {}),
+                           ("canvas.calendar_queue", {}),
+                           ("canvas.proposals", {}),
+                           ("canvas.set_calendar_sync", {"enabled": True}),
+                           ("canvas.set_calendar_ai", {"enabled": False}),
+                           ("canvas.resolve_removal", {"id": qid, "approve": False}),
+                           ("canvas.resolve_proposal", {"id": pid, "approve": False}),
+                           ("canvas.sync_now", {})):
+        out = await collect(router, type_, payload)
+        assert "result" in out[-1], type_
+
+
+async def test_calendar_routes_without_canvas_are_safe():
+    """No daemon-side Canvas wiring at all must degrade, never raise."""
+    router = Router(FakeLLM(), FakeStore())
+    for type_ in ("canvas.calendar_status", "canvas.calendar_queue",
+                  "canvas.proposals", "canvas.set_calendar_sync",
+                  "canvas.set_calendar_ai", "canvas.resolve_removal",
+                  "canvas.resolve_proposal", "canvas.sync_now"):
+        out = await collect(router, type_, {"id": 1, "enabled": True})
+        assert "error" in out[-1], type_
+
+
+async def test_resolve_removal_tolerates_a_missing_writer(tmp_path):
+    """Every route must tolerate _markers() returning None."""
+    router, _store, _prefs, queue, _p = calendar_router(tmp_path)
+    router._marker_writer = None
+    router._config = None
+    qid = _queue_one(queue)
+    res = (await collect(router, "canvas.resolve_removal",
+                         {"id": qid, "approve": True}))[-1]["result"]
+    assert res["ok"] is False
+    assert queue.count() == 1          # still pending, safe to retry

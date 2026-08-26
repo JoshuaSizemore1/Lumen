@@ -9,7 +9,7 @@ Anything typed that isn't a command falls through to Lumen as a question,
 streamed inline, continuing the same conversation as the Chat screen and the
 ask bar.
 """
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QDialog, QFrame, QLineEdit, QWidget
 
 from . import theme as T
@@ -39,12 +39,13 @@ COMMANDS = (
 class LauncherPalette(QFrame):
     """The palette body. Lives inside the frameless overlay below."""
 
-    def __init__(self, state, chat_client):
+    def __init__(self, state, chat_client, on_command=None):
         super().__init__()
         self.setProperty("role", "dialog")
         self.setFixedWidth(T.LAUNCHER_W)
         self.state = state
         self.chat = chat_client
+        self._on_command = on_command
         self._busy = False
         self._cold = False    # set by the daemon when this turn actually loads the model
         self._acc = ""
@@ -152,15 +153,20 @@ class LauncherPalette(QFrame):
 
     def _run(self, cmd):
         _icon, _text, _hint, kind, target = cmd
+        if kind not in ("view", "compose", "event"):
+            return
+        # Every command lands in the main window — and when the hotkey started
+        # Lumen that window has never been shown. Raise it *before* switching
+        # the screen or opening an overlay, or the command runs out of sight.
+        if self._on_command is not None:
+            self._on_command()
         if kind == "view":
             self.state.view_requested.emit(target)
-            self.window().hide()
         elif kind == "compose":
             self.state.open_compose({})
-            self.window().hide()
-        elif kind == "event":
+        else:
             self.state.event_compose_requested.emit({})
-            self.window().hide()
+        self.window().hide()
 
     # ---- ask fallthrough --------------------------------------------------
     def _ask(self, msg: str):
@@ -233,6 +239,9 @@ class LauncherPalette(QFrame):
         self._busy = False
         self._wake.stop()
         if not self._acc:
+            # Settle the status so the "◇ thinking" dots stop when a turn ends
+            # with no text — otherwise the spinner runs forever (#34).
+            self._set_status("◇ no answer", T.TEXT_FAINT)
             self.answer.setText("(no answer)")
 
     def _on_error(self, msg: str):
@@ -247,7 +256,9 @@ class LauncherPalette(QFrame):
 class LauncherOverlay(QDialog):
     """Frameless hotkey-summoned window wrapping the palette."""
 
-    def __init__(self, state, chat_client):
+    dismissed = pyqtSignal()    # esc, click-away, super+L again, or a command
+
+    def __init__(self, state, chat_client, on_command=None):
         super().__init__()
         self.state = state
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
@@ -255,7 +266,7 @@ class LauncherOverlay(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedWidth(T.LAUNCHER_W + 2)
         v = vbox(self, (1, 1, 1, 1), 0)
-        self.palette_widget = LauncherPalette(state, chat_client)
+        self.palette_widget = LauncherPalette(state, chat_client, on_command)
         shadow(self.palette_widget, 90, 34, 90)
         v.addWidget(self.palette_widget)
 
@@ -263,12 +274,29 @@ class LauncherOverlay(QDialog):
         if self.isVisible():
             self.hide()
         else:
-            self.state.warm_model()     # load while the user is still typing
-            self.palette_widget.reset()
-            self.show()
+            self.summon()
+
+    def summon(self):
+        """Idempotent open. A press while Lumen is still starting up means
+        "I'm waiting", not "dismiss" — answering it with a toggle would close
+        the launcher the user just asked for (and, started by the hotkey, quit
+        the app with it)."""
+        if self.isVisible():
             self.raise_()
             self.activateWindow()
-            self.palette_widget.focus_input()
+            return
+        self.state.warm_model()     # load while the user is still typing
+        self.palette_widget.reset()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.palette_widget.focus_input()
+
+    def hideEvent(self, ev):
+        # One place for every way the palette goes away — toggle, esc,
+        # click-away, or a command hiding it on the way to the main window.
+        super().hideEvent(ev)
+        self.dismissed.emit()
 
     def keyPressEvent(self, ev):
         if ev.key() == Qt.Key.Key_Escape:
