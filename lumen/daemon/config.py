@@ -130,6 +130,25 @@ class MailConfig:
 
 
 @dataclass(frozen=True)
+class ClaudeConfig:
+    # Path to the claude CLI binary. Resolved on PATH when "claude".
+    cli_path: str = "claude"
+    # Pinned model IDs so behaviour only changes when config changes.
+    models: dict = field(default_factory=lambda: {
+        "haiku": "claude-haiku-4-5-20251001",
+        "sonnet": "claude-sonnet-5",
+    })
+    # Which key from `models` is the default.
+    default_model: str = "haiku"
+    # Per-request timeout; a hung CLI process is killed at this mark.
+    timeout_seconds: int = 120
+    # Daemon-wide limit on concurrent CLI processes.
+    max_concurrent: int = 2
+    # Background jobs pause when either 5h/7d window utilization reaches this.
+    background_pause_at: float = 0.80
+
+
+@dataclass(frozen=True)
 class CanvasConfig:
     # Canvas import (new-features #10). Read-only session-cookie access; the
     # password lives in the OS keyring, never here. poll_minutes floored at 5.
@@ -166,6 +185,7 @@ class MCPConfig:
 @dataclass(frozen=True)
 class Config:
     model: str = "qwen3:4b-instruct"
+    claude: "ClaudeConfig" = field(default_factory=lambda: ClaudeConfig())
     escalation_model: str | None = None   # 14B-class slot; unset until benchmarked
     idle_unload_minutes: int = 10
     ollama_url: str = "http://127.0.0.1:11434"
@@ -343,6 +363,22 @@ def load_config(path: Path | None = None) -> Config:
         kwargs["memory_path"] = Path(storage["memory_path"]).expanduser()
     if "procedures_dir" in storage:
         kwargs["procedures_dir"] = Path(storage["procedures_dir"]).expanduser()
+    claude_raw = data.get("claude")
+    if claude_raw is not None:
+        cl_kwargs: dict = {}
+        if "cli_path" in claude_raw:
+            cl_kwargs["cli_path"] = str(claude_raw["cli_path"])
+        if "models" in claude_raw:
+            cl_kwargs["models"] = dict(claude_raw["models"])
+        if "default_model" in claude_raw:
+            cl_kwargs["default_model"] = str(claude_raw["default_model"])
+        if "timeout_seconds" in claude_raw:
+            cl_kwargs["timeout_seconds"] = int(claude_raw["timeout_seconds"])
+        if "max_concurrent" in claude_raw:
+            cl_kwargs["max_concurrent"] = int(claude_raw["max_concurrent"])
+        if "background_pause_at" in claude_raw:
+            cl_kwargs["background_pause_at"] = float(claude_raw["background_pause_at"])
+        kwargs["claude"] = ClaudeConfig(**cl_kwargs)
     idle_unload_minutes = kwargs.get("idle_unload_minutes", Config.idle_unload_minutes)
     if idle_unload_minutes <= 0:
         raise SystemExit(

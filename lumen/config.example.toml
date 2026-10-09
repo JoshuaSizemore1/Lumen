@@ -7,6 +7,17 @@ idle_unload_minutes = 10    # model evicts from RAM after this much inactivity �
 ollama_url = "http://127.0.0.1:11434"
 think = false               # reasoning toggle for thinking-capable models — fast path uses non-thinking qwen3:4b-instruct; keep false
 
+[claude]
+# Optional Claude mode (Settings → model → Claude), run through the `claude` CLI
+# on your own subscription. Off/Local/Claude and the Haiku/Sonnet choice are
+# picked in Settings and persisted in the DB — these are only defaults.
+# cli_path = "claude"
+# models = { haiku = "claude-haiku-4-5-20251001", sonnet = "claude-sonnet-5" }
+# default_model = "haiku"
+# timeout_seconds = 120
+# max_concurrent = 2
+# background_pause_at = 0.80   # background AI pauses above this share of the 5h/7d limit
+
 [ipc]
 # socket_path = "/run/user/1000/lumen/daemon.sock"  # default: $XDG_RUNTIME_DIR/lumen/daemon.sock
 
