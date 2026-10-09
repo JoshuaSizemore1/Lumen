@@ -84,10 +84,17 @@ def _local_schemas() -> list[dict]:
 
 def owned_descriptions() -> dict[str, str]:
     """Every tool description Lumen authors, keyed by tool name — including the
-    write tools, which never reach the model but are still ours to keep honest."""
+    write tools, which never reach the model but are still ours to keep honest.
+
+    The mail label tools ride here too. They are attached only on the labeling
+    route, which is exactly why they had escaped this file's wording discipline
+    — and #55 was a tool-description problem (the model concluded from
+    `label_email` alone that it could not remove labels)."""
     out = {name: desc for tools in _raw().values() for name, desc, _ in tools}
     out.update({t["function"]["name"]: t["function"]["description"]
                 for t in _local_schemas()})
+    out.update({t["function"]["name"]: t["function"]["description"]
+                for t in local_tools.MAIL_TOOLS})
     return out
 
 

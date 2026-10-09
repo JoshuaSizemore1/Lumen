@@ -124,9 +124,14 @@ class FakeMailSync:
     def __init__(self):
         self.archived, self.marked, self.synced = [], [], 0
         self.labeled, self.html_fetched, self.trashed = [], [], []
+        self.unlabeled = []
 
     async def apply_label(self, mid, label_name):
         self.labeled.append((mid, label_name))
+        return True
+
+    async def remove_label(self, mid, label_name):
+        self.unlabeled.append((mid, label_name))
         return True
 
     def last_sync(self):
@@ -570,6 +575,61 @@ async def test_label_email_tool_reports_unknown_id():
                         {"message": "label this email as Bills"})
     assert mail.labeled == []                        # nothing applied
     assert any("No email with id ghost" in e.get("chunk", "") for e in out)
+
+
+class UnlabelToolLLM:
+    """Fake LLM that reaches for unlabel_email — the tool #55 added."""
+    def __init__(self, email_id="m1", label="Bills"):
+        self.model = None
+        self._id, self._label = email_id, label
+        self.system = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.system = messages[0]["content"]
+        self.tool_names = [t["function"]["name"] for t in tools]
+        args = {"email_id": self._id, "label": self._label}
+        yield {"tool_call": {"name": "unlabel_email", "arguments": args}}
+        yield {"content": await executor("unlabel_email", args)}
+
+
+async def test_unlabel_email_removes_the_label_from_the_open_message():
+    """#55 — Lumen said it could not remove labels, only add them, and it was
+    right: `label_email` was the only mail tool it had. The daemon route and
+    the connector method already existed; nothing offered them to the model."""
+    llm = UnlabelToolLLM()
+    mail, store = FakeMailSync(), FakeMailStore()
+    router = Router(llm, FakeStore(), mail=mail, mail_store=store,
+                    bridge=FakeBridge(tools=()), model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "remove the Bills label from this email",
+                         "open_email": {"id": "m1", "subject": "Engines",
+                                        "from": "Ada"}})
+    assert "unlabel_email" in llm.tool_names
+    assert "unlabel_email" in llm.system            # the context names it too
+    assert mail.unlabeled == [("m1", "Bills")]
+    assert mail.labeled == []                        # nothing was added
+    assert any("Removed the 'Bills' label" in e.get("chunk", "") for e in out)
+
+
+async def test_unlabel_email_tool_reports_unknown_id():
+    llm = UnlabelToolLLM(email_id="ghost")
+    mail, store = FakeMailSync(), FakeMailStore()
+    router = Router(llm, FakeStore(), mail=mail, mail_store=store,
+                    bridge=FakeBridge(tools=()), model_router=FakeModelRouter())
+    out = await collect(router, "chat",
+                        {"message": "remove the Bills label from this email"})
+    assert mail.unlabeled == []
+    assert any("No email with id ghost" in e.get("chunk", "") for e in out)
+
+
+def test_removal_phrasings_route_to_the_mail_label_path():
+    from lumen.daemon.router import MAIL_LABEL_HINT
+    for m in ("remove the Work label from this email",
+              "take the Bills label off this message",
+              "unlabel this", "untag it", "unfile that message",
+              "clear the Work label from the open email"):
+        assert MAIL_LABEL_HINT.search(m), m
 
 
 def test_mail_label_hint_matches_labeling_phrases():
@@ -2694,9 +2754,60 @@ async def test_mail_suggest_labels_classifies_unlabeled_inbox_only():
     out = await collect(router, "mail.suggest_labels", {})
     res = out[-1]["result"]
     assert res["suggestions"] == {"m1": "Bills"} and res["scanned"] == 1
-    # v2 grounding: the system turn carries each label's profile derived from
-    # mail already filed under it (m2 is the one Bills message: sender a@x.com).
+    # m1 and the filed Bills message share a sender, so the #51 keyword pass
+    # settles it outright and the model is never asked.
+    assert res["by_keyword"] == 1
+    assert llm.messages is None
+
+
+async def test_mail_suggest_labels_grounds_the_model_when_keywords_cannot():
+    """The fall-through path: a message with nothing in common with any filed
+    mail still gets the v2 per-label description in the system turn."""
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.rows.append({**store.rows[0], "id": "m2",
+                       "labels": ["INBOX", "Label_7"]})   # already labeled: skip
+    store.rows[0].update(sender="Zed <z@unrelated.test>", subject="Kayak trip")
+    llm = FakeLLM(chunks=('{"label": "Bills", "fit": "strong"}',))
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
+    res = (await collect(router, "mail.suggest_labels", {}))[-1]["result"]
+    assert res["suggestions"] == {"m1": "Bills"}
+    assert res["by_keyword"] == 0
+    # v2 grounding: each label's profile derived from mail already filed under
+    # it (m2 is the one Bills message: sender a@x.com).
     assert "- Bills: mail from x.com" in llm.messages[0]["content"]
+
+
+async def test_mail_suggest_labels_drops_a_collapsed_model_run():
+    """#46 — "one time it just put everything as FIDELITY". Nothing detected
+    that; the suggestions were simply offered. Keyword verdicts are exempt (a
+    real run of Fidelity receipts is a correct answer); this guards the model's."""
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.rows.clear()
+    base = {"snippet": "s", "body": "b", "labels": ["INBOX"], "is_read": True,
+            "received_at": "2026-07-10T10:00:00+00:00", "attachments": [],
+            "thread_id": "t1", "recipients": "me"}
+    # Eight unrelated senders and subjects — nothing a keyword profile can
+    # settle, so every one of them reaches the model.
+    for i in range(8):
+        store.rows.append({**base, "id": f"m{i}",
+                           "sender": f"person{i}@site{i}.test",
+                           "subject": f"Unrelated topic {'zyx'[i % 3]}{i}"})
+    llm = FakeLLM(chunks=('{"label": "Bills", "fit": "strong"}',))
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
+    res = (await collect(router, "mail.suggest_labels", {}))[-1]["result"]
+    assert res["collapsed_label"] == "Bills"
+    assert res["suggestions"] == {}      # the whole collapsed run is withheld
+
+
+async def test_mail_suggest_labels_keeps_a_varied_model_run():
+    store, sync = FakeMailStore(), FakeMailSync()
+    store.labels = [{"id": "Label_7", "name": "Bills"},
+                    {"id": "Label_8", "name": "Travel"}]
+    llm = FakeLLM(chunks=('{"label": "Bills", "fit": "strong"}',))
+    router = Router(llm, FakeStore(), mail=sync, mail_store=store)
+    res = (await collect(router, "mail.suggest_labels", {}))[-1]["result"]
+    assert res["collapsed_label"] is None      # one message is not a collapse
+    assert res["suggestions"] == {"m1": "Bills"}
 
 
 async def test_mail_suggest_labels_returns_previews_for_review_popup():
@@ -4601,3 +4712,90 @@ def test_every_confirm_gated_route_is_declared_exclusive():
     assert not missing, (
         f"these routes block on a confirm but are not in EXCLUSIVE_ROUTES, so "
         f"they can now overlap another dialog: {missing}")
+
+
+# --- #54: the screen you are on is a routing prior ---------------------------
+# "Fine tune the tab based context so it better understands that if I am on the
+# email screen anything I ask it to do is probably going to be in the context
+# of emails." The ask bar already sent {"screen": ...}; nothing used it for
+# routing.
+
+class GroupSpyLLM:
+    """Records which tool groups the loop was handed, and answers plainly."""
+
+    def __init__(self):
+        self.model = None
+        self.tool_names = None
+
+    async def chat_with_tools(self, messages, tools, executor, *, model=None,
+                              max_iterations=4):
+        self.tool_names = [t["function"]["name"] for t in tools]
+        yield {"content": "done"}
+
+    async def chat(self, messages):
+        yield "plain"
+
+
+def _screen_router(llm, **kw):
+    return Router(llm, FakeStore(), mail=FakeMailSync(),
+                  mail_store=FakeMailStore(),
+                  bridge=FakeBridge(tools=()), model_router=FakeModelRouter(),
+                  **kw)
+
+
+async def _ask(router, message, screen=None):
+    payload = {"message": message}
+    if screen:
+        payload["context"] = {"screen": screen}
+    return await collect(router, "chat", payload)
+
+
+def test_screen_prior_needs_a_deictic():
+    """A general question asked while Mail happens to be open is still a plain
+    question — the prior must not drag mail tools into every chat."""
+    r = _screen_router(GroupSpyLLM())
+    assert r._screen_prior("mail", "label this as Work") == {"mail"}
+    assert r._screen_prior("mail", "reply to her") == {"mail"}
+    assert r._screen_prior("mail", "summarise it") == {"mail"}
+    assert r._screen_prior("mail", "what is the capital of France") == set()
+    assert r._screen_prior(None, "label this as Work") == set()
+    assert r._screen_prior("today", "do this") == set()
+
+
+def test_each_screen_maps_to_its_own_group():
+    r = _screen_router(GroupSpyLLM(), calendar=FakeCal(), books=object())
+    for screen, group in (("mail", "mail"), ("calendar", "gcal"),
+                          ("todos", "todos"), ("books", "books"),
+                          ("files", "fs"), ("canvas", "todos")):
+        assert r._screen_prior(screen, "do this") == {group}, screen
+
+
+def test_a_group_the_daemon_does_not_have_is_never_the_prior():
+    """No calendar wired means no gcal prior, however suggestive the screen."""
+    r = _screen_router(GroupSpyLLM())              # no calendar, no books
+    assert r._screen_prior("calendar", "move this") == set()
+    assert r._screen_prior("books", "recommend one like this") == set()
+
+
+async def test_a_deictic_ask_on_the_todos_screen_reaches_the_todo_tools():
+    """The end-to-end shape of #54: no subject in the words, so the screen
+    decides — and "complete it" lands where it can actually act."""
+    llm = GroupSpyLLM()
+    await _ask(_screen_router(llm), "complete it", screen="todos")
+    assert llm.tool_names is not None, "never reached the tool loop"
+    assert "add_todo" in llm.tool_names
+
+
+async def test_the_same_ask_with_no_screen_does_not_reach_the_tool_loop():
+    llm = GroupSpyLLM()
+    await _ask(_screen_router(llm), "complete it")
+    assert llm.tool_names is None
+
+
+async def test_an_explicit_subject_still_beats_the_prior():
+    """"add milk to my todos" on the Mail screen is a todo."""
+    llm = GroupSpyLLM()
+    router = _screen_router(llm)
+    assert "todos" in router._subject_groups("put milk on my todo list")
+    # _subject_groups is consulted first, so the prior never gets a say
+    assert router._screen_prior("mail", "put milk on my todo list") == set()

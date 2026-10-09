@@ -18,8 +18,8 @@ from pathlib import Path
 from lumen.daemon.connectors import free_slots, local_files, mail_rules
 from lumen.daemon import local_tools
 from lumen.daemon.connectors.capture import classify
-from lumen.daemon.llm import (commitments, intent, label_suggest,
-                              meeting_prep, notes_qa, triage)
+from lumen.daemon.llm import (commitments, intent, label_keywords,
+                              label_suggest, meeting_prep, notes_qa, triage)
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
@@ -177,10 +177,15 @@ TODO_TASK_HINT = re.compile(r"\b(?:todos?|to-?do list|tasks?)\b", re.IGNORECASE)
 # aimed at a mail noun (or the deictic "this"/"it", since the mail-screen ask
 # bar carries which email is open). Routes to the tool loop where label_email
 # lives, with the open email named in context.
+# Removal phrasings ride the same route (#55): "remove the Work label from this
+# email" already trips the first alternation (it names a label AND an email),
+# but "unlabel this" / "untag it" / "unfile that message" name no label noun at
+# all, so they get their own.
 MAIL_LABEL_HINT = re.compile(
     r"\b(?:label|tag|categori[sz]e|file)\b"
     r"[^.\n]{0,40}\b(?:email|message|mail|inbox|this|it)\b"
-    r"|\b(?:label|tag)\s+this\b",
+    r"|\b(?:label|tag)\s+this\b"
+    r"|\bun-?(?:label|tag|file)\b",
     re.IGNORECASE)
 
 # A dedicated "write me a document" intent (new-features item 2): an explicit
@@ -354,6 +359,9 @@ SUGGEST_LIMIT = 40
 # How many filed messages ground each label's one-line description
 # (suggest-labels v2) — local SQL per label, no model cost.
 LABEL_PROFILE_ROWS = 3
+# The keyword pre-pass (#51) learns from a much wider sample than the one-line
+# description does — it is counting term frequencies, not writing a sentence.
+LABEL_KEYWORD_ROWS = 60
 
 # Google Calendar's fixed event-colour palette (colorId → display name), used
 # in the edit dialog's colour picker and the update confirm dialog (#12).
@@ -424,6 +432,30 @@ WRITE_TOOLS = frozenset({"create_event", "delete_event", "update_event"})
 # deliberate: a false positive costs a few schema tokens, a miss costs a
 # fabricated answer. "todos" is a context-only pseudo-group (no MCP server).
 SERVER_GROUPS = frozenset({"fs", "mail", "gcal", "books"})
+
+# todo-fixes #54: "if I am on the email screen anything I ask it to do is
+# probably going to be in the context of emails."
+#
+# The ask bar already sends {"screen": ...}; what was missing was using it as a
+# routing *prior*. It applies only when the message names no subject of its own
+# AND points at something on screen — "label this as Work", "reply to her",
+# "summarise it". That keeps two properties: an explicit subject still wins
+# ("add milk to my todos" on the Mail screen is a todo, because _subject_groups
+# is consulted first), and a general question asked while Mail happens to be
+# open ("what's the capital of France") does not drag mail tools into a plain
+# chat.
+SCREEN_GROUPS = {
+    "mail": "mail", "calendar": "gcal", "todos": "todos",
+    "books": "books", "files": "fs",
+    # Canvas assignments live as todos — that is the tool group that can act
+    # on what the Canvas screen shows.
+    "canvas": "todos",
+}
+
+# Words that make a request about whatever the user is looking at.
+SCREEN_DEICTIC = re.compile(
+    r"\b(?:this|that|these|those|it|its|them|they|her|him|his|hers|"
+    r"the open one|the current one|here)\b", re.IGNORECASE)
 
 # No single tool call may run longer than this. The filesystem server processes
 # requests sequentially over stdio, so a `search_files` from '/' can block for
@@ -884,6 +916,18 @@ class Router:
         if TODO_HINT.search(message):
             groups.add("todos")
         return groups
+
+    def _screen_prior(self, surface: str | None, message: str) -> set[str]:
+        """The screen as a routing prior (#54). Empty unless the message is
+        actually about what is on it."""
+        group = SCREEN_GROUPS.get(str(surface or "").strip().lower())
+        if group is None or not SCREEN_DEICTIC.search(message):
+            return set()
+        available = {"mail": self._mail_store is not None,
+                     "gcal": self._calendar is not None,
+                     "books": self._books is not None,
+                     "fs": True, "todos": True}
+        return {group} if available.get(group) else set()
 
     def _engaged_groups(self, conv_id: int | None) -> set[str]:
         """A tool-engaged conversation keeps every group on a bare follow-up
@@ -1681,27 +1725,53 @@ class Router:
                     return
                 names = [l["name"] for l in user]
                 ids = {l["id"] for l in user}
+                # One read of each label's filed mail serves both passes.
+                filed = {l["name"]: self._mail_store.list_page(
+                             "label", limit=LABEL_KEYWORD_ROWS,
+                             label_id=l["id"])
+                         for l in user}
                 # v2 grounding: one deterministic description per label from
                 # mail already filed under it — local SQL, no model cost.
-                profiles = {l["name"]: label_suggest.describe_label(
-                                l["name"], self._mail_store.list_page(
-                                    "label", limit=LABEL_PROFILE_ROWS,
-                                    label_id=l["id"]))
-                            for l in user}
+                profiles = {n: label_suggest.describe_label(
+                                n, rows[:LABEL_PROFILE_ROWS])
+                            for n, rows in filed.items()}
+                # #51: the deterministic first pass. Terms weighted by how
+                # EXCLUSIVE they are to a label, so the easy mail is settled
+                # from evidence and the model is only spent on the rest.
+                keywords = label_keywords.build_profiles(filed)
                 rows = [r for r in self._mail_store.list_page(
                             "inbox", limit=SUGGEST_SCAN_LIMIT)
                         if not ids.intersection(r["labels"])][:SUGGEST_LIMIT]
                 by_id = {r["id"]: r for r in rows}
                 suggestions = {}
+                by_model = {}
                 try:
                     for r in rows:
+                        name = label_keywords.classify(r, keywords)
+                        if name:
+                            suggestions[r["id"]] = name
+                            continue
                         name = await label_suggest.suggest(self._llm, r, names,
                                                            profiles)
                         if name:
-                            suggestions[r["id"]] = name
+                            by_model[r["id"]] = name
                 except LLMUnavailable as e:
                     yield {"error": str(e)}
                     return
+                # #46: "it just put everything as FIDELITY". A model that
+                # answers the same label for most of a varied inbox has
+                # anchored on one vivid label description rather than reading
+                # each message — drop that label's guesses and say so. Keyword
+                # verdicts are exempt: thirty real Fidelity receipts are a
+                # correct answer, not a collapse.
+                collapsed = label_keywords.degenerate_label(by_model)
+                if collapsed:
+                    log.warning("suggest_labels: model collapsed onto %r over "
+                                "%d verdicts — dropping them", collapsed,
+                                len(by_model))
+                    by_model = {m: n for m, n in by_model.items()
+                                if n != collapsed}
+                suggestions.update(by_model)
                 # Previews let the review popup (#32) list every suggested
                 # message — sender/subject/date — even those past the UI's loaded
                 # page (scan is 200, the mail list holds ~50). Built from rows we
@@ -1711,7 +1781,9 @@ class Router:
                                 [by_id[mid]])[0] for mid in suggestions}
                 yield {"result": {"suggestions": suggestions,
                                   "previews": previews,
-                                  "scanned": len(rows)}}
+                                  "scanned": len(rows),
+                                  "by_keyword": len(suggestions) - len(by_model),
+                                  "collapsed_label": collapsed}}
             elif type_ == "emails.apply_label":
                 # One-tap accept (suggestions): the tap IS the confirmation.
                 mid = str(payload.get("id", ""))
@@ -1896,7 +1968,8 @@ class Router:
         return (f"The user is currently viewing this email in the mail screen: "
                 f"id={open_email['id']}, from {frm}, subject \"{subj}\". When "
                 "they say 'this email' / 'the open email', that is the one. To "
-                "label it, call label_email with that email_id.")
+                "label it, call label_email with that email_id; to take a "
+                "label off it, call unlabel_email.")
 
     async def _chat(self, message: str, conv_id: int | None,
                     cwd: str | None = None, open_file: str | None = None,
@@ -2001,7 +2074,9 @@ class Router:
               and REC_HINT.search(message)):
             sub, subsystem = self._recommend_chat(message), "books"
         elif self._bridge is not None and (groups := (
-                self._subject_groups(message) or self._engaged_groups(conv_id))):
+                self._subject_groups(message)
+                or self._engaged_groups(conv_id)
+                or self._screen_prior(surface, message))):
             if self._mail_store is not None:
                 groups.add("mail")   # ride-along: two small schemas, and every
                                      # tool loop can be asked a mail follow-up
@@ -2811,6 +2886,24 @@ class Router:
         return (f"Labeled that email as '{name}' and moved it out of the inbox."
                 if ok else "Couldn't reach Gmail — the label wasn't applied.")
 
+    async def _unlabel_email_tool(self, args: dict) -> str:
+        """unlabel_email tool (#55). Same shape and same ungated reasoning as
+        label_email — the user's own mail, reversible, and strictly less
+        destructive: it takes a label off, it does not delete anything."""
+        mid = str(args.get("email_id") or "").strip()
+        name = str(args.get("label") or "").strip()
+        if not mid or not name:
+            return "unlabel_email needs both an email_id and a label name."
+        if self._mail_store is None or self._mail_store.get(mid) is None:
+            return (f"No email with id {mid} in the mailbox — check the id, or "
+                    "use search_email to find the message first.")
+        try:
+            ok = await self._mail.remove_label(mid, name)
+        except Exception as e:
+            return f"tool error: {e}"
+        return (f"Removed the '{name}' label from that email."
+                if ok else "Couldn't reach Gmail — the label wasn't removed.")
+
     async def _send_email(self, fields: dict) -> tuple[bool, str]:
         """Validate + send. No confirm gate: every caller is downstream of the
         compose popup, whose Send click is the confirmation."""
@@ -2975,7 +3068,9 @@ class Router:
                                          int((time.monotonic() - start) * 1000))
                 return text
             if short in local_tools.MAIL_TOOL_NAMES:
-                text = await self._label_email_tool(args)
+                text = await (self._unlabel_email_tool(args)
+                              if short == "unlabel_email"
+                              else self._label_email_tool(args))
                 if self._tool_log is not None:
                     self._tool_log.write(name, args, True, text,
                                          int((time.monotonic() - start) * 1000))

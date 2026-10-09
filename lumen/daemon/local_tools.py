@@ -116,6 +116,33 @@ MAIL_TOOLS = [
                 "label": {"type": "string", "description":
                           "The label name to apply, e.g. 'Work'."}},
             "required": ["email_id", "label"]}}},
+    # todo-fixes #55: Lumen told Josh it could not remove labels, only add
+    # them — and it was right, because `label_email` was the only mail tool it
+    # had. The daemon route (emails.remove_label) and the connector method
+    # (GmailSync.remove_label) both already existed; nothing had ever offered
+    # them to the model. The recurring shape in this repo: no tool for the ask
+    # means the model reaches for the nearest one, or correctly refuses.
+    {"type": "function", "function": {
+        "name": "unlabel_email",
+        "description": (
+            "Take one of the user's Gmail labels OFF an email, so the message "
+            "is no longer filed under it. Use this whenever the user asks to "
+            "remove, take off, unfile, un-label, clear or delete a label from "
+            "an email — including 'remove the Work label from this email' or "
+            "'take that off the open email', whose id is given to you in the "
+            "context. This removes the label only; the email itself is not "
+            "deleted. Access is already set up — this acts on the user's own "
+            "mail, so never decline for lack of permission or account "
+            "access, and never say you can only add labels."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description":
+                             "The email's id — from the open-email context or "
+                             "from a search_email result."},
+                "label": {"type": "string", "description":
+                          "The label name to remove, e.g. 'Work'."}},
+            "required": ["email_id", "label"]}}},
 ]
 
 MAIL_TOOL_NAMES = frozenset(t["function"]["name"] for t in MAIL_TOOLS)
