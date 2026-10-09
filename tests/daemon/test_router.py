@@ -109,6 +109,14 @@ class FakeMailStore:
     def counts(self):
         return {"total": 1, "unread": 1}
 
+    def update_labels(self, mid, add, remove):
+        row = self.get(mid)
+        if row is None:
+            return
+        row["labels"] = [l for l in row["labels"] if l not in remove]
+        row["labels"] += [l for l in add if l not in row["labels"]]
+        row["is_read"] = "UNREAD" not in row["labels"]
+
 
 class FakeMailSync:
     connected, syncing, busy = True, False, False
@@ -2535,11 +2543,36 @@ async def test_emails_auto_read_is_silent_and_idempotent():
     store, sync = FakeMailStore(), FakeMailSync()
     router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
     out = await collect(router, "emails.auto_read", {"id": "m1"})
-    assert out == [{"result": {"ok": True}}] and sync.marked == [("m1", True)]
-    store.rows[0]["is_read"] = True
+    assert out == [{"result": {"ok": True}}]
+    assert store.rows[0]["is_read"]         # mirror flipped before the reply
+    await router.drain_background()
+    assert sync.marked == [("m1", True)]
     out = await collect(router, "emails.auto_read", {"id": "m1"})
     assert out == [{"result": {"ok": True}}]
+    await router.drain_background()
     assert sync.marked == [("m1", True)]    # already read: no second Gmail call
+
+
+async def test_emails_auto_read_does_not_wait_for_gmail():
+    """The click path must not carry a network round trip (#60): opening a
+    message answers immediately and the Gmail write finishes on its own."""
+    import asyncio as _a
+    store, sync = FakeMailStore(), FakeMailSync()
+    gate = _a.Event()
+
+    async def slow_mark(mid, read):
+        await gate.wait()
+        sync.marked.append((mid, read))
+        return True
+
+    sync.mark_read = slow_mark
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store)
+    out = await collect(router, "emails.auto_read", {"id": "m1"})
+    assert out == [{"result": {"ok": True}}]   # answered with Gmail still parked
+    assert sync.marked == []
+    gate.set()
+    await router.drain_background()
+    assert sync.marked == [("m1", True)]
 
 
 async def test_emails_apply_label_op():
@@ -4496,3 +4529,75 @@ async def test_resolve_removal_tolerates_a_missing_writer(tmp_path):
                          {"id": qid, "approve": True}))[-1]["result"]
     assert res["ok"] is False
     assert queue.count() == 1          # still pending, safe to retry
+
+
+# --- concurrent IPC: which routes must still take their turn (#60/#64) -------
+
+def test_model_and_confirm_routes_are_exclusive():
+    from lumen.daemon.router import EXCLUSIVE_ROUTES
+    assert "chat" in EXCLUSIVE_ROUTES                  # a model turn
+    assert "mail.suggest_labels" in EXCLUSIVE_ROUTES   # a model turn
+    assert "emails.delete" in EXCLUSIVE_ROUTES         # parks on a confirm
+    assert "calendar.create" in EXCLUSIVE_ROUTES       # parks on a confirm
+    # The routes the whole point of the change is to let run concurrently.
+    for free in ("emails.get", "emails.list", "emails.auto_read",
+                 "canvas.status", "settings.get", "todos.list"):
+        assert free not in EXCLUSIVE_ROUTES
+    # confirm.response is what UNBLOCKS a waiting confirm — making it wait its
+    # turn behind the request it is answering would deadlock every gated write.
+    assert "confirm.response" not in EXCLUSIVE_ROUTES
+
+
+def test_every_confirm_gated_route_is_declared_exclusive():
+    """Drift guard. A route that awaits the user's confirmation parks on a modal
+    the UI can only show one of; if a new one is added and left out of
+    EXCLUSIVE_ROUTES, two dialogs can race and the older one silently times out
+    into a deny. This reads the dispatch itself rather than trusting the list."""
+    import re
+    from pathlib import Path
+
+    from lumen.daemon.router import EXCLUSIVE_ROUTES
+
+    src = Path("lumen/daemon/router.py").read_text().splitlines()
+    defs = [(i, re.match(r"\s*(?:async )?def (\w+)", ln).group(1))
+            for i, ln in enumerate(src, 1)
+            if re.match(r"\s*(?:async )?def \w+", ln)]
+
+    # Only call sites inside handle()'s own dispatch map to a route. A helper
+    # calling another helper (the chat path does) is reached through whichever
+    # branch called IT, and `chat` is already exclusive.
+    start = next(i for i, name in defs if name == "handle")
+    end = next((i for i, _ in defs if i > start), len(src) + 1)
+    # Helpers that block on the user, minus handle() itself (that call site is
+    # confirm.response, the resolver).
+    gated = {name for line, name in
+             ((ln, [d for d in defs if d[0] <= ln][-1][1])
+              for ln, text in enumerate(src, 1) if "_confirm.wait(" in text)
+             if name != "handle"}
+    assert gated, "found no confirm-gated helpers — has the parse drifted?"
+
+    # Which dispatch branch each gated helper is reached from.
+    branches = [(i, m.group(1)) for i, ln in enumerate(src, 1)
+                if (m := re.search(r"(?:el)?if type_ (?:==|in) (.+):", ln))]
+    missing = []
+    for line, text in enumerate(src, 1):
+        if not (start < line < end):
+            continue
+        called = [h for h in gated if h + "(" in text and "def " not in text]
+        if not called:
+            continue
+        before = [b for b in branches if b[0] <= line]
+        if not before:
+            continue
+        expr = before[-1][1]
+        if expr == "MAIL_GATES":            # a dict of route names
+            from lumen.daemon.router import MAIL_GATES
+            names = list(MAIL_GATES)
+        else:
+            names = re.findall(r'"([^"]+)"', expr)
+        for name in names:
+            if name != "confirm.response" and name not in EXCLUSIVE_ROUTES:
+                missing.append((name, called[0]))
+    assert not missing, (
+        f"these routes block on a confirm but are not in EXCLUSIVE_ROUTES, so "
+        f"they can now overlap another dialog: {missing}")

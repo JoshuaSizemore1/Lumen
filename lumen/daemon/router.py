@@ -612,6 +612,40 @@ def todo_context(todos: list[dict], today: date, has_tool: bool = False) -> str:
 # The connections Settings can Disable/Disconnect (#38).
 _CONN_NAMES = ("gmail", "google_calendar", "canvas")
 
+# Routes that would load the local model. When the model switch is off these
+# never reach Ollama; they answer with a `model_off` marker instead, and the UI
+# renders one "the model is turned off" notice wherever the answer would go.
+# Two shapes because the IPC has two: `chat` streams (a bare event the client
+# turns into a signal), everything else is request/response (a result the
+# per-request callback receives).
+_MODEL_STREAM_ROUTES = ("chat",)
+_MODEL_RESULT_ROUTES = ("briefing.today", "books.recommend", "mail.suggest_labels",
+                        "todos.scan_commitments", "emails.revise",
+                        "files.propose_edit")
+# Preloading is not an answer to anything — with the model off it is simply a
+# no-op, since its whole purpose is to pull the model into RAM early.
+_MODEL_SILENT_ROUTES = ("warm",)
+
+# Routes that must never overlap another of their kind. The IPC server serves
+# requests concurrently now (todo-fixes #60/#64) — a message-body fetch must not
+# hold up a list read — but two kinds of route still have to take their turn:
+#
+#   * model routes, because a second call would put another generation on the
+#     iGPU alongside the first (the power budget forbids it), and because two
+#     chats' chunks would interleave into the client's single signal stream;
+#   * confirm-gated routes, because they park on a modal the UI can only show
+#     one of at a time.
+#
+# `confirm.response` is deliberately absent: it is the thing that UNBLOCKS a
+# waiting confirm, so making it wait its turn would deadlock every gated write.
+_CONFIRM_GATED_ROUTES = (
+    "calendar.create", "calendar.delete", "calendar.update",
+    "rules.create", "canvas.push_due_dates",
+)
+EXCLUSIVE_ROUTES = frozenset(
+    _MODEL_STREAM_ROUTES + _MODEL_RESULT_ROUTES + _MODEL_SILENT_ROUTES
+    + _CONFIRM_GATED_ROUTES) | frozenset(MAIL_GATES)
+
 
 class Router:
     def __init__(self, llm, todos, books=None, *, calendar=None, mail=None,
@@ -663,6 +697,8 @@ class Router:
         self._canvas_proposals = canvas_proposals
         self._connection_state = connection_state  # ConnectionState — #38 Disable
         self._max_iterations = max_iterations
+        # Detached fire-and-forget writes; see _spawn / drain_background.
+        self._bg: set[asyncio.Task] = set()
 
     def on_disconnect(self) -> None:
         """A UI connection died — deny anything still waiting on a dialog."""
@@ -867,6 +903,40 @@ class Router:
             if group in groups:
                 return name
         return "chat"
+
+
+    # --- fire-and-forget work (todo-fixes #60) ---------------------------
+    # Some routes have a Gmail write to do but nothing to say about it. Holding
+    # the reply open for that round trip put the network on the click path:
+    # every message you opened cost one, and spam-clicking queued them all.
+    # These run detached, with the local mirror updated optimistically so the
+    # UI is right immediately; a failed write is corrected by the next poll.
+
+    def _spawn(self, coro, what: str) -> None:
+        task = asyncio.create_task(self._background(coro, what))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    @staticmethod
+    async def _background(coro, what: str) -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("background %s failed", what)
+
+    async def drain_background(self) -> None:
+        """Wait for detached work to finish. Used by shutdown, and by tests that
+        need to observe a write the route deliberately did not wait for."""
+        while self._bg:
+            await asyncio.gather(*list(self._bg), return_exceptions=True)
+
+    def is_exclusive(self, type_: str) -> bool:
+        """Asked by the IPC server before it starts a request: may this route
+        run alongside others? See EXCLUSIVE_ROUTES for the two reasons it may
+        not."""
+        return type_ in EXCLUSIVE_ROUTES
 
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
         if type_ == "chat":
@@ -1588,10 +1658,18 @@ class Router:
                 yield {"result": {"ok": ok, "message": "Updated." if ok else
                                   "Couldn't reach Gmail — nothing was changed."}}
             elif type_ == "emails.auto_read":
-                # Dwell-timer read receipt: silent and idempotent.
+                # Open-as-read receipt: silent, idempotent, and deliberately NOT
+                # awaited (#60). It has nothing to report, so making the click
+                # wait for a Gmail round trip bought the user nothing. The
+                # mirror is flipped here so a list read that lands a millisecond
+                # later already shows the message read; if the Gmail write
+                # fails, the next poll puts UNREAD back.
                 row = self._mail_store.get(str(payload.get("id", "")))
                 if row is not None and not row["is_read"]:
-                    await self._mail.mark_read(row["id"], True)
+                    self._mail_store.update_labels(row["id"], add=[],
+                                                   remove=["UNREAD"])
+                    self._spawn(self._mail.mark_read(row["id"], True),
+                                "emails.auto_read")
                 yield {"result": {"ok": True}}
             elif type_ == "mail.suggest_labels":
                 # Explicit press only: per-message verdicts (triage lesson —

@@ -908,10 +908,37 @@ def test_body_html_fetched_once_on_open(qtbot):
     data.cb_for("emails.get")({**daemon_mail_row(), "body_html": "<p>rich</p>"})
     assert st.mails[0]["body_html"] == "<p>rich</p>"
     data.requests.clear()
-    st.select_mail("m1")                       # already fetched: no re-request
-    assert "emails.get" not in [t for t, _p, _cb in data.requests]
-    st.select_mail("m2")                       # new open: fetch its HTML
+    st.select_mail("m1")
+    gets = [p["id"] for t, p, _cb in data.requests if t == "emails.get"]
+    assert "m1" not in gets              # already fetched: never re-requested
+    assert gets == ["m2"]                # but the neighbour is prefetched (#60)
+    st.select_mail("m2")                 # new open: fetch its HTML
     assert ("emails.get", {"id": "m2"}) in [(t, p) for t, p, _cb in data.requests]
+
+
+def test_neighbours_are_prefetched_around_the_open_message(qtbot):
+    """Browsing a list is overwhelmingly up-and-down, so the messages either
+    side of the open one are pulled ahead of the click that wants them (#60).
+    Safe only because the daemon serves requests concurrently now — before that
+    a prefetch would have queued in front of the very click it was helping."""
+    data = FakeClient()
+    st = AppState(data=data)
+    st.refresh_mails()
+    data.cb_for("emails.list")({"emails": [daemon_mail_row(i) for i in (1, 2, 3, 4)],
+                                "connected": True, "syncing": False,
+                                "last_sync": None, "counts": {"total": 4}})
+    data.requests.clear()
+    st.select_mail("m3")
+    gets = sorted(p["id"] for t, p, _cb in data.requests if t == "emails.get")
+    assert gets == ["m2", "m3", "m4"]    # the open one, and one either side
+
+    # At an end of the list there is only one neighbour to pull.
+    data.requests.clear()
+    for m in st.mails:
+        m["body_html"] = None
+    st.select_mail("m1")
+    gets = sorted(p["id"] for t, p, _cb in data.requests if t == "emails.get")
+    assert gets == ["m1", "m2"]
 
 
 def test_mail_pane_renders_html_body(qtbot):
@@ -1788,3 +1815,49 @@ def test_accept_all_suggestions_files_each(qtbot):
                if t == "emails.apply_label"}
     assert applied == {"m1": "Bills", "m2": "Work"}
     assert st.mail_suggestions == {} and st.mail_suggestion_meta == {}
+
+
+# ---- stale list replies (todo-fixes #49) -----------------------------------
+# The daemon now serves requests concurrently, so replies can land out of order.
+# Even before that, clicking a label and clicking straight back left the label's
+# late reply free to overwrite the inbox — which changed the list membership and
+# yanked the scroll to the top ("it sends me backwards in the list").
+
+def test_late_list_reply_from_a_previous_scope_is_ignored(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.mail_labels = ["Bills"]
+
+    st.set_mail_scope("Bills")
+    bills_cb = data.cb_for("emails.list")
+    st.set_mail_scope("inbox")
+    inbox_cb = data.cb_for("emails.list")
+
+    inbox_cb({"emails": [daemon_mail_row(1)], "connected": True,
+              "syncing": False, "last_sync": None, "counts": {"total": 1}})
+    assert [m["id"] for m in st.mails] == ["m1"]
+
+    # The older request answers last. It must not repaint the inbox.
+    bills_cb({"emails": [daemon_mail_row(9)], "connected": True,
+              "syncing": False, "last_sync": None, "counts": {"total": 1}})
+    assert [m["id"] for m in st.mails] == ["m1"]
+
+
+def test_the_newest_list_reply_still_lands(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.refresh_mails()
+    first = data.cb_for("emails.list")
+    st.refresh_mails()
+    second = data.cb_for("emails.list")
+    first({"emails": [daemon_mail_row(1)], "counts": {"total": 1}})
+    second({"emails": [daemon_mail_row(2)], "counts": {"total": 1}})
+    assert [m["id"] for m in st.mails] == ["m2"]
+
+
+def test_a_search_reply_is_not_stale_against_its_own_request(qtbot):
+    data = FakeClient()
+    st = AppState(data=data)
+    st.search_mails("budget")
+    data.cb_for("emails.search")({"emails": [daemon_mail_row(3)]})
+    assert [m["id"] for m in st.mails] == ["m3"]

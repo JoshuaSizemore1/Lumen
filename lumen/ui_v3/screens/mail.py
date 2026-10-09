@@ -102,6 +102,10 @@ class MailScreen(LazyRebuild, QWidget):
 
         self.busy = _BusyOverlay(self)
 
+        # Arrow-key browsing (#50) needs the screen to receive key events. The
+        # search box keeps them while it has focus, which is what we want.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
         state.mails_changed.connect(self.schedule_rebuild)
         self.rebuild()
 
@@ -242,17 +246,102 @@ class MailScreen(LazyRebuild, QWidget):
             {"inbox": "Inbox", "unread": "Unread", "sent": "Sent"}.get(
                 scope, scope))
         ids = [m["id"] for m in self.state.mails]
-        keep_scroll = ids == self._last_mail_ids
-        yoff = self.list_scroll.verticalScrollBar().value() if keep_scroll else 0
+        prev_ids = self._last_mail_ids
+        # Keeping your place used to be all-or-nothing: the scroll survived only
+        # when the id list was identical. So filing a message out of the inbox,
+        # or a poll delivering one, threw you back to the top (#49). What decides
+        # it is whether this is still the same mailbox — any overlap means it is,
+        # and the row you were reading should stay under your eyes.
+        same_mailbox = bool(set(ids) & set(prev_ids))
+        anchor = self._scroll_anchor() if same_mailbox else None
         self._last_mail_ids = ids
         self._build_chips()
         self._build_list()
         self._build_pane()
         # Restore after the layout settles: the scrollbar's range isn't valid
         # until the freshly-added rows have been laid out.
-        if keep_scroll and yoff:
+        if same_mailbox:
+            QTimer.singleShot(0, lambda: self._restore_anchor(anchor))
+        else:
             QTimer.singleShot(
-                0, lambda: self.list_scroll.verticalScrollBar().setValue(yoff))
+                0, lambda: self.list_scroll.verticalScrollBar().setValue(0))
+
+    # ---- keeping your place (#49) -----------------------------------------
+    def _scroll_anchor(self):
+        """(id, offset) of the row at the top of the viewport — the thing the
+        list should still be showing once it has been rebuilt."""
+        rows = getattr(self, "_rows", {})
+        if not rows:
+            return None
+        y = self.list_scroll.verticalScrollBar().value()
+        for m in self.state.mails:
+            row = rows.get(m["id"])
+            if row is not None and row.y() + row.height() > y:
+                return m["id"], row.y() - y
+        return None
+
+    def _top_visible_id(self):
+        anchor = self._scroll_anchor()
+        return anchor[0] if anchor else None
+
+    def _restore_anchor(self, anchor, settle: bool = True):
+        """Put the anchor row back where it was.
+
+        Twice, deliberately. A freshly-built row's final position isn't known
+        until the style has been polished and the layout has run, and one
+        deferred call is not late enough — measuring then lands the list a row
+        off. The first pass gets it close, the second corrects it on the
+        following tick; both happen inside the same frame, so there is nothing
+        to see."""
+        if anchor is None:
+            return
+        mid, offset = anchor
+        row = getattr(self, "_rows", {}).get(mid)
+        if row is None:
+            return          # the anchor row itself was filed away; leave it be
+        lay = self.list_host.layout()
+        if lay is not None:
+            lay.activate()
+        self.list_scroll.verticalScrollBar().setValue(max(0, row.y() - offset))
+        if settle:
+            QTimer.singleShot(0, lambda: self._restore_anchor(anchor, False))
+
+    # ---- keyboard browsing (#50) ------------------------------------------
+    def keyPressEvent(self, ev):
+        """Up/Down step through the messages (#50). Deliberately does NOT mark
+        anything read: opening a message by click is a decision, sweeping past
+        one with the arrow keys is not, and holding Down would otherwise clear
+        the whole unread list on the way through."""
+        key = ev.key()
+        if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+            if self._step_selection(1 if key == Qt.Key.Key_Down else -1):
+                ev.accept()
+                return
+        super().keyPressEvent(ev)
+
+    def _step_selection(self, delta: int) -> bool:
+        mails = self.state.mails
+        if not mails:
+            return False
+        ids = [m["id"] for m in mails]
+        try:
+            i = ids.index(self.state.selected_mail)
+        except ValueError:
+            i = 0 if delta > 0 else len(ids) - 1
+            self.state.select_mail_quiet(ids[i])
+            self._scroll_selection_into_view()
+            return True
+        j = i + delta
+        if not 0 <= j < len(ids):
+            return False                      # already at an end; don't wrap
+        self.state.select_mail_quiet(ids[j])
+        self._scroll_selection_into_view()
+        return True
+
+    def _scroll_selection_into_view(self):
+        row = getattr(self, "_rows", {}).get(self.state.selected_mail)
+        if row is not None:
+            self.list_scroll.ensureWidgetVisible(row, 0, 40)
 
     def _build_chips(self):
         # Scope selection (inbox/unread/sent/labels) moved to the collapsible

@@ -128,6 +128,12 @@ async def run() -> None:
         t.cancel()
     await asyncio.gather(*bg_tasks, return_exceptions=True)
     await server.stop()
+    # Detached writes (an open-as-read receipt, say) get a short grace period to
+    # land rather than being dropped on the floor mid-shutdown.
+    try:
+        await asyncio.wait_for(router.drain_background(), timeout=5)
+    except asyncio.TimeoutError:
+        log.warning("background writes still pending at shutdown — dropping")
     await memory_worker.aclose()
     await llm.aclose()
     if bridge is not None:

@@ -159,6 +159,7 @@ class AppState(QObject):
         self.mail_syncing = False
         self.mail_last_sync = None
         self._last_sync_req: float | None = None   # monotonic; sync debounce
+        self._mail_req = 0        # newest list request; older replies are dropped (#49)
         self._last_cal_sync_req: float | None = None   # #59, same for calendar
         self.selected_mail = "m1"
         self.mail_scope = "inbox"      # "inbox" | "unread" | a label name
@@ -616,13 +617,38 @@ class AppState(QObject):
 
     def select_mail(self, mid: str):
         # Opening a message marks it read, Gmail-style (decided 2026-07-16 —
-        # replaced the 1s dwell timer; every selection here is a deliberate
-        # click, there is no key-browsing to protect). Programmatic selection
-        # in _set_mails never marks anything.
+        # replaced the 1s dwell timer). A click is a deliberate open; arrow-key
+        # browsing is not, and goes through select_mail_quiet instead (#50).
+        # Programmatic selection in _set_mails never marks anything.
         self.selected_mail = mid
         self.auto_read(mid)
         self.fetch_body_html(mid)
+        self._prefetch_neighbours(mid)
         self.mails_changed.emit()
+
+    def select_mail_quiet(self, mid: str):
+        """Select without marking read — what the arrow keys use (#50).
+        Sweeping past a message with Down is not a decision to have read it."""
+        self.selected_mail = mid
+        self.fetch_body_html(mid)
+        self._prefetch_neighbours(mid)
+        self.mails_changed.emit()
+
+    def _prefetch_neighbours(self, mid: str) -> None:
+        """Pull the bodies either side of the open message (#60). Opening a
+        message costs a daemon round trip for its HTML; browsing a list is
+        overwhelmingly up-and-down, so the next one is nearly always already
+        wanted. Cheap now that the daemon serves requests concurrently — before
+        that, a prefetch would have queued in front of the click that follows it.
+        """
+        ids = [m["id"] for m in self.mails]
+        try:
+            i = ids.index(mid)
+        except ValueError:
+            return
+        for j in (i - 1, i + 1):
+            if 0 <= j < len(ids):
+                self.fetch_body_html(ids[j])
 
     def fetch_body_html(self, mid: str) -> None:
         """List rows arrive without HTML (kept light); the reading pane pulls
@@ -638,6 +664,24 @@ class AppState(QObject):
                 m2["body_html"] = (row or {}).get("body_html")
                 self.mails_changed.emit()
         self._data.request("emails.get", {"id": mid}, handle)
+
+    def _list_epoch(self):
+        """Stamp a new list request and hand back the callback that will accept
+        its reply — and only its reply (#49).
+
+        Replies used to be taken on trust. Click a label, click straight back to
+        the inbox, and the label's slower answer still landed: it repainted the
+        list with the wrong messages, re-picked the selection, and — because the
+        membership had changed — sent the scroll back to the top. The daemon now
+        serves requests concurrently, so out-of-order replies are ordinary
+        rather than a race, and a guard is required, not merely tidy."""
+        self._mail_req += 1
+        mine = self._mail_req
+
+        def accept(result):
+            if mine == self._mail_req:
+                self._set_mails(result)
+        return accept
 
     def _set_mails(self, result: dict) -> None:
         # emails.search responses carry only {"emails": [...]} — no status
@@ -680,7 +724,7 @@ class AppState(QObject):
     def refresh_mails(self) -> None:
         if self._data is not None:
             self._data.request("emails.list", self._scope_payload(),
-                               self._set_mails)
+                               self._list_epoch())
 
     def refresh_inbox(self) -> None:
         """Manual refresh: delta-sync against Gmail, then reload the current
@@ -688,7 +732,7 @@ class AppState(QObject):
         if self._data is not None:
             self._last_sync_req = time.monotonic()
             self._data.request("mail.refresh", self._scope_payload(),
-                               self._set_mails)
+                               self._list_epoch())
 
     SYNC_DEBOUNCE_S = 60.0
 
@@ -711,7 +755,7 @@ class AppState(QObject):
         if not query:
             self.refresh_mails()
             return
-        self._data.request("emails.search", {"query": query}, self._set_mails)
+        self._data.request("emails.search", {"query": query}, self._list_epoch())
 
     def _mail_action_done(self, result: dict) -> None:
         msg = result.get("message", "")

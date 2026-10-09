@@ -823,6 +823,8 @@ ead do it programatically, where the email id / whatever signifies that email is
       assignments. Adding ↻ tipped an already-tight header over (at 1280px Qt
       clipped "Month" to "Iont"), so the colour legend now yields below the width
       where everything fits — scaled by text size, so it holds at any zoom.
+60. When I spam click through emails it laggs really bad, try to fix this / make emails load faster.
+64. Swapping between labels and inbox is very laggy
 ---
 
 ## Josh's Finds — status 2026-07-21
