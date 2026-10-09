@@ -74,6 +74,19 @@ def eyebrow(text: str, color: str = T.TEXT_FAINT, px: float = 10,
 # scale is applied here rather than at ~300 call sites: padding and gaps are
 # set in the design's own px, and at 50% unscaled margins ate the sidebar
 # (clipping "Calendar" to "Calend"), while at 150% they left it cramped.
+# What a surface shows when a turn ends with no text at all (#45).
+#
+# It used to say "(no answer)", which was both unhelpful and usually a lie: the
+# daemon had tool results in hand and only the model's closing sentence was
+# missing. The daemon now guarantees a terminal answer (llm/client.py), so
+# reaching this means the turn produced literally nothing — a dropped
+# connection or a hand-off — and it should say that rather than imply Lumen had
+# nothing to say.
+NO_REPLY_STATUS = "◇ nothing came back"
+NO_REPLY_TEXT = ("Nothing came back for that — the answer never reached the "
+                 "screen. Asking again usually works.")
+
+
 def hbox(host: QWidget | None = None, m=(0, 0, 0, 0), s: int = 0) -> QHBoxLayout:
     lay = QHBoxLayout(host) if host else QHBoxLayout()
     lay.setContentsMargins(*(T.sc(v) if v else 0 for v in m))

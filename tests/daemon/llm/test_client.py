@@ -270,7 +270,10 @@ async def test_chat_with_tools_respects_iteration_cap():
     events = [e async for e in client.chat_with_tools(
         [{"role": "user", "content": "x"}], tools=[{"type": "function", "function": {"name": "t"}}],
         executor=executor, max_iterations=2)]
-    assert events[-1] == {"content": "", "capped": True}
+    # Being capped is not a reason to hand the user an empty string (#45):
+    # the tool results are right there, so they get reported.
+    assert events[-1]["capped"] is True
+    assert "again" in events[-1]["content"]
     assert sum(1 for e in events if "tool_call" in e) == 2
     await client.aclose()
 
@@ -286,4 +289,145 @@ async def test_chat_with_tools_unreachable_raises():
     with pytest.raises(LLMUnavailable):
         async for _ in client.chat_with_tools([{"role": "user", "content": "hi"}], [], executor):
             pass
+    await client.aclose()
+
+
+# --- #45: "(no answer)" must be unreachable while the model is answering -----
+# `chat_with_tools` used to yield `msg.get("content", "")` and return — empty
+# content included. The router forwarded an empty chunk, the ask bar
+# accumulated nothing, and the UI printed "(no answer)", discarding tool
+# results it already had in hand. Nothing was logged, which is why it stayed
+# mysterious for so long.
+
+def _replies(*bodies):
+    """A handler that answers each request in turn from `bodies`."""
+    seq = list(bodies)
+
+    def handler(request):
+        return httpx.Response(200, json={"message": seq.pop(0), "done": True})
+
+    return handler
+
+
+async def test_an_empty_final_answer_is_retried_without_tools():
+    handler = _replies(
+        {"content": "", "tool_calls": [
+            {"function": {"name": "search_email", "arguments": {}}}]},
+        {"content": ""},                       # the empty final message
+        {"content": "Ada wrote about the engine schedule."},   # the retry
+    )
+    calls = []
+
+    async def executor(name, args):
+        calls.append(name)
+        return "subject: Engines"
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "what did ada say"}],
+        tools=[{"type": "function", "function": {"name": "search_email"}}],
+        executor=executor)]
+    assert calls == ["search_email"]
+    assert events[-1] == {"content": "Ada wrote about the engine schedule."}
+    await client.aclose()
+
+
+async def test_the_retry_is_sent_with_no_tools_attached():
+    """The failure is usually the model reaching for another tool instead of
+    answering, so taking the tools away is the fix, not a formality."""
+    sent = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        sent.append(body.get("tools"))
+        msg = ({"content": "", "tool_calls": [
+                    {"function": {"name": "t", "arguments": {}}}]}
+               if len(sent) == 1 else {"content": ""})
+        return httpx.Response(200, json={"message": msg, "done": True})
+
+    async def executor(name, args):
+        return "the answer is 42"
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "x"}],
+        tools=[{"type": "function", "function": {"name": "t"}}],
+        executor=executor)]
+    assert sent[0]                       # first round had tools
+    assert sent[-1] == []                # the retry had none
+    assert "42" in events[-1]["content"]
+    await client.aclose()
+
+
+async def test_tool_results_are_reported_when_the_model_stays_silent():
+    """The work was done and the answer is sitting right there; only the
+    model's final sentence was missing. Reporting it beats "(no answer)"."""
+    handler = _replies(
+        {"content": "", "tool_calls": [
+            {"function": {"name": "gcal__list_events", "arguments": {}}}]},
+        {"content": ""},
+        {"content": "   "},                   # retry is empty too
+    )
+
+    async def executor(name, args):
+        return "Tue 10:00 Standup; Wed 14:00 Review"
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "what's on"}],
+        tools=[{"type": "function", "function": {"name": "gcal__list_events"}}],
+        executor=executor)]
+    text = events[-1]["content"]
+    assert "Standup" in text and "Review" in text
+    assert "list events" in text              # named in the user's words
+    assert text.strip()
+    await client.aclose()
+
+
+async def test_an_empty_answer_with_no_tools_at_all_says_so_plainly():
+    from lumen.daemon.llm.client import NO_MODEL_ANSWER
+    handler = _replies({"content": ""}, {"content": ""})
+
+    async def executor(name, args):
+        raise AssertionError("no tools were called")
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "hi"}], tools=[], executor=executor)]
+    assert events == [{"content": NO_MODEL_ANSWER}]
+    await client.aclose()
+
+
+async def test_the_empty_answer_is_logged(caplog):
+    import logging
+    handler = _replies({"content": ""}, {"content": "recovered"})
+
+    async def executor(name, args):
+        return ""
+
+    client = make_client(handler)
+    with caplog.at_level(logging.WARNING, logger="lumen.daemon"):
+        [e async for e in client.chat_with_tools(
+            [{"role": "user", "content": "hi"}], tools=[], executor=executor)]
+    assert any("empty answer" in r.getMessage() for r in caplog.records)
+    await client.aclose()
+
+
+async def test_a_real_answer_is_never_second_guessed():
+    """One model call, not two, on the happy path — the power budget."""
+    posts = []
+
+    def handler(request):
+        posts.append(1)
+        return httpx.Response(200, json={
+            "message": {"content": "Four."}, "done": True})
+
+    async def executor(name, args):
+        return ""
+
+    client = make_client(handler)
+    events = [e async for e in client.chat_with_tools(
+        [{"role": "user", "content": "2+2"}], tools=[], executor=executor)]
+    assert events == [{"content": "Four."}]
+    assert len(posts) == 1
     await client.aclose()

@@ -2,9 +2,12 @@
 even if the service-level OLLAMA_KEEP_ALIVE override is lost. Never -1."""
 
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 import httpx
+
+log = logging.getLogger("lumen.daemon")
 
 
 class LLMUnavailable(Exception):
@@ -18,6 +21,30 @@ class LLMUnavailable(Exception):
 # smaller plain-chat value would thrash the load. KV-cache RAM at 8192 is a
 # few hundred MB for the 4B model — acceptable; idle-unload still governs.
 NUM_CTX = 8192
+
+# todo-fixes #45: "Lumen sometimes just says (no answer)".
+#
+# A tool-loop turn that ends with EMPTY content used to be yielded as-is: the
+# router forwarded an empty chunk, the ask bar accumulated nothing, and the UI
+# printed "(no answer)" — discarding tool results it already had in hand, and
+# logging nothing, which is why it stayed mysterious. A 4B model returning an
+# empty final message after a tool round is common.
+#
+# Three steps, in order, so the string becomes unreachable while the model is
+# answering at all: log it, ask once more with no tools attached (the failure
+# is usually the model trying to call another one), and failing that, report
+# what the tools actually found. The extra call only ever happens on this path,
+# and it replaces an answer that was worthless.
+_ANSWER_FROM_RESULTS = (
+    "Answer the question now, in plain sentences, using only the tool results "
+    "above. Do not call any more tools. If the results do not contain the "
+    "answer, say exactly what they do contain."
+)
+NO_MODEL_ANSWER = (
+    "The local model returned nothing for that. Asking again, or rephrasing "
+    "it, usually works."
+)
+_SALVAGE_CAP = 1200        # chars of tool output to hand back verbatim
 
 
 class OllamaClient:
@@ -112,7 +139,11 @@ class OllamaClient:
             msg = data.get("message", {})
             calls = msg.get("tool_calls") or []
             if not calls:
-                yield {"content": msg.get("content", "")}
+                content = (msg.get("content") or "").strip()
+                if content:
+                    yield {"content": content}
+                else:
+                    yield {"content": await self._salvage(convo, model)}
                 return
             convo.append(msg)
             for call in calls:
@@ -127,7 +158,29 @@ class OllamaClient:
                 yield {"tool_call": {"name": name, "arguments": args}}
                 result_text = await executor(name, args)
                 convo.append({"role": "tool", "content": result_text, "tool_name": name})
-        yield {"content": "", "capped": True}
+        # Out of iterations with no answer: the same guarantee applies. Being
+        # capped is not a reason to hand the user an empty string.
+        yield {"content": await self._salvage(convo, model), "capped": True}
+
+    async def _salvage(self, convo: list[dict], model: str | None) -> str:
+        """Never return an empty final answer (#45)."""
+        results = [m for m in convo if m.get("role") == "tool"]
+        log.warning("empty answer from the tool loop after %d tool call(s): %s",
+                    len(results), [m.get("tool_name") for m in results])
+        try:
+            data = await self._post_chat(
+                convo + [{"role": "user", "content": _ANSWER_FROM_RESULTS}],
+                [], model)                       # no tools: that is the point
+            text = (data.get("message", {}).get("content") or "").strip()
+        except LLMUnavailable:
+            text = ""
+        if text:
+            log.info("empty answer recovered on the no-tools retry")
+            return text
+        if results:
+            log.warning("still empty — reporting the tool results directly")
+            return _describe_results(results)
+        return NO_MODEL_ANSWER
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
         """Embeddings for the notes index. keep_alive rides along — the
@@ -203,3 +256,26 @@ class OllamaClient:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+
+def _describe_results(results: list[dict]) -> str:
+    """Last resort: say what the tools found, in the user's words.
+
+    Better than "(no answer)" by a wide margin — the work was done and the
+    answer is very often sitting right here; only the model's final sentence
+    was missing."""
+    lines = ["I couldn't put that into words, but here is what I found:"]
+    budget = _SALVAGE_CAP
+    for m in results:
+        text = str(m.get("content") or "").strip()
+        if not text:
+            continue
+        name = str(m.get("tool_name") or "lookup").split("__")[-1]
+        chunk = text[:budget]
+        budget -= len(chunk)
+        lines.append(f"\n{name.replace('_', ' ')}:\n{chunk}")
+        if budget <= 0:
+            break
+    if len(lines) == 1:
+        return NO_MODEL_ANSWER
+    return "\n".join(lines)

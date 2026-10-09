@@ -15,7 +15,8 @@ from PyQt6.QtWidgets import QDialog, QFrame, QLineEdit, QWidget
 from . import theme as T
 from .components import accent_fill
 from .widgets import (
-    Chip, ClickRow, TypingDots, clear_layout, font, hbox, hline, label, scroll,
+    NO_REPLY_STATUS, NO_REPLY_TEXT, Chip, ClickRow, TypingDots, clear_layout,
+    font, hbox, hline, label, scroll,
     shadow, vbox,
 )
 
@@ -241,8 +242,8 @@ class LauncherPalette(QFrame):
         if not self._acc:
             # Settle the status so the "◇ thinking" dots stop when a turn ends
             # with no text — otherwise the spinner runs forever (#34).
-            self._set_status("◇ no answer", T.TEXT_FAINT)
-            self.answer.setText("(no answer)")
+            self._set_status(NO_REPLY_STATUS, T.TEXT_FAINT)
+            self.answer.setText(NO_REPLY_TEXT)
 
     def _on_error(self, msg: str):
         if not self._busy:

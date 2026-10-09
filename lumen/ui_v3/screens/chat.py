@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 from .. import theme as T
 from ..components import accent_fill
 from ..widgets import (
-    ClickLabel, ClickRow, Dot, ElideLabel, TypingDots, button, clear_layout,
+    NO_REPLY_STATUS, NO_REPLY_TEXT, ClickLabel, ClickRow, Dot, ElideLabel,
+    TypingDots, button, clear_layout,
     empty_state, font, hbox, hline, label, scroll, vbox, vline,
 )
 
@@ -308,8 +309,8 @@ class ChatScreen(QWidget):
         if not self._acc:
             # Settle the status so the "◇ thinking" dots stop when a turn ends
             # with no text — otherwise the spinner runs forever (#34).
-            self._status("◇ no answer", T.TEXT_FAINT)
-            self.resp_label.setText("(no answer)")
+            self._status(NO_REPLY_STATUS, T.TEXT_FAINT)
+            self.resp_label.setText(NO_REPLY_TEXT)
         self._messages.append({"role": "assistant", "text": self._acc})
         self._refresh_list()
         # A turn may have run add_todo/complete_todo; pull fresh state so the

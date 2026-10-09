@@ -9,7 +9,7 @@ from lumen.ui_v3.askbar import AskBar
 from lumen.ui_v3.launcher import LauncherPalette
 from lumen.ui_v3.screens.chat import ChatScreen
 from lumen.ui_v3.state import AppState
-from lumen.ui_v3.widgets import TypingDots
+from lumen.ui_v3.widgets import NO_REPLY_TEXT, TypingDots
 
 
 def _spinner():
@@ -30,7 +30,7 @@ def test_askbar_empty_done_stops_animation(qtbot):
     bar._on_done()
 
     assert bar.status._timer.isActive() is False
-    assert bar.answer.text() == "(no answer)"
+    assert bar.answer.text() == NO_REPLY_TEXT
 
 
 def test_chat_empty_done_stops_animation(qtbot):
@@ -45,7 +45,7 @@ def test_chat_empty_done_stops_animation(qtbot):
     scr._on_done()
 
     assert scr.status._timer.isActive() is False
-    assert scr.resp_label.text() == "(no answer)"
+    assert scr.resp_label.text() == NO_REPLY_TEXT
 
 
 def test_launcher_empty_done_stops_animation(qtbot):
@@ -58,4 +58,4 @@ def test_launcher_empty_done_stops_animation(qtbot):
     lau._on_done()
 
     assert lau.status._timer.isActive() is False
-    assert lau.answer.text() == "(no answer)"
+    assert lau.answer.text() == NO_REPLY_TEXT

@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 
 from . import theme as T
 from .widgets import (
-    Chip, ClickLabel, TypingDots, clear_layout, font, hbox, label, scroll,
-    vbox,
+    NO_REPLY_STATUS, NO_REPLY_TEXT, Chip, ClickLabel, TypingDots, clear_layout,
+    font, hbox, label, scroll, vbox,
 )
 
 WAKE_THRESHOLD_MS = 1500
@@ -214,8 +214,8 @@ class AskBar(QFrame):
             # or a hand-off): settle the status so the "◇ thinking" dots stop
             # animating — otherwise the spinner runs forever over "(no answer)"
             # (#34). _on_chunk already sets it static when text does arrive.
-            self._status("◇ no answer", T.TEXT_FAINT)
-            self.answer.setText("(no answer)")
+            self._status(NO_REPLY_STATUS, T.TEXT_FAINT)
+            self.answer.setText(NO_REPLY_TEXT)
         self.foot.setText(f"answered on-device · {T.MODEL_NAME} · "
                           "0 tokens sent externally")
         # "open in Chat" is offered whenever there's an answer to carry over —
