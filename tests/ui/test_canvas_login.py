@@ -229,7 +229,12 @@ def test_autofill_js_behaves_against_a_stub_dom(tmp_path):
         "nosubmit": cl.autofill_js("u1234567", "s3cret"),
         "useronly": cl.autofill_js("u1234567", "s3cret", allow_password_submit=True),
         "probe": cl.probe_js(),
-        "read": cl.read_fields_js(),
+        "read_fields": cl.read_fields_js(),
+        # the #44 rebuild
+        "present": cl.login_form_present_js(),
+        "focus": cl.fill_on_focus_js("u1234567", "s3cret"),
+        "capture": cl.capture_on_submit_js(),
+        "read": cl.read_capture_js(),
     }))
     proc = subprocess.run(
         ["node", str(JS_DIR / "autofill_spec.js"), str(snippets)],

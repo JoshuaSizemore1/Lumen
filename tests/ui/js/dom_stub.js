@@ -45,7 +45,14 @@ function makeDoc(inputs, frames) {
     querySelector(sel) { return doc._inputs.find(el => matches(el, sel)) || null; },
     querySelectorAll(sel) {
       if (sel.includes("iframe")) return doc._frames;
-      return doc._inputs.filter(el => ["input", "select", "textarea"].some(t => sel.includes(t)));
+      // The probe asks for the whole input soup; everything else is a real
+      // selector and must be honoured, or findAll (#44c: fill EVERY candidate)
+      // would look like it matched a password field with a username selector.
+      if (sel.includes(",")) {
+        return doc._inputs.filter(el => ["input", "select", "textarea"]
+          .includes(String(el.tagName).toLowerCase()));
+      }
+      return doc._inputs.filter(el => matches(el, sel));
     },
   };
   doc.documentElement = {};

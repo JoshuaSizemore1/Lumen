@@ -15,11 +15,12 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import date, datetime, timezone
 
 from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QStackedWidget, QVBoxLayout, QWidget,
+    QFrame, QLineEdit, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .. import canvas_creds
@@ -28,7 +29,8 @@ from .. import theme as T
 from ..components import section_head
 from ..widgets import (
     AccentBar, Chip, ClickLabel, ClickRow, ElideLabel, Dot, IconButton, Switch,
-    button, clear_layout, empty_state, eyebrow, hbox, hline, label, qcolor,
+    button, clear_layout, empty_state, eyebrow, font, hbox, hline, label,
+    qcolor,
     scroll, vbox,
 )
 
@@ -224,12 +226,121 @@ class _StatusPill(QWidget):
         self._lbl.setText(text)
 
 
+class SaveLoginCard(QFrame):
+    """Chrome's "Save password?" bubble, in Lumen's language and Josh's design
+    (2026-08-30).
+
+    This is the structural fix for #44, not decoration. Before it, capture was
+    the ONLY way a credential was ever stored: a 1 Hz sampler read the form, and
+    if it missed — a password typed and submitted inside one second, a pasted
+    one, or one typed inside a cross-origin Duo frame Lumen cannot read at all —
+    nothing was saved, nothing was logged, and the next login's autofill did
+    nothing with no way to find out why.
+
+    Making the fields **editable** demotes capture from "the mechanism" to "a
+    prefill convenience". A missed password is now an empty box you type into,
+    which is a thing a person can fix, rather than a silence that never
+    recovers.
+    """
+
+    def __init__(self, parent, unid: str, password: str, *,
+                 updating: bool = False, note: str = ""):
+        super().__init__(parent)
+        self.setProperty("role", "panel")
+        self.setAutoFillBackground(True)
+        self.setFixedWidth(T.sc(330))
+        self._on_save = None
+        self._on_dismiss = None
+
+        v = vbox(self, (16, 14, 16, 14), 8)
+        v.addWidget(label("Update saved password?" if updating
+                          else "Save this login?", 14, T.TEXT_PRIMARY, 600))
+        v.addWidget(label(
+            "Kept in your system keyring, on this machine. Lumen fills it in "
+            "for you next time; it never leaves your computer.",
+            11.5, T.TEXT_MUTED, wrap=True))
+        if note:
+            v.addWidget(label(note, 11.5, T.WARN, wrap=True))
+
+        v.addSpacing(2)
+        v.addWidget(label("uNID", 10.5, T.TEXT_FAINT, mono=True, ls=1))
+        self.unid = QLineEdit(unid or "")
+        self.unid.setFont(font(13))
+        self.unid.setPlaceholderText("u1234567")
+        v.addWidget(self.unid)
+
+        v.addWidget(label("Password", 10.5, T.TEXT_FAINT, mono=True, ls=1))
+        pw_row = hbox(s=6)
+        self.password = QLineEdit(password or "")
+        self.password.setFont(font(13))
+        self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password.setPlaceholderText(
+            "Lumen didn't catch it — type it here" if not password else "")
+        pw_row.addWidget(self.password, 1)
+        self._eye = button("Show", "ghost", px=11, height=26)
+        self._eye.setToolTip("Show the password")
+        self._eye.clicked.connect(self._toggle_reveal)
+        pw_row.addWidget(self._eye)
+        v.addLayout(pw_row)
+
+        v.addSpacing(4)
+        actions = hbox(s=8)
+        save = button("Save", "primary", px=12, height=28)
+        save.clicked.connect(self._save)
+        actions.addWidget(save)
+        not_now = button("Not now", "soft", px=12, height=28)
+        not_now.clicked.connect(lambda: self._dismiss("not_now"))
+        actions.addWidget(not_now)
+        actions.addStretch(1)
+        never = ClickLabel("Never for Canvas", 11.5, T.TEXT_FAINT,
+                           on_click=lambda: self._dismiss("never"),
+                           tooltip="Stop offering. You can turn this back on "
+                                   "in Canvas settings.")
+        actions.addWidget(never)
+        v.addLayout(actions)
+        self._save_btn = save
+        self._sync_save_enabled()
+        self.unid.textChanged.connect(self._sync_save_enabled)
+        self.password.textChanged.connect(self._sync_save_enabled)
+
+    # ---- wiring ----------------------------------------------------------
+    def on_save(self, fn):
+        self._on_save = fn
+
+    def on_dismiss(self, fn):
+        self._on_dismiss = fn
+
+    def values(self) -> tuple[str, str]:
+        """What will actually be stored — the EDITED values, never the
+        captured ones. That distinction is the whole point of the card."""
+        return self.unid.text().strip(), self.password.text()
+
+    def _sync_save_enabled(self):
+        unid, password = self.values()
+        self._save_btn.setEnabled(bool(unid and password))
+
+    def _toggle_reveal(self):
+        hidden = self.password.echoMode() == QLineEdit.EchoMode.Password
+        self.password.setEchoMode(QLineEdit.EchoMode.Normal if hidden
+                                  else QLineEdit.EchoMode.Password)
+        self._eye.setText("Hide" if hidden else "Show")
+
+    def _save(self):
+        if self._on_save is not None:
+            self._on_save(*self.values())
+
+    def _dismiss(self, how: str):
+        if self._on_dismiss is not None:
+            self._on_dismiss(how)
+
+
 class CanvasScreen(QWidget):
     # QStackedWidget page indices: content, the in-app browser, the Manage panel.
     _CONTENT_IDX = 0
     _BROWSER_IDX = 1
     _MANAGE_IDX = 2
     _REVIEW_IDX = 3
+
 
     def __init__(self, state):
         super().__init__()
@@ -248,9 +359,16 @@ class CanvasScreen(QWidget):
         self._undo_timer = None               # QTimer that clears the undo bar
         # Login-memory (audit): remember-by-default; the CAS form is polled while
         # the login view is open so a successful login can be saved to keyring.
-        self._remember_login = True
+        # #44: the pre-checked "remember" switch is gone. What is remembered
+        # instead is the user saying *no* — "Never for Canvas" — which is the
+        # only preference the Chrome-style prompt needs.
+        self._save_card = None
         self._pending_creds = {"u": "", "p": ""}
         self._cred_timer: QTimer | None = None
+        # #57 browser load progress: start time, last percentage, ticking timer.
+        self._load_started: float | None = None
+        self._load_pct = 0
+        self._load_timer: QTimer | None = None
         # #44 autofill: the once-per-session auto-submit budget, plus a per-login
         # memo of the keyring read so we don't hit the Secret Service on every
         # single page load of a multi-step CAS + Duo flow.
@@ -261,6 +379,7 @@ class CanvasScreen(QWidget):
         self._policy = cl.AutoSubmitPolicy()
         self._creds_memo: tuple | None = None
         self._creds_loaded = False
+        self._pending_renders = 0  # content replies still to land
 
         outer = vbox(self, (0, 0, 0, 0), 0)
 
@@ -301,6 +420,10 @@ class CanvasScreen(QWidget):
         # refresh (which clears the lists) leaves it standing.
         self._undo_box = vbox(s=0)
         cv.addLayout(self._undo_box)
+        # What the last "Sync now" actually did (#66) — its own box so a content
+        # refresh, which clears the lists below, leaves the answer standing.
+        self._summary_box = vbox(s=0)
+        cv.addLayout(self._summary_box)
         # Pending-calendar strip (audit #4): its own full-width callout above the
         # list, populated independently by the pending-markers reply.
         self._cal_box = vbox(s=0)
@@ -318,7 +441,8 @@ class CanvasScreen(QWidget):
         self._ann_box = vbox(s=0)
         cv.addLayout(self._ann_box)
         cv.addStretch(1)
-        self._stack.addWidget(scroll(self._inner))
+        self._content_area = scroll(self._inner)
+        self._stack.addWidget(self._content_area)
 
         # browser view (index 1) — a slim nav toolbar above the lazy web view.
         # Doubles as the login view: Connect navigates it to /login, Browse to
@@ -330,11 +454,26 @@ class CanvasScreen(QWidget):
         self._fwd_btn = IconButton("chevron-right", 26, self._nav_fwd, "Forward")
         self._reload_btn = IconButton("refresh", 26, self._nav_reload, "Reload")
         self._url_lbl = ElideLabel("", 11, T.TEXT_MUTED, mono=True)
+        # #57: "Browse Canvas took me to a white screen … it finally loaded
+        # after a long time". A blank web view says nothing about whether
+        # anything is happening. This says what it is doing and for how long,
+        # so a slow Canvas reads as slow rather than as broken.
+        self._load_lbl = label("", 10.5, T.TEXT_FAINT, mono=True)
+        self._load_lbl.hide()
         done = button("Done", "ghost", px=12, height=28)
         done.clicked.connect(self._done_browsing)
         for w in (self._back_btn, self._fwd_btn, self._reload_btn):
             tb.addWidget(w)
         tb.addWidget(self._url_lbl, 1)
+        tb.addWidget(self._load_lbl)
+        # #44: a user-triggered fill, always available, and visible proof that
+        # Lumen has a login stored. The silent injection it replaces had exactly
+        # one failure mode — nothing happened — with no way to retry it.
+        self._fill_btn = button("Fill login", "soft", px=11, height=28)
+        self._fill_btn.setToolTip("Type the saved uNID and password into this "
+                                  "page's login form.")
+        self._fill_btn.clicked.connect(self._fill_now)
+        tb.addWidget(self._fill_btn)
         # Autofill diagnostics (#44), off unless LUMEN_CANVAS_DEBUG=1. The live
         # CAS form is the one thing no test here can reach, so Probe turns a
         # failed login into a pasteable description of the real form instead of
@@ -391,6 +530,15 @@ class CanvasScreen(QWidget):
         mv.addWidget(cal_panel)
 
         mv.addSpacing(20)
+        mv.addWidget(eyebrow("Saved login"))
+        mv.addSpacing(6)
+        # #44: "nothing is stored" must be a state you can SEE, and both
+        # decisions here must be reversible — a Never you cannot undo from the
+        # UI is a trap.
+        self._login_box = vbox(s=0)
+        mv.addLayout(self._login_box)
+
+        mv.addSpacing(20)
         mv.addWidget(eyebrow("Courses"))
         mv.addSpacing(6)
         mv.addWidget(label(
@@ -400,6 +548,20 @@ class CanvasScreen(QWidget):
         mv.addSpacing(14)
         self._course_box = vbox(s=0)
         mv.addLayout(self._course_box)
+        # #58: "the auto sync is not showing my new classes." The archive flag
+        # was ruled out, so this asks Canvas itself rather than guessing again.
+        mv.addSpacing(12)
+        diag_row = hbox(s=10)
+        self._diag_btn = button("A class is missing…", "ghost", px=12, height=28)
+        self._diag_btn.setToolTip(
+            "Asks Canvas what it returns for each enrolment state, and "
+            "compares that with what Lumen has stored.")
+        self._diag_btn.clicked.connect(self._run_course_diagnostic)
+        diag_row.addWidget(self._diag_btn)
+        diag_row.addStretch(1)
+        mv.addLayout(diag_row)
+        self._diag_box = vbox(s=0)
+        mv.addLayout(self._diag_box)
         mv.addStretch(1)
         self._manage = manage
         self._stack.addWidget(scroll(self._manage))
@@ -426,8 +588,38 @@ class CanvasScreen(QWidget):
         self._review = review
         self._stack.addWidget(scroll(self._review))
 
+        # Probe the keyring OFF the GUI thread, before the first render asks.
+        # The synchronous read this replaces cost 146 ms inside _connect_hero —
+        # backend plugin discovery plus two Secret Service round trips — and it
+        # ran on every content render. That was the Canvas tab's freeze (#61).
+        canvas_creds.prime()          # answer lands in the module-level cache
+        # Poll the cache from a timer this widget OWNS rather than having the
+        # worker call back into it: a background thread emitting a signal on a
+        # QObject that is being destroyed is a crash, and screens do get
+        # destroyed (every accent change rebuilds the whole window).
+        self._creds_poll_left = 8
+        self._creds_poll = QTimer(self)
+        self._creds_poll.setInterval(250)
+        self._creds_poll.timeout.connect(self._poll_saved_login)
+        self._creds_poll.start()
+        self._sync_fill_button()      # starts honest: disabled until proven
+
         self._refresh_status()
         self._refresh_content()
+
+    def _poll_saved_login(self):
+        """Stop as soon as the keyring probe has reported, and redraw only if
+        the answer changes what was already on screen — the hero renders
+        without the Forget link until proven otherwise, so only a *yes* costs
+        a redraw."""
+        self._creds_poll_left -= 1
+        saved = canvas_creds.has_saved(default=None)
+        if saved is None and self._creds_poll_left > 0:
+            return
+        self._creds_poll.stop()
+        self._sync_fill_button()
+        if saved and self.isVisible():
+            self._refresh_content()
 
     # ---- ask-bar context -------------------------------------------------
     def context(self) -> dict:
@@ -449,10 +641,35 @@ class CanvasScreen(QWidget):
 
     # ---- assignments + announcements content ----------------------------
     def _refresh_content(self):
+        # #65: dismissing an item re-rendered the whole list and threw the view
+        # back to the top. Restoring the position afterwards is a losing race —
+        # three replies land separately and each one empties its own box — so
+        # don't let the collapse happen at all: pin the content's height for
+        # the duration of the rebuild. With the scroll range intact, Qt never
+        # clamps the position and there is nothing to put back.
+        self._inner.setMinimumHeight(self._inner.height())
+        self._pending_renders = 3
+        # A reply that never comes (daemon down mid-refresh) must not leave the
+        # list padded with blank space forever.
+        QTimer.singleShot(3000, self._release_height)
         self._refresh_calendar()          # first: it decides what else shows
-        self.state.canvas_assignments(self._render_assignments)
-        self.state.canvas_announcements(self._render_announcements)
-        self.state.canvas_pending_calendar(self._render_pending)
+        self.state.canvas_assignments(self._then_restore(self._render_assignments))
+        self.state.canvas_announcements(self._then_restore(self._render_announcements))
+        self.state.canvas_pending_calendar(self._then_restore(self._render_pending))
+
+    def _then_restore(self, render):
+        """Unpin the height once the last of the three replies has rendered —
+        on the next tick, so the layout has run with the new content in place
+        before the floor comes out from under it."""
+        def done(res):
+            render(res)
+            self._pending_renders = max(0, self._pending_renders - 1)
+            if not self._pending_renders:
+                QTimer.singleShot(0, self._release_height)
+        return done
+
+    def _release_height(self):
+        self._inner.setMinimumHeight(0)
 
     def _render_assignments(self, res):
         clear_layout(self._assign_box)
@@ -625,27 +842,31 @@ class CanvasScreen(QWidget):
         cta = button("Connect Canvas", "primary", px=13, height=32)
         cta.clicked.connect(self._start_login)
         cta_row.addWidget(cta)
-        remember = QCheckBox("Remember my login")
-        remember.setChecked(self._remember_login)
-        remember.toggled.connect(self._set_remember)
-        cta_row.addWidget(remember)
         cta_row.addStretch(1)
         v.addLayout(cta_row)
+        # The pre-checked "Remember my login" switch is gone (#44). It silently
+        # saved nothing when the capture missed, which is exactly the affordance
+        # that made a broken autofill look like a working one. Lumen now asks at
+        # the moment the answer is actually known — after a successful login —
+        # and says here, plainly, whether anything is stored.
         if self._has_saved_login():
-            forget = ClickLabel("Forget saved login", 12, T.TEXT_FAINT,
-                                 on_click=self._forget)
-            v.addWidget(forget)
+            row = hbox(s=10)
+            row.addWidget(label("Saved login ready — Lumen will fill it in.",
+                                12, T.OK))
+            row.addWidget(ClickLabel("Forget", 12, T.TEXT_FAINT,
+                                     on_click=self._forget))
+            row.addStretch(1)
+            v.addLayout(row)
+        else:
+            v.addWidget(label(
+                "No saved login yet — type it in and Lumen will offer to "
+                "remember it.", 12, T.TEXT_MUTED, wrap=True))
         return f
-
-    def _set_remember(self, on: bool):
-        self._remember_login = bool(on)
 
     @staticmethod
     def _has_saved_login() -> bool:
-        try:
-            return canvas_creds.load() is not None
-        except Exception:
-            return False
+        """Cached — never a keyring round trip from a render path (#61)."""
+        return canvas_creds.has_saved()
 
     def _render_pending(self, res):
         """The pending-calendar callout: a full-width strip above the list, only
@@ -798,25 +1019,68 @@ class CanvasScreen(QWidget):
         self.state.canvas_status(self._apply_status)
 
     def _sync_now(self):
-        """Force a pull now — the button, and the tab-open freshness check. The
-        daemon guards against overlapping syncs; this guards the pill."""
+        """Pull from Canvas AND apply it (#66): the button, and the tab-open
+        freshness check. Pulling the mirror without reconciling was the gap —
+        the todos, the calendar events and (the point of the ask) the things
+        Canvas *removed* all happened on a background tick you never saw.
+        The daemon guards against overlapping syncs; this guards the pill."""
         if self._syncing:
             return
         self._syncing = True
         self._sync_btn.setEnabled(False)
         self._status_pill.set_status("syncing…", T.TEXT_MUTED, T.WARN)
-        self.state.canvas_sync_now(self._on_synced)
+        self.state.canvas_reconcile_now(self._on_synced)
 
     def _on_synced(self, res):
         self._syncing = False
         self._sync_btn.setEnabled(True)
-        if isinstance(res, dict) and res.get("ok") is False and res.get("started"):
+        res = res if isinstance(res, dict) else {}
+        if res.get("ok") is False and res.get("reason") != "already syncing":
             # A sync that ran but pulled nothing (dead session, network error)
             # still has to say so, or the pill sits on "syncing…" forever.
             self._status_pill.set_status("sync failed", T.WARN, T.WARN)
         else:
             self._refresh_status()
+        self._render_summary(res)
         self._refresh_content()
+
+    # ---- what the last reconcile actually did (#66) -----------------------
+    @staticmethod
+    def _summary_line(res: dict) -> str:
+        """Plain counts, in the user's words. Silence when nothing changed is
+        wrong here — "nothing to do" is itself the answer to "did that work?"."""
+        todos = res.get("todos") or {}
+        cal = res.get("calendar") or {}
+        bits = []
+        for n, one, many in (
+                (todos.get("created"), "new todo", "new todos"),
+                (todos.get("updated"), "due date moved", "due dates moved"),
+                (todos.get("completed"), "todo ticked off", "todos ticked off"),
+                (cal.get("created"), "calendar event added",
+                 "calendar events added"),
+                (cal.get("updated"), "calendar event updated",
+                 "calendar events updated")):
+            if n:
+                bits.append(f"{n} {one if n == 1 else many}")
+        if not bits:
+            return "Up to date — nothing to change."
+        return "Updated · " + " · ".join(bits)
+
+    def _render_summary(self, res: dict):
+        clear_layout(self._summary_box)
+        if not res or res.get("ok") is False:
+            return
+        f = QFrame()
+        f.setProperty("role", "panel")
+        row = hbox(f, (14, 10, 14, 10), 10)
+        row.addWidget(label(self._summary_line(res), 12.5, T.TEXT_BODY,
+                            wrap=True), 1)
+        x = ClickLabel("✕", 12, T.TEXT_GHOST,
+                       on_click=lambda: clear_layout(self._summary_box),
+                       tooltip="Dismiss")
+        row.addWidget(x)
+        self._summary_box.addWidget(f)
+        self._summary_box.addSpacing(16)
 
     def _sync_controls(self):
         """Show the header actions only when connected (#27, #28): Browse Canvas
@@ -889,6 +1153,8 @@ class CanvasScreen(QWidget):
         # scrolled at all (#28 follow-up).
         self._web.setProperty("lumen_swipe_ignore", True)
         self._web.setPage(_Page(self._profile, self._web))
+        self._web.loadStarted.connect(self._on_load_started)
+        self._web.loadProgress.connect(self._on_load_progress)
         self._web.loadFinished.connect(self._on_load_finished)
         self._web.urlChanged.connect(self._on_url_changed)
         self._host_layout.addWidget(self._web)
@@ -914,14 +1180,18 @@ class CanvasScreen(QWidget):
         self._stack.setCurrentIndex(self._BROWSER_IDX)
 
     def _start_login(self):
-        # Fresh capture buffer + poll the CAS form so a remembered login can be
-        # saved once it succeeds.
         self._pending_creds = {"u": "", "p": ""}
         self._reset_autofill()
         self._start_cred_poll()
         self._open_in_browser(_CANVAS_BASE + "/login", login=True)
 
     def _start_browse(self):
+        # Browsing counts for autofill now (#44b). Browse lands on the CAS form
+        # whenever the session has expired — which is precisely when a saved
+        # login is most useful — and the old `login=True` gate meant Lumen would
+        # not even look at the form it was staring at.
+        self._pending_creds = {"u": "", "p": ""}
+        self._start_cred_poll()
         self._open_in_browser(_CANVAS_BASE)
 
     def _nav_back(self):
@@ -965,9 +1235,17 @@ class CanvasScreen(QWidget):
             self._cred_timer = None
 
     def _poll_cred_fields(self):
-        if self._web is None or not self._login_mode:
+        if self._web is None:
             return
-        self._web.page().runJavaScript(cl.read_fields_js(), self._cache_cred_fields)
+        # Reads the submit-time stash as well as the live fields (#44a). The old
+        # 1 Hz sampler read only what was on screen at the tick, so a password
+        # typed and submitted inside one second — or pasted — was never seen,
+        # and nothing was saved or logged. The stash is what the form's own
+        # submit handler put there.
+        self._web.page().runJavaScript(cl.read_capture_js(),
+                                       self._cache_cred_fields)
+        if not self._login_mode:
+            return
         # autofill_js retries asynchronously, so its own return value is only
         # attempt 1. Riding the existing 1s timer picks up the settled report —
         # which is what tells the policy a password field came back.
@@ -989,26 +1267,154 @@ class CanvasScreen(QWidget):
         if data.get("p"):
             self._pending_creds["p"] = data["p"]
 
+    # ---- "Save login?" (#44, Josh's design 2026-08-30) --------------------
+    @staticmethod
+    def _never_save() -> bool:
+        from PyQt6.QtCore import QSettings
+        return bool(QSettings("lumen", "ui_v3").value(
+            "canvas/never_save", False, type=bool))
+
+    @staticmethod
+    def _set_never_save(on: bool) -> None:
+        from PyQt6.QtCore import QSettings
+        QSettings("lumen", "ui_v3").setValue("canvas/never_save", bool(on))
+
     def _maybe_save_login(self):
-        """On a confirmed login, persist the captured credentials if the user
-        asked to be remembered. Best-effort — a keyring miss is non-fatal."""
-        if not self._remember_login:
+        """A confirmed login is Chrome's trigger, and now it is Lumen's: offer
+        to save, with the captured values as a *prefill* rather than as the
+        mechanism.
+
+        Nothing is written here. That is the point — the old version saved
+        silently when it had both halves and did nothing at all when it didn't,
+        which is why an empty keyring was indistinguishable from broken
+        autofill for weeks."""
+        if self._never_save():
             return
-        u, p = self._pending_creds.get("u"), self._pending_creds.get("p")
-        if not u or not p:
-            return
+        u = self._pending_creds.get("u") or ""
+        pw = self._pending_creds.get("p") or ""
+        existing = None
         try:
-            canvas_creds.save(u, p)
-            log.info("canvas login saved to keyring (remember)")
+            existing = canvas_creds.load()
+        except Exception:
+            log.exception("canvas keyring read failed")
+        if existing and (u or existing[0]) == existing[0] and pw == existing[1]:
+            return                      # already stored, and unchanged
+        if existing and not u:
+            u = existing[0]
+        note = ""
+        if not pw:
+            note = ("Lumen couldn't read the password from this page — type it "
+                    "here and it will be saved.")
+        self._show_save_card(u, pw, updating=bool(existing), note=note)
+
+    def _show_save_card(self, unid: str, password: str, *,
+                        updating: bool = False, note: str = ""):
+        self._dismiss_save_card()
+        card = SaveLoginCard(self._host, unid, password,
+                             updating=updating, note=note)
+        card.on_save(self._save_login_from_card)
+        card.on_dismiss(self._on_save_card_dismissed)
+        self._save_card = card
+        self._place_save_card()
+        card.show()
+        card.raise_()
+
+    def _place_save_card(self):
+        """Top-right of the browser view — where Chrome puts it, and out of the
+        way of the form the user may still be looking at."""
+        card = self._save_card
+        if card is None or self._host is None:
+            return
+        card.adjustSize()
+        x = max(0, self._host.width() - card.width() - T.sc(18))
+        card.move(x, T.sc(52))          # just under the nav toolbar
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._place_save_card()
+
+    def _dismiss_save_card(self):
+        if self._save_card is not None:
+            self._save_card.hide()
+            self._save_card.setParent(None)
+            self._save_card.deleteLater()
+            self._save_card = None
+
+    def _save_login_from_card(self, unid: str, password: str):
+        """Stores the EDITED values, never the captured ones."""
+        ok = False
+        try:
+            ok = canvas_creds.save(unid, password)
         except Exception:
             log.exception("canvas keyring save failed")
+        self._dismiss_save_card()
         self._pending_creds = {"u": "", "p": ""}
+        self._sync_fill_button()
+        self._status_pill.set_status(
+            "Login saved" if ok else "Couldn't save the login",
+            T.OK if ok else T.WARN, T.OK if ok else T.WARN)
+        log.info("canvas login %s to keyring", "saved" if ok else "NOT saved")
+        self._refresh_content()
+
+    def _on_save_card_dismissed(self, how: str):
+        if how == "never":
+            self._set_never_save(True)
+            log.info("canvas: user chose never to save a login here")
+        self._dismiss_save_card()
 
     # ---- manage courses (archive on/off) --------------------------------
     def _open_manage(self):
         self.state.canvas_courses(self._render_courses)
+        self._render_login_prefs()
         self._refresh_calendar()
         self._stack.setCurrentIndex(self._MANAGE_IDX)
+
+    def _render_login_prefs(self):
+        clear_layout(self._login_box)
+        panel = QFrame()
+        panel.setProperty("role", "panel")
+        pv = vbox(panel, (14, 4, 14, 6), 0)
+
+        saved = self._has_saved_login()
+        row = hbox(m=(0, 12, 0, 12), s=12)
+        col = vbox(s=2)
+        col.addWidget(label("uNID and password", 13.5, T.TEXT_PRIMARY))
+        col.addWidget(label(
+            "Stored in your system keyring — Lumen fills it in on the Canvas "
+            "login page." if saved else
+            "Nothing stored. Log in once and Lumen will offer to remember it.",
+            11.5, T.TEXT_MUTED, wrap=True))
+        row.addLayout(col, 1)
+        row.addWidget(label("saved" if saved else "not saved", 10,
+                            T.OK if saved else T.TEXT_GHOST, mono=True))
+        if saved:
+            forget = button("Forget", "ghost", px=12, height=28)
+            forget.clicked.connect(self._forget_from_settings)
+            row.addWidget(forget)
+        pv.addLayout(row)
+
+        if self._never_save():
+            pv.addWidget(hline(T.BORDER_FIELD))
+            r2 = hbox(m=(0, 12, 0, 12), s=12)
+            c2 = vbox(s=2)
+            c2.addWidget(label("Not asking any more", 13.5, T.TEXT_PRIMARY))
+            c2.addWidget(label(
+                "You chose \u201cNever for Canvas\u201d, so Lumen stopped "
+                "offering to save your login.", 11.5, T.TEXT_MUTED, wrap=True))
+            r2.addLayout(c2, 1)
+            again = button("Ask again", "soft", px=12, height=28)
+            again.clicked.connect(self._allow_saving_again)
+            r2.addWidget(again)
+            pv.addLayout(r2)
+        self._login_box.addWidget(panel)
+
+    def _forget_from_settings(self):
+        self._forget()
+        self._render_login_prefs()
+
+    def _allow_saving_again(self):
+        self._set_never_save(False)
+        self._render_login_prefs()
 
     def _render_courses(self, res):
         clear_layout(self._course_box)
@@ -1034,6 +1440,72 @@ class CanvasScreen(QWidget):
             row.addWidget(sw)
             pv.addLayout(row)
         self._course_box.addWidget(panel)
+
+    # ---- "a class is missing" diagnostic (#58) ---------------------------
+    def _run_course_diagnostic(self):
+        self._diag_btn.setEnabled(False)
+        clear_layout(self._diag_box)
+        self._diag_box.addWidget(label("Asking Canvas…", 12, T.TEXT_MUTED))
+        self.state.canvas_course_diagnostic(self._render_course_diagnostic)
+
+    def _render_course_diagnostic(self, res):
+        clear_layout(self._diag_box)
+        self._diag_btn.setEnabled(True)
+        res = res or {}
+        if res.get("error"):
+            self._diag_box.addWidget(
+                label(f"Couldn't ask Canvas — {res['error']}.", 12.5, T.WARN,
+                      wrap=True))
+            return
+        panel = QFrame()
+        panel.setProperty("role", "panel")
+        pv = vbox(panel, (14, 12, 14, 12), 6)
+        counts = res.get("counts") or {}
+        pv.addWidget(label(
+            "Canvas returned: "
+            + ", ".join(f"{n} {state.replace('_', ' ')}"
+                        for state, n in counts.items())
+            + f" · Lumen has {len(res.get('mirror') or [])} stored.",
+            12.5, T.TEXT_BODY, wrap=True))
+        missing = res.get("missing_from_active") or []
+        if missing:
+            pv.addWidget(label(
+                "You're enrolled in these but the enrolment hasn't started, so "
+                "the sync never sees them:", 12, T.TEXT_MUTED, wrap=True))
+            for c in missing:
+                pv.addWidget(label(
+                    f"· {c.get('course_code') or ''} {c.get('name') or ''}".strip(),
+                    12, T.WARN, mono=True))
+        archived = res.get("archived") or []
+        if archived:
+            # The most likely real answer to "where did my class go", now that
+            # the enrolment-state theory has been measured and found empty.
+            pv.addWidget(label(
+                "Turned off here, so nothing is pulled for them — switch one "
+                "back on above if that's the class you're looking for:",
+                12, T.TEXT_MUTED, wrap=True))
+            for c in archived:
+                pv.addWidget(label(
+                    f"· {c.get('course_code') or ''} {c.get('name') or ''}".strip(),
+                    12, T.TEXT_BODY, mono=True))
+        unmirrored = res.get("not_mirrored") or []
+        if unmirrored:
+            pv.addWidget(label(
+                "Canvas lists these as active but Lumen hasn't stored them — "
+                "run Sync now:", 12, T.TEXT_MUTED, wrap=True))
+            for c in unmirrored:
+                pv.addWidget(label(
+                    f"· {c.get('course_code') or ''} {c.get('name') or ''}".strip(),
+                    12, T.TEXT_BODY, mono=True))
+        if not missing and not unmirrored and not archived:
+            pv.addWidget(label(
+                f"Everything Canvas reports as current is already here "
+                f"({res.get('past', 0)} past courses correctly left out). A "
+                "class Canvas hasn't published yet is invisible to any app, "
+                "including this one — it will appear once your instructor "
+                "publishes it.",
+                12, T.TEXT_MUTED, wrap=True))
+        self._diag_box.addWidget(panel)
 
     # ---- calendar sync settings + review ---------------------------------
     def _switch_row(self, parent_v, title_text: str, hint: str, on_toggle):
@@ -1328,7 +1800,44 @@ class CanvasScreen(QWidget):
             self._stack.setCurrentIndex(self._CONTENT_IDX)
         self._refresh_content()
 
+    # ---- load progress + timing (#57) ------------------------------------
+    def _on_load_started(self):
+        self._load_started = time.monotonic()
+        self._load_pct = 0
+        self._load_lbl.show()
+        self._tick_load()
+        if self._load_timer is None:
+            self._load_timer = QTimer(self)
+            self._load_timer.timeout.connect(self._tick_load)
+        self._load_timer.start(250)
+
+    def _on_load_progress(self, pct: int):
+        self._load_pct = int(pct)
+        self._tick_load()
+
+    def _tick_load(self):
+        """Elapsed seconds beside the percentage. The seconds are the point:
+        a percentage that sits at 30 for eight seconds still looks like
+        progress, where '8.2s' does not."""
+        if self._load_started is None:
+            return
+        secs = time.monotonic() - self._load_started
+        self._load_lbl.setText(f"loading {self._load_pct}% · {secs:.1f}s")
+
+    def _end_load(self, ok: bool):
+        if self._load_timer is not None:
+            self._load_timer.stop()
+        if self._load_started is not None:
+            ms = int((time.monotonic() - self._load_started) * 1000)
+            url = self._web.url().toString() if self._web is not None else ""
+            log.info("canvas browse: %s %s in %d ms", url,
+                     "loaded" if ok else "FAILED", ms)
+            self._load_lbl.setText("" if ok else f"didn't load · {ms / 1000:.1f}s")
+            self._load_lbl.setVisible(not ok)
+        self._load_started = None
+
     def _on_load_finished(self, ok: bool):
+        self._end_load(ok)
         if not ok or self._web is None:
             return
         # A returning user's canvas_session is already persisted, so this load
@@ -1337,15 +1846,71 @@ class CanvasScreen(QWidget):
         # session (loadAllCookies triggers cookieAdded per stored cookie).
         if self._profile is not None:
             self._profile.cookieStore().loadAllCookies()
-        # Autofill is a LOGIN affordance. Without this gate it typed the saved
-        # password into any Canvas page that happened to carry a password field
-        # — a settings page, say — which is both surprising and a way to spend
-        # the auto-submit budget on a form that was never a login.
-        if not self._login_mode:
+        # Arm the submit-time capture on every page of the flow, login or not:
+        # an expired session drops you on the CAS form mid-browse, and that
+        # login is worth remembering too.
+        self._web.page().runJavaScript(cl.capture_on_submit_js(), lambda _r: None)
+        # The gate is now "is this page a login form?", not "did the user arrive
+        # via Connect" (#44b). Asking the page is both more accurate and the
+        # only thing that makes autofill work on Browse.
+        self._web.page().runJavaScript(cl.login_form_present_js(),
+                                       self._on_form_state)
+
+    def _on_form_state(self, raw):
+        st = cl.parse_form_state(raw)
+        self._sync_fill_button(st)
+        if not st["login"]:
+            if st["blocked"]:
+                # The one case no amount of code fixes: the form lives in a
+                # frame from another origin, where the page's own DOM is walled
+                # off. Saying so beats failing silently, which is what sent the
+                # first #44 investigation after selectors that were fine.
+                self._status_pill.set_status(
+                    "Login is in a protected frame — type it yourself",
+                    T.WARN, T.WARN)
             return
-        self._inject_autofill()
+        creds = self._saved_creds()
+        if creds is None:
+            self._status_pill.set_status("No saved login", T.TEXT_MUTED,
+                                         T.TEXT_GHOST)
+            log.info("canvas autofill: no saved login — user types it "
+                     "(fields user=%d pass=%d frames=%d blocked=%d)",
+                     st["user"], st["pass"], st["frames"], st["blocked"])
+            return
+        # Fill-on-focus first: it is what Chrome actually does, and it makes
+        # every load-timing question moot — a form that mounts thirty seconds
+        # late still fills the moment the cursor lands in it.
+        self._web.page().runJavaScript(cl.fill_on_focus_js(*creds),
+                                       lambda _r: None)
+        if self._login_mode:
+            self._inject_autofill()
 
     # ---- autofill (#44) --------------------------------------------------
+    def _sync_fill_button(self, st: dict | None = None):
+        """Enabled exactly when there is a login to fill. A disabled button is
+        the honest answer to "why did nothing happen?" — the state this whole
+        rebuild exists to make visible."""
+        has = self._has_saved_login()
+        self._fill_btn.setEnabled(has)
+        self._fill_btn.setToolTip(
+            "Type the saved uNID and password into this page's login form."
+            if has else
+            "Nothing saved yet — log in once and Lumen will offer to remember "
+            "it.")
+
+    def _fill_now(self):
+        """The user pressing Fill. Never submits: they asked for the fields to
+        be filled, not for an attempt to be made on their behalf."""
+        creds = self._saved_creds()
+        if self._web is None or creds is None:
+            self._status_pill.set_status("No saved login", T.WARN, T.WARN)
+            return
+        self._web.page().runJavaScript(cl.fill_on_focus_js(*creds),
+                                       lambda _r: None)
+        self._web.page().runJavaScript(
+            cl.autofill_js(*creds, allow_password_submit=False),
+            self._on_autofill_result)
+
     def _saved_creds(self):
         """The keyring read, memoised for the life of one login attempt."""
         if not self._creds_loaded:
@@ -1373,9 +1938,10 @@ class CanvasScreen(QWidget):
     def _on_autofill_result(self, raw):
         res = cl.parse_autofill_result(raw)
         state = self._policy.record(res)
-        log.info("canvas autofill: user=%s pass=%s submitted=%s frames=%d "
-                 "blocked=%d tries=%d policy=%s",
-                 res["user"] or "-", res["pass"] or "-",
+        log.info("canvas autofill: user=%s(x%d) pass=%s(x%d) submitted=%s "
+                 "frames=%d blocked=%d tries=%d policy=%s",
+                 res["user"] or "-", res["user_fields"],
+                 res["pass"] or "-", res["pass_fields"],
                  res["submitted_password"] or res["submitted_user"],
                  res["frames"], res["blocked_frames"], res["tries"], state)
         if not res["user"] and not res["pass"]:
@@ -1436,6 +2002,7 @@ class CanvasScreen(QWidget):
 
     def _forget(self):
         canvas_creds.forget()
+        self._sync_fill_button()
         self._status_pill.set_status("Saved login forgotten", T.TEXT_MUTED,
                                      T.TEXT_GHOST)
         self._refresh_content()          # rebuild the hero without the Forget link

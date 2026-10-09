@@ -46,14 +46,20 @@ SUBMIT_SELECTORS = (
 )
 
 # Retry budget for a form that mounts after load (fix #1 for #44).
+# The deadline was 6 s, and #57 established that a Canvas page can take far
+# longer than that to become interactive — so the retry loop was routinely dead
+# before the form existed. A minute of a 250 ms poll on a login page the user is
+# looking at is not a power concern, and the MutationObserver beside it is
+# event-driven and free.
 RETRY_INTERVAL_MS = 250
-RETRY_DEADLINE_MS = 6000
+RETRY_DEADLINE_MS = 60000
 FRAME_DEPTH = 2
 PROBE_INPUT_CAP = 40
 
 EMPTY_RESULT = {"user": "", "pass": "", "submitted_password": False,
                 "submitted_user": False, "frames": 0, "blocked_frames": 0,
-                "tries": 0, "url": "", "done": False}
+                "tries": 0, "url": "", "user_fields": 0, "pass_fields": 0,
+                "done": False}
 
 
 def collect_cookies(pairs: list[tuple[str, str]]) -> dict[str, str]:
@@ -132,7 +138,47 @@ _DOCS_JS = """
     }
     return null;
   }
+  // Every usable match, not just the first (#44c). The old `find` stopped at
+  // the first password input it saw, so a hidden or decoy field on step 1 of
+  // the CAS flow consumed the whole budget on the wrong element.
+  function findAll(dlist, sels) {
+    var out = [], seen = [];
+    for (var i = 0; i < dlist.length; i++) {
+      for (var j = 0; j < sels.length; j++) {
+        var els = [];
+        try { els = dlist[i].querySelectorAll(sels[j]); } catch (e) { els = []; }
+        for (var k = 0; k < els.length; k++) {
+          if (!usable(els[k])) { continue; }
+          if (seen.indexOf(els[k]) >= 0) { continue; }
+          seen.push(els[k]);
+          out.push({el: els[k], sel: sels[j]});
+        }
+      }
+    }
+    return out;
+  }
 """ % {"depth": FRAME_DEPTH}
+
+# Kept OUT of _DOCS_JS: probe_js shares that block and must provably never
+# contain the string `.value` — it is the one diagnostic safe to paste into a
+# chat, and the test that guarantees it is a substring check on the source.
+_SETTER_JS = """
+  function setNative(el, v) {
+    // The React/Vue-safe assignment: the native setter updates the DOM without
+    // the framework's own value property swallowing it, and the bubbling
+    // events are what make the page believe a human typed.
+    try {
+      var d = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value");
+      if (d && d.set) { d.set.call(el, v); } else { el.value = v; }
+    } catch (e) { try { el.value = v; } catch (e2) { } }
+    try { el.focus(); } catch (e) { }
+    try {
+      el.dispatchEvent(new Event("input", {bubbles: true}));
+      el.dispatchEvent(new Event("change", {bubbles: true}));
+    } catch (e) { }
+  }
+"""
 
 
 def read_fields_js() -> str:
@@ -186,7 +232,7 @@ def autofill_js(unid: str, password: str, *,
         "intervalMs": RETRY_INTERVAL_MS, "deadlineMs": RETRY_DEADLINE_MS,
     })
     return ("(function() {\n  try {\n    var CFG = " + cfg + ";\n"
-            + _DOCS_JS + """
+            + _DOCS_JS + _SETTER_JS + """
     var W = window;
     var prev = W.__lumenAutofill;
     if (prev && prev.report) {
@@ -204,27 +250,10 @@ def autofill_js(unid: str, password: str, *,
     var report = {user: "", pass: "", submitted_password: false,
                   submitted_user: false, frames: 0, blocked_frames: 0,
                   tries: 0, url: String(location.href).split("?")[0],
-                  done: false};
+                  user_fields: 0, pass_fields: 0, done: false};
     var state = {report: report, timer: null, obs: null,
                  deadline: Date.now() + CFG.deadlineMs};
     W.__lumenAutofill = state;
-
-    function setNative(el, v) {
-      // The React/Vue-safe assignment: the native setter updates the DOM value
-      // without the framework's own value property swallowing it, and the
-      // bubbling events are what make the page believe a human typed.
-      try {
-        var d = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype, "value");
-        if (d && d.set) { d.set.call(el, v); } else { el.value = v; }
-      } catch (e) { try { el.value = v; } catch (e2) { } }
-      try { el.focus(); } catch (e) { }
-      try {
-        el.dispatchEvent(new Event("input", {bubbles: true}));
-        el.dispatchEvent(new Event("change", {bubbles: true}));
-      } catch (e) { }
-      try { el.blur(); } catch (e) { }
-    }
 
     function submit(dlist, el) {
       var btn = find(dlist, CFG.submitSel);
@@ -240,18 +269,24 @@ def autofill_js(unid: str, password: str, *,
       var dlist = docs();
       report.frames = dlist.length;
       report.blocked_frames = __blocked;
-      var uf = CFG.u ? find(dlist, CFG.userSel) : null;
-      var pf = CFG.p ? find(dlist, CFG.passSel) : null;
-      if (!uf && !pf) { return false; }
-      if (uf) { setNative(uf.el, CFG.u); report.user = uf.sel; }
-      if (pf) {
-        setNative(pf.el, CFG.p);
-        report.pass = pf.sel;
+      // Every candidate, not the first (#44c). A decoy or off-screen password
+      // input used to swallow the whole attempt.
+      var ufs = CFG.u ? findAll(dlist, CFG.userSel) : [];
+      var pfs = CFG.p ? findAll(dlist, CFG.passSel) : [];
+      report.user_fields = ufs.length;
+      report.pass_fields = pfs.length;
+      if (!ufs.length && !pfs.length) { return false; }
+      for (var a = 0; a < ufs.length; a++) { setNative(ufs[a].el, CFG.u); }
+      if (ufs.length) { report.user = ufs[0].sel; }
+      if (pfs.length) {
+        for (var b = 0; b < pfs.length; b++) { setNative(pfs[b].el, CFG.p); }
+        report.pass = pfs[0].sel;
         if (CFG.allowPassSubmit) {
-          report.submitted_password = submit(dlist, pf.el);
+          report.submitted_password = submit(dlist, pfs[0].el);
         }
         return true;
       }
+      var uf = ufs[0];
       // A username-only page (step 1 of the two-page CAS flow) always advances:
       // a bare uNID carries no lockout risk, and stalling here would strand the
       // password page we actually need to reach.
@@ -291,6 +326,162 @@ def autofill_js(unid: str, password: str, *,
 })()""")
 
 
+def login_form_present_js() -> str:
+    """Is *this page* a login form? JSON
+    {"login": bool, "user": n, "pass": n, "frames": n, "blocked": n}.
+
+    This replaces "did the user arrive via the Connect button" as the gate on
+    autofill (#44b). Browse lands on the CAS form whenever the session has
+    expired — which is exactly when a saved login is most useful — and the old
+    gate meant Lumen would not even try.
+
+    `blocked` is reported rather than swallowed: a form inside a cross-origin
+    frame is the one case no amount of code will fix, and the user deserves to
+    be told to type it rather than watch nothing happen."""
+    cfg = json.dumps({"userSel": list(USER_SELECTORS),
+                      "passSel": list(PASS_SELECTORS)})
+    return ("(function() {\n  try {\n    var CFG = " + cfg + ";\n"
+            + _DOCS_JS + """
+    var dlist = docs();
+    var u = findAll(dlist, CFG.userSel).length;
+    var p = findAll(dlist, CFG.passSel).length;
+    return JSON.stringify({login: !!(u || p), user: u, pass: p,
+                           frames: dlist.length, blocked: __blocked});
+  } catch (e) { return JSON.stringify({login: false, user: 0, pass: 0,
+                                       frames: 0, blocked: 0}); }
+})()""")
+
+
+def fill_on_focus_js(unid: str, password: str) -> str:
+    """Install Chrome's actual behaviour: fill a login field when it takes focus.
+
+    This is the structural answer to every timing problem in #44. Load
+    deadlines, forms mounted by script thirty seconds late, a two-page CAS flow,
+    an SPA that swaps step 2 in without navigating — none of them matter if the
+    trigger is the user putting the cursor in the box. Idempotent per document.
+
+    Only fills an EMPTY field, so it can never overwrite something the user is
+    part-way through typing, and never submits anything."""
+    cfg = json.dumps({"u": unid, "p": password,
+                      "userSel": list(USER_SELECTORS),
+                      "passSel": list(PASS_SELECTORS)})
+    return ("(function() {\n  try {\n    var CFG = " + cfg + ";\n"
+            + _DOCS_JS + _SETTER_JS + """
+    function is(el, sels) {
+      for (var i = 0; i < sels.length; i++) {
+        try { if (el.matches && el.matches(sels[i])) { return true; } }
+        catch (e) { }
+      }
+      return false;
+    }
+    function onFocus(ev) {
+      var el = ev && (ev.target || ev.srcElement);
+      if (!el || !usable(el)) { return; }
+      try { if (el.value) { return; } } catch (e) { return; }
+      if (CFG.p && is(el, CFG.passSel)) { setNative(el, CFG.p); return; }
+      if (CFG.u && is(el, CFG.userSel)) { setNative(el, CFG.u); }
+    }
+    var dlist = docs();
+    var armed = 0;
+    for (var i = 0; i < dlist.length; i++) {
+      var d = dlist[i];
+      try {
+        if (d.__lumenFocusFill) { continue; }
+        d.addEventListener("focusin", onFocus, true);
+        d.__lumenFocusFill = true;
+        armed++;
+      } catch (e) { }
+    }
+    return JSON.stringify({armed: armed, frames: dlist.length,
+                           blocked: __blocked});
+  } catch (e) { return JSON.stringify({armed: 0, frames: 0, blocked: 0}); }
+})()""")
+
+
+def capture_on_submit_js() -> str:
+    """Read the login fields at the instant the form is submitted, not once a
+    second (#44a).
+
+    The 1 Hz sampler missed a password typed and submitted inside the same
+    second, and missed a pasted one entirely — which is very likely why the
+    keyring was empty the whole time, and why nothing was ever logged about it.
+    Values are stashed on `window.__lumenCapture` for `read_capture_js` to
+    collect; they never leave the page on their own."""
+    cfg = json.dumps({"userSel": list(USER_SELECTORS),
+                      "passSel": list(PASS_SELECTORS)})
+    return ("(function() {\n  try {\n    var CFG = " + cfg + ";\n"
+            + _DOCS_JS + """
+    var W = window;
+    if (!W.__lumenCapture) { W.__lumenCapture = {u: "", p: ""}; }
+    function grab() {
+      try {
+        var dlist = docs();
+        var u = find(dlist, CFG.userSel);
+        var p = find(dlist, CFG.passSel);
+        if (u && u.el.value) { W.__lumenCapture.u = u.el.value; }
+        if (p && p.el.value) { W.__lumenCapture.p = p.el.value; }
+      } catch (e) { }
+    }
+    var dlist = docs();
+    var armed = 0;
+    for (var i = 0; i < dlist.length; i++) {
+      var d = dlist[i];
+      try {
+        if (d.__lumenCaptureArmed) { continue; }
+        // Every way a login form can be sent: the form's own submit event, a
+        // click anywhere (the button may be a div), and Enter in a field.
+        d.addEventListener("submit", grab, true);
+        d.addEventListener("click", grab, true);
+        d.addEventListener("keydown", function (ev) {
+          if (ev && (ev.key === "Enter" || ev.keyCode === 13)) { grab(); }
+        }, true);
+        // And on the way out, for a form that navigates without any of those.
+        try { d.addEventListener("beforeunload", grab, true); } catch (e) { }
+        d.__lumenCaptureArmed = true;
+        armed++;
+      } catch (e) { }
+    }
+    return JSON.stringify({armed: armed});
+  } catch (e) { return JSON.stringify({armed: 0}); }
+})()""")
+
+
+def read_capture_js() -> str:
+    """Whatever capture_on_submit_js stashed, plus whatever is in the fields
+    right now — the live fields cover a single-page form that never submitted
+    while the stash covers a multi-page CAS flow whose earlier page is gone."""
+    cfg = json.dumps({"userSel": list(USER_SELECTORS),
+                      "passSel": list(PASS_SELECTORS)})
+    return ("(function() {\n  try {\n    var CFG = " + cfg + ";\n"
+            + _DOCS_JS + """
+    var stash = window.__lumenCapture || {u: "", p: ""};
+    var dlist = docs();
+    var u = find(dlist, CFG.userSel);
+    var p = find(dlist, CFG.passSel);
+    return JSON.stringify({u: (u && u.el.value) || stash.u || "",
+                           p: (p && p.el.value) || stash.p || ""});
+  } catch (e) { return "{}"; }
+})()""")
+
+
+def parse_form_state(raw) -> dict:
+    """Total function over login_form_present_js' output."""
+    obj = raw
+    if isinstance(raw, str):
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            obj = None
+    if not isinstance(obj, dict):
+        return {"login": False, "user": 0, "pass": 0, "frames": 0, "blocked": 0}
+    def num(key):
+        v = obj.get(key)
+        return v if isinstance(v, int) and not isinstance(v, bool) else 0
+    return {"login": bool(obj.get("login")), "user": num("user"),
+            "pass": num("pass"), "frames": num("frames"),
+            "blocked": num("blocked")}
+
+
 def autofill_report_js() -> str:
     """Read the settled report an earlier autofill_js injection left behind. The
     retries are async, so the injection's own return value is only attempt 1."""
@@ -319,7 +510,8 @@ def parse_autofill_result(raw) -> dict:
         out[key] = val if isinstance(val, str) else ""
     for key in ("submitted_password", "submitted_user", "done"):
         out[key] = bool(obj.get(key))
-    for key in ("frames", "blocked_frames", "tries"):
+    for key in ("frames", "blocked_frames", "tries",
+                "user_fields", "pass_fields"):
         val = obj.get(key)
         out[key] = val if isinstance(val, int) and not isinstance(val, bool) else 0
     return out

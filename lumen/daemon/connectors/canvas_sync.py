@@ -33,6 +33,10 @@ class CanvasSync:
         self._llm = llm
         self._cookies: dict[str, str] | None = None
         self._session_alive = False
+        # The jar that most recently came back 401. The UI replays its whole
+        # cookie store on every page load, so without this the dead jar walks
+        # straight back in through set_session (live loop 2026-08-27).
+        self._dead_jar: dict[str, str] | None = None
         self._last_sync: str | None = None
         self._client_factory = client_factory or self._build_client
         # None keeps the old in-memory-only behaviour, so every existing test
@@ -43,6 +47,7 @@ class CanvasSync:
         self._markers = markers          # CalendarMarkerWriter
         self._prefs = prefs              # CanvasPrefs
         self._queue = queue              # CanvasQueue (proposed removals)
+        self._report: dict = {}          # what the last sync did (#66)
         self._alerts = alerts            # CanvasAlerts
         self._events = events            # EventStore, for conflict detection
         self._calendar = calendar        # CalendarSync, to re-read what we wrote
@@ -56,11 +61,24 @@ class CanvasSync:
         return self._store
 
     # --- session handoff (the IPC route in Part 3 calls these) ---
-    def set_session(self, cookies: dict[str, str]) -> None:
-        self._cookies = dict(cookies)
+    def set_session(self, cookies: dict[str, str]) -> bool:
+        """True when the jar was taken on as the live session.
+
+        False for the two jars that cannot be one: an empty payload (which used
+        to report `connected` with nothing to authenticate with), and the exact
+        jar Canvas just rejected with a 401. The UI's loadAllCookies() replay
+        re-offers that dead jar on every page load, and taking it back marked it
+        alive, rewrote it to disk, and had the route kick another sync — one
+        expiry becoming a self-feeding run of 401s that outlived restarts."""
+        jar = dict(cookies)
+        if not jar or jar == self._dead_jar:
+            return False
+        self._cookies = jar
         self._session_alive = True
+        self._dead_jar = None
         if self._session_path is not None:
             canvas_session.save(self._session_path, self._cookies)
+        return True
 
     def clear_session(self) -> None:
         """Forget the session everywhere. Both canvas.disconnect and
@@ -142,6 +160,9 @@ class CanvasSync:
             # granularity two syncs inside the same second are indistinguishable,
             # so a vanished assignment would never accrue its streak — which a
             # manual sync_now right after a poll hits routinely.
+            report = self._report = {"courses": len(courses),
+                                     "assignments": len(assignments),
+                                     "announcements": len(announcements)}
             stamp = datetime.now().isoformat()
             self._store.upsert_assignments(assignments, stamp)
             self._store.upsert_announcements(announcements)
@@ -158,14 +179,14 @@ class CanvasSync:
             except Exception:
                 log.exception("canvas enrichment failed — mirror kept")
             try:
-                await self._sync_calendar()
+                report["calendar"] = await self._sync_calendar()
             except Exception:
                 log.exception("canvas calendar sync failed — mirror kept")
             if self._todos is not None:
                 # Ungated: local todos are not an external write. Failures here
                 # keep the fresh mirror — the next sync retries reconciliation.
                 try:
-                    reconcile_todos(self._store, self._todos)
+                    report["todos"] = reconcile_todos(self._store, self._todos)
                 except Exception:
                     log.exception("canvas reconcile failed — mirror kept")
                 if self._llm is not None:
@@ -176,6 +197,23 @@ class CanvasSync:
                     except Exception:
                         log.exception("canvas announcement flag failed")
             return True
+
+    # ---- #66: one deliberate "bring everything up to date" -----------------
+    async def reconcile_now(self) -> dict:
+        """A full pass — pull, todos, calendar — and a report of what it did.
+
+        The pieces all existed; what did not was a single action a user could
+        press and then see the result of. Removals are the reason it matters:
+        they are never applied silently, they are queued for review, and until
+        now nothing brought that queue to the user's attention at the moment it
+        grew."""
+        self._report = {}
+        ok = await self.sync_once()
+        return {"ok": bool(ok), "last_sync": self.last_sync(),
+                **(self._report or {}),
+                "queued_removals": self._queue.count() if self._queue else 0,
+                "proposals": (self._proposals.count()
+                              if self._proposals else 0)}
 
     async def _enrich(self) -> dict:
         """The 'Lumen powered' passes. Off unless the AI switch is on, so the
@@ -258,7 +296,11 @@ class CanvasSync:
         user to log in again."""
         if self._session_alive or self._cookies is None:
             return                              # transient error, not a 401
+        dead = dict(self._cookies)
         self.clear_session()
+        # Remembered *after* the clear: clear_session is also the user's own
+        # Disconnect, which must not leave a jar blacklisted behind it.
+        self._dead_jar = dead
 
     def _fetch_courses(self, client):
         """Phase 1 (worker thread): the enrolled-course list, or None on a dead
@@ -272,6 +314,65 @@ class CanvasSync:
         except Exception:
             log.exception("canvas course fetch failed — keeping stale mirror")
             return None
+
+    # ---- the #58 diagnostic ---------------------------------------------
+    #: what `/api/v1/courses?enrollment_state=` accepts. `active` is the only
+    #: one the poller has ever asked for, which is the leading suspect for "the
+    #: auto sync is not showing my new classes": a course whose term has not
+    #: started, or whose enrolment is still invited/pending, is simply not in
+    #: that set — and Canvas hides unpublished courses from all of them.
+    ENROLLMENT_STATES = ("active", "invited_or_pending", "completed")
+
+    async def diagnose_courses(self) -> dict:
+        """What Canvas actually returns per enrolment state, beside what the
+        mirror holds. A measurement, not a fix — #58 has been guessed at once
+        already (the archive flag, which turned out to default to included)."""
+        if not self.connected:
+            return {"error": "not connected"}
+        try:
+            client = self._client_factory()
+        except Exception:
+            log.exception("could not build canvas client")
+            return {"error": "could not build a Canvas client"}
+        if client is None:
+            return {"error": "not connected"}
+        by_state = await asyncio.to_thread(self._fetch_states, client)
+        mirror = {c["id"]: c for c in self._store.courses_for_panel()}
+        active_ids = {c["id"] for c in (by_state.get("active") or [])}
+        # Only invited/pending counts as "missing". The first live run against
+        # Josh's real account (2026-08-30) returned 19 *completed* courses, and
+        # reporting those as classes the sync is hiding would have been worse
+        # than saying nothing — they are past terms, correctly excluded.
+        unseen = [c for c in (by_state.get("invited_or_pending") or [])
+                  if c["id"] not in active_ids]
+        return {"by_state": {k: v for k, v in by_state.items()},
+                "counts": {k: len(v) for k, v in by_state.items()},
+                "mirror": [{"id": c["id"], "name": c.get("name"),
+                            "course_code": c.get("course_code"),
+                            "included": c.get("included"),
+                            "active": c.get("active")}
+                           for c in mirror.values()],
+                "missing_from_active": unseen,
+                "past": len([c for c in (by_state.get("completed") or [])
+                             if c["id"] not in active_ids]),
+                "archived": [{"id": c["id"], "name": c.get("name"),
+                              "course_code": c.get("course_code")}
+                             for c in mirror.values() if not c.get("included")],
+                "not_mirrored": [c for c in (by_state.get("active") or [])
+                                 if c["id"] not in mirror]}
+
+    def _fetch_states(self, client) -> dict:
+        """Worker thread: one course query per enrolment state, each failure
+        recorded rather than raised — a diagnostic that dies on the first error
+        tells you less than one that reports three results and one error."""
+        out: dict[str, list] = {}
+        for state in self.ENROLLMENT_STATES:
+            try:
+                out[state] = client.courses(state)
+            except Exception as e:
+                log.warning("canvas diagnostic: %s query failed: %s", state, e)
+                out[state] = []
+        return out
 
     def _fetch_items(self, client, courses):
         """Phase 2 (worker thread): assignments + announcements for exactly the

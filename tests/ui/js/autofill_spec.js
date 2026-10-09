@@ -101,8 +101,98 @@ check("probe leaks NO typed value",
       !probe.includes("TOP-SECRET") && !probe.includes("typed-by-hand"), probe);
 
 // --- 9. read_fields_js DOES return values (it is the capture path) ---------
-const read = JSON.parse(eval("(" + S.read + ")"));
-check("capture reads what the user typed", read.u === "typed-by-hand" && read.p === "TOP-SECRET", read);
+const readFields = JSON.parse(eval("(" + S.read_fields + ")"));
+check("capture reads what the user typed",
+      readFields.u === "typed-by-hand" && readFields.p === "TOP-SECRET", readFields);
+
+// --- 8. #44: fill EVERY candidate, not the first --------------------------
+// A hidden/decoy password input on step 1 of a two-page CAS flow used to
+// swallow the whole attempt: `find` stopped at the first match and `finish()`
+// ran, so the real field was never touched.
+{
+  const decoy = makeInput({name: "password", type: "password"});
+  const real = makeInput({id: "password", type: "password"});
+  const user = makeInput({id: "username"});
+  const doc = makeDoc([user, decoy, real]);
+  const r = run(S.nosubmit, doc);
+  check("#44 fills every password candidate",
+        decoy.value === "s3cret" && real.value === "s3cret",
+        [decoy.value, real.value]);
+  check("#44 reports how many it found", r.pass_fields >= 2, r);
+}
+
+// --- 9. #44: is this page a login form? -----------------------------------
+{
+  const r = run(S.present, makeDoc([makeInput({id: "username"}),
+                                    makeInput({id: "password", type: "password"})]));
+  check("#44 login page detected", r.login === true && r.user === 1 && r.pass === 1, r);
+  const r2 = run(S.present, makeDoc([makeInput({id: "search"})]));
+  check("#44 ordinary page is not a login", r2.login === false, r2);
+}
+
+// --- 10. #44: fill on focus ------------------------------------------------
+// The structural fix. No deadline, no polling, no guess about when the form
+// mounts: the trigger is the cursor landing in the box.
+{
+  const user = makeInput({id: "username"});
+  const pass = makeInput({id: "password", type: "password"});
+  user.matches = (sel) => sel === "#username";
+  pass.matches = (sel) => sel === "#password";
+  const doc = makeDoc([user, pass]);
+  const listeners = {};
+  doc.addEventListener = (type, fn) => { listeners[type] = fn; };
+  const r = run(S.focus, doc);
+  check("#44 focus listener armed", r.armed === 1, r);
+  listeners.focusin({target: user});
+  check("#44 focusing the username fills it", user.value === "u1234567", user.value);
+  check("#44 focusing username does NOT fill the password", pass.value === "", pass.value);
+  listeners.focusin({target: pass});
+  check("#44 focusing the password fills it", pass.value === "s3cret", pass.value);
+}
+{
+  // Never clobber something the user is part-way through typing.
+  const user = makeInput({id: "username", _value: "half-typed"});
+  user.matches = (sel) => sel === "#username";
+  const doc = makeDoc([user]);
+  const listeners = {};
+  doc.addEventListener = (type, fn) => { listeners[type] = fn; };
+  run(S.focus, doc);
+  listeners.focusin({target: user});
+  check("#44 focus fill leaves a non-empty field alone",
+        user.value === "half-typed", user.value);
+}
+
+// --- 11. #44: capture at submit time, not once a second -------------------
+// The 1 Hz sampler missed a password typed and submitted inside one second,
+// and missed a pasted one entirely — which is very likely why the keyring was
+// empty the whole time, with nothing logged about it.
+{
+  const user = makeInput({id: "username"});
+  const pass = makeInput({id: "password", type: "password"});
+  const doc = makeDoc([user, pass]);
+  const listeners = {};
+  doc.addEventListener = (type, fn) => { listeners[type] = fn; };
+  global.document = doc;
+  global.window = {HTMLInputElement, document: doc};
+  JSON.parse(eval("(" + S.capture + ")"));
+  check("#44 capture hooks submit", typeof listeners.submit === "function");
+  check("#44 capture hooks click", typeof listeners.click === "function");
+  check("#44 capture hooks Enter", typeof listeners.keydown === "function");
+  // The user types and hits Enter inside the same second the sampler slept.
+  user._value = "u7654321";
+  pass._value = "typed-fast";
+  listeners.keydown({key: "Enter"});
+  const stash = window.__lumenCapture;
+  check("#44 capture caught the fast submit",
+        stash.u === "u7654321" && stash.p === "typed-fast", stash);
+  // …and the page navigates away, so the fields are gone.
+  const gone = makeDoc([]);
+  global.document = gone;
+  global.window.document = gone;
+  const read = JSON.parse(eval("(" + S.read + ")"));
+  check("#44 the stash survives the page the form was on",
+        read.u === "u7654321" && read.p === "typed-fast", read);
+}
 
 console.log(fails ? "\n" + fails + " FAILING" : "\nall green");
 process.exitCode = fails ? 1 : 0;

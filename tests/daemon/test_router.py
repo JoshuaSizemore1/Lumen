@@ -4176,6 +4176,7 @@ class FakeCanvas:
     def set_session(self, cookies):
         self.session = cookies
         self._connected = True
+        return True                      # real CanvasSync returns "was it taken?"
 
     def clear_session(self):
         self.cleared = True
@@ -4219,6 +4220,23 @@ async def test_canvas_set_session_syncs_immediately():
                   "canvas.set_session", {"cookies": {"canvas_session": "x"}})
     await asyncio.sleep(0)               # let the kicked-off task run
     assert canvas.syncs == 1
+
+
+async def test_canvas_set_session_does_not_sync_on_a_refused_jar():
+    """A refused hand-off (the dead jar coming back through the UI's cookie
+    replay) must not kick a sync — that kick is what turned one 401 into a
+    self-feeding loop of them on 2026-08-27."""
+    import asyncio
+
+    class RefusingCanvas(FakeCanvas):
+        def set_session(self, cookies):
+            return False
+
+    canvas = RefusingCanvas()
+    await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
+                  "canvas.set_session", {"cookies": {"canvas_session": "dead"}})
+    await asyncio.sleep(0)
+    assert canvas.syncs == 0
 
 
 async def test_canvas_status_reports_live_state():

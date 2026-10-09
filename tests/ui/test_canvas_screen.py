@@ -1,3 +1,5 @@
+import json
+
 from PyQt6.QtWidgets import QLabel, QPushButton
 
 from lumen.ui_v3.screens.canvas import CanvasScreen
@@ -27,6 +29,8 @@ class FakeCanvasState:
         self.resolved_removals = []         # (id, approve)
         self.resolved_proposals = []        # (id, approve)
         self.syncs = 0
+        self.reconciles = 0
+        self.reconcile_report: dict = {}
 
     # --- Canvas -> Calendar ---
     def canvas_calendar_status(self, cb):
@@ -68,6 +72,17 @@ class FakeCanvasState:
         self.syncs += 1
         if cb:
             cb({"started": True, "ok": True})
+
+    def canvas_reconcile_now(self, cb=None):
+        """#66: Sync now pulls AND applies, and reports what it did."""
+        self.syncs += 1
+        self.reconciles += 1
+        if cb:
+            cb({"ok": True, "last_sync": None,
+                "todos": dict(self.reconcile_report.get("todos") or {}),
+                "calendar": dict(self.reconcile_report.get("calendar") or {}),
+                "queued_removals": self.reconcile_report.get("queued_removals", 0),
+                "proposals": self.reconcile_report.get("proposals", 0)})
 
     def canvas_status(self, cb):
         cb({"connected": True, "last_sync": None})
@@ -121,7 +136,9 @@ def test_screen_builds_without_web_engine(qtbot):
     # otherwise headless tests + the screenshot script spin up Chromium.
     assert screen._web is None
     assert screen.context()["screen"] == "canvas"
-    assert screen._remember_login is True         # save-by-default
+    # No "remember" switch any more (#44): a pre-checked box that silently
+    # saved nothing is what made a broken autofill look like a working one.
+    assert not hasattr(screen, "_remember_login")
 
 
 def test_apply_status_flips_label_to_connected(qtbot):
@@ -390,47 +407,93 @@ def test_connected_header_shows_browse_and_manage(qtbot):
 
 
 # --- autofill wiring (#44) ---------------------------------------------------
+LOGIN_PAGE = json.dumps({"login": True, "user": 1, "pass": 1,
+                         "frames": 1, "blocked": 0})
+NOT_A_LOGIN_PAGE = json.dumps({"login": False, "user": 0, "pass": 0,
+                               "frames": 1, "blocked": 0})
+WALLED_OFF_PAGE = json.dumps({"login": False, "user": 0, "pass": 0,
+                              "frames": 2, "blocked": 1})
+
+
 class FakeWeb:
     """A stand-in for QWebEngineView good enough for the injection path. Assigned
-    to screen._web directly — _ensure_web() is never called, so no Chromium."""
+    to screen._web directly — _ensure_web() is never called, so no Chromium.
 
-    def __init__(self, reply="{}"):
+    A page load now runs several different scripts (arm the submit capture, ask
+    whether this is a login form, then fill), so replies are dispatched by which
+    script asked."""
+
+    def __init__(self, reply="{}", form=LOGIN_PAGE):
         self.scripts = []
-        self._reply = reply
+        self._reply, self._form = reply, form
 
     def page(self):
         return self
 
     def runJavaScript(self, js, cb=None):       # noqa: N802 — Qt's spelling
         self.scripts.append(js)
-        if cb is not None:
-            cb(self._reply)
+        if cb is None:
+            return
+        cb(self._form if "login: !!(u || p)" in js else self._reply)
+
+    # --- what the tests actually want to know about the scripts -----------
+    @property
+    def fills(self):
+        """Only the real autofill injections — not the capture arming, the
+        form probe, or the focus-fill listener."""
+        return [j for j in self.scripts if "allowPassSubmit" in j]
 
 
-def _armed_screen(qtbot, monkeypatch, creds=("u1234567", "s3cret"), reply="{}"):
+def _armed_screen(qtbot, monkeypatch, creds=("u1234567", "s3cret"), reply="{}",
+                  form=LOGIN_PAGE):
     from lumen.ui_v3 import canvas_creds
     monkeypatch.setattr(canvas_creds, "load", lambda: creds)
+    monkeypatch.setattr(canvas_creds, "_has_saved", True, raising=False)
     screen = CanvasScreen(AppState())
     qtbot.addWidget(screen)
-    screen._web = FakeWeb(reply)
+    screen._web = FakeWeb(reply, form)
     return screen
 
 
-def test_no_autofill_outside_login_mode(qtbot, monkeypatch):
+def test_no_autofill_on_a_page_that_is_not_a_login(qtbot, monkeypatch):
     """It used to type the saved password into any Canvas page with a password
-    field, login or not."""
-    screen = _armed_screen(qtbot, monkeypatch)
-    screen._login_mode = False
+    field. The gate is now the page itself, not how the user got here."""
+    screen = _armed_screen(qtbot, monkeypatch, form=NOT_A_LOGIN_PAGE)
+    screen._login_mode = True
     screen._on_load_finished(True)
-    assert screen._web.scripts == []
+    assert screen._web.fills == []
 
 
 def test_autofill_injects_in_login_mode(qtbot, monkeypatch):
     screen = _armed_screen(qtbot, monkeypatch)
     screen._login_mode = True
     screen._on_load_finished(True)
-    assert len(screen._web.scripts) == 1
-    assert "u1234567" in screen._web.scripts[0]
+    assert len(screen._web.fills) == 1
+    assert "u1234567" in screen._web.fills[0]
+
+
+def test_a_login_form_reached_by_browsing_still_fills(qtbot, monkeypatch):
+    """#44b: `_inject_autofill` was gated on `_login_mode`, which only Connect
+    ever set. An expired session drops Browse straight onto the CAS form — the
+    moment a saved login is most useful — and Lumen would not even look at it.
+    Filling on focus is what covers that now; auto-SUBMIT still needs Connect."""
+    screen = _armed_screen(qtbot, monkeypatch)
+    screen._login_mode = False
+    screen._on_load_finished(True)
+    assert any("__lumenFocusFill" in j for j in screen._web.scripts)
+    assert screen._web.fills == []          # filled, never submitted
+
+
+def test_a_cross_origin_form_is_named_rather_than_failing_silently(qtbot,
+                                                                   monkeypatch):
+    """The one case no amount of code fixes. Saying so beats nothing happening
+    — that silence is what sent the first #44 investigation after selectors
+    that were fine."""
+    screen = _armed_screen(qtbot, monkeypatch, form=WALLED_OFF_PAGE)
+    screen._login_mode = True
+    screen._on_load_finished(True)
+    assert "protected frame" in _all_label_text(screen._status_pill)
+    assert screen._web.fills == []
 
 
 def test_autofill_survives_a_locked_keyring(qtbot, monkeypatch):
@@ -449,14 +512,21 @@ def test_autofill_survives_a_locked_keyring(qtbot, monkeypatch):
     screen._web = FakeWeb()
     screen._login_mode = True
     screen._on_load_finished(True)          # must not raise
-    assert screen._web.scripts == []
+    assert screen._web.fills == []
 
 
-def test_no_saved_login_injects_nothing(qtbot, monkeypatch):
+def test_no_saved_login_injects_nothing_and_says_so(qtbot, monkeypatch):
+    """"Nothing is stored" must never again look like "the autofill is
+    broken" — that ambiguity is the whole of #44a."""
     screen = _armed_screen(qtbot, monkeypatch, creds=None)
+    monkeypatch.setattr("lumen.ui_v3.canvas_creds._has_saved", False,
+                        raising=False)
     screen._login_mode = True
     screen._on_load_finished(True)
-    assert screen._web.scripts == []
+    assert screen._web.fills == []
+    assert not any("__lumenFocusFill" in j for j in screen._web.scripts)
+    assert "No saved login" in _all_label_text(screen._status_pill)
+    assert screen._fill_btn.isEnabled() is False
 
 
 def test_keyring_is_read_once_per_login(qtbot, monkeypatch):
@@ -485,10 +555,10 @@ def test_submit_branch_is_dropped_once_the_budget_is_spent(qtbot, monkeypatch):
     screen = _armed_screen(qtbot, monkeypatch, reply=report)
     screen._login_mode = True
     screen._on_load_finished(True)                       # spends the budget
-    assert '"allowPassSubmit": true' in screen._web.scripts[0]
+    assert '"allowPassSubmit": true' in screen._web.fills[0]
     assert screen._policy.state == cl.SUBMITTED
     screen._on_load_finished(True)                       # password box is back
-    assert '"allowPassSubmit": false' in screen._web.scripts[1]
+    assert '"allowPassSubmit": false' in screen._web.fills[1]
     assert screen._policy.state == cl.FILL_ONLY
 
 
@@ -499,7 +569,7 @@ def test_authenticated_cookie_stops_further_injection(qtbot, monkeypatch):
     screen._policy.done()
     screen._on_load_finished(True)
     assert screen._policy.state == cl.DONE
-    assert '"allowPassSubmit": false' in screen._web.scripts[0]
+    assert '"allowPassSubmit": false' in screen._web.fills[0]
 
 
 def test_start_login_rearms_the_policy(qtbot, monkeypatch):

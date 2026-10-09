@@ -371,10 +371,27 @@ class AppState(QObject):
             return
         self._data.request("canvas.sync_now", {}, cb or (lambda _r: None))
 
+    def canvas_reconcile_now(self, cb=None) -> None:
+        """#66 — pull from Canvas AND apply it: create/update todos, write
+        calendar events, and surface anything Canvas removed for review."""
+        if self._data is None:
+            if cb:
+                cb({"ok": False})
+            return
+        self._data.request("canvas.reconcile_now", {},
+                           cb or (lambda _r: None))
+
     def canvas_courses(self, cb) -> None:
         if self._data is None:
             cb({"courses": []}); return
         self._data.request("canvas.courses", {}, cb)
+
+    def canvas_course_diagnostic(self, cb) -> None:
+        """#58 — ask Canvas what it returns per enrolment state, so "my new
+        class isn't showing" gets an answer instead of another guess."""
+        if self._data is None:
+            cb({"error": "not connected"}); return
+        self._data.request("canvas.course_diagnostic", {}, cb)
 
     def canvas_set_course_included(self, course_id: int, included: bool,
                                    cb=None) -> None:

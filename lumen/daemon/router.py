@@ -1133,11 +1133,16 @@ class Router:
             if self._canvas is None:
                 yield {"error": "canvas unavailable"}
             else:
-                self._canvas.set_session(payload.get("cookies", {}))
-                # Sync at once instead of leaving the tab empty until the next
-                # poll tick — connecting one minute after a tick otherwise means
-                # a whole poll interval of nothing (live bug 2026-08-25).
-                self._kick_canvas_sync()
+                # Only a jar the poller actually took on earns a sync. A refused
+                # one is the UI's cookie replay handing back the session Canvas
+                # just 401'd, and kicking on that looped 401 → drop → replay →
+                # 401 (live bug 2026-08-27).
+                if self._canvas.set_session(payload.get("cookies", {})):
+                    # Sync at once instead of leaving the tab empty until the
+                    # next poll tick — connecting one minute after a tick
+                    # otherwise means a whole poll interval of nothing (live bug
+                    # 2026-08-25).
+                    self._kick_canvas_sync()
                 yield {"result": self._canvas_status()}
         elif type_ == "canvas.status":
             # Live poller state (not config) for the Canvas tab + Settings row.
@@ -1353,6 +1358,17 @@ class Router:
                 ok = await self._canvas.sync_once()
                 yield {"result": {"started": True, "ok": bool(ok),
                                   "last_sync": self._canvas.last_sync()}}
+        elif type_ == "canvas.reconcile_now":
+            # #66: one deliberate "pull everything and tell me what changed".
+            # sync_now already pulls the mirror; what was missing was the
+            # reconcile/calendar effects and — the point of the ask — the
+            # queued REMOVALS being surfaced at the moment they appear.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            elif self._canvas.busy:
+                yield {"result": {"ok": False, "reason": "already syncing"}}
+            else:
+                yield {"result": await self._canvas.reconcile_now()}
         elif type_ == "canvas.courses":
             # The Manage-courses panel (#28): every enrolled course + its archive
             # flag, so archived ones can be switched back on.
@@ -1360,6 +1376,15 @@ class Router:
                 yield {"error": "canvas unavailable"}
             else:
                 yield {"result": {"courses": self._canvas.store.courses_for_panel()}}
+        elif type_ == "canvas.course_diagnostic":
+            # #58 "the auto sync is not showing my new classes". The archive
+            # flag was ruled out (it defaults to included, in both the schema
+            # and the migration), so this asks Canvas directly what it returns
+            # per enrolment state before anything is changed.
+            if self._canvas is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                yield {"result": await self._canvas.diagnose_courses()}
         elif type_ == "canvas.set_course_included":
             # Archive / un-archive a course (#28). Non-destructive: nothing is
             # deleted, so no confirmation — the flag just hides it + stops the

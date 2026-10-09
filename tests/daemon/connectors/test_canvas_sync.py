@@ -272,6 +272,46 @@ async def test_a_401_during_phase_two_also_deletes_the_session(tmp_path):
     assert not path.exists()
 
 
+async def test_the_jar_that_just_401d_is_refused_on_the_way_back_in(tmp_path):
+    """The live loop of 2026-08-27. A 401 dropped the session, the UI's
+    loadAllCookies() replay handed the SAME dead cookies straight back,
+    set_session marked them alive and re-persisted them, and the route kicked
+    another sync — six 401s in one daemon run and a dead jar back on disk,
+    surviving restarts because the file had been rewritten."""
+    client = FakeClient(courses=[], raise_on="courses")
+    _store, sync, path = make_persistent(tmp_path, client)
+    sync.set_session({"canvas_session": "stale"})
+    assert await sync.sync_once() is False
+    assert sync.connected is False
+
+    assert sync.set_session({"canvas_session": "stale"}) is False
+    assert sync.connected is False
+    assert not path.exists()               # and it is NOT re-persisted
+
+
+async def test_a_genuinely_new_jar_is_accepted_after_a_dead_one(tmp_path):
+    """The refusal must be jar-specific: a real re-login has to reconnect, or
+    the fix would strand the user at the Connect hero forever."""
+    client = FakeClient(courses=[], raise_on="courses")
+    _store, sync, path = make_persistent(tmp_path, client)
+    sync.set_session({"canvas_session": "stale"})
+    assert await sync.sync_once() is False
+
+    assert sync.set_session({"canvas_session": "fresh"}) is True
+    assert sync.connected is True
+    assert canvas_session.load(path) == {"canvas_session": "fresh"}
+
+
+def test_an_empty_jar_is_never_a_session(tmp_path):
+    """canvas.set_session falls back to {} when the payload carries no cookies.
+    Accepting that reported `connected` True with nothing to authenticate
+    with — a phantom connection the UI showed as a working login."""
+    _store, sync, path = make_persistent(tmp_path, FakeClient(courses=[]))
+    assert sync.set_session({}) is False
+    assert sync.connected is False
+    assert not path.exists()
+
+
 # --- calendar sync inside the poll loop --------------------------------------
 class FakeWriter:
     def __init__(self):
