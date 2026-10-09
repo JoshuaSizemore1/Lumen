@@ -21,6 +21,7 @@ lumen-daemon = "lumen.daemon.__main__:main"
 lumen-ui = "lumen.ui_v3.app:main"       # primary UI (Relay-styled)
 lumen-ui-v3 = "lumen.ui_v3.app:main"    # explicit alias for the primary UI
 lumen-ui-v2 = "lumen.ui_v2.app:main"    # archived previous shell, kept as a fallback
+lumen-ui-v4 = "lumen.ui_v4.app:main"      # Field Notes redesign
 lumen-google-auth = "lumen.daemon.connectors.google_auth:main"
 
 [dependency-groups]
