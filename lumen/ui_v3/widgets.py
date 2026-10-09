@@ -106,6 +106,16 @@ def clear_layout(lay) -> None:
         item = lay.takeAt(0)
         w = item.widget()
         if w is not None:
+            # hide() BEFORE detaching. A widget with no parent IS a top-level
+            # window, and one that was visible at the moment it was detached
+            # gets mapped on the next event-loop turn — a mail rebuild orphaned
+            # 50 widgets and 40 of them came back as title-less windows, which a
+            # tiling WM duly tiles. That is #63's "copies of the application
+            # window", and it is why the bug was never Canvas-specific: every
+            # screen rebuilds through here. hide() sets the explicit-hidden
+            # flag, which survives the reparent, so the orphan stays invisible
+            # for the tick it exists before deleteLater collects it.
+            w.hide()
             w.setParent(None)   # detach now, not on the next event-loop tick
             w.deleteLater()
         elif item.layout():
@@ -602,6 +612,27 @@ class Avatar(QWidget):
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._initial)
 
 
+def fire_on_next_tick(fn) -> None:
+    """Run a click callback on the next event-loop turn instead of inside the
+    mouse event (#62).
+
+    Every clickable thing in this app navigates, and navigating rebuilds a
+    screen — which runs `clear_layout`, which detaches and schedules deletion
+    of the very row the mouse event is still being dispatched to. Destroying a
+    widget inside its own event handler is a documented Qt hazard and it is
+    what crashed Lumen when the "turn the model on" notice was clicked.
+
+    One tick is imperceptible and it makes the whole class of bug impossible,
+    for every row in the app rather than for the one that was reported.
+    """
+    def run():
+        try:
+            fn()
+        except RuntimeError:
+            pass      # the widget the callback belongs to went away first
+    QTimer.singleShot(0, run)
+
+
 class ClickRow(QFrame):
     """Row container that fires a callback on click (list rows, nav, cards)."""
 
@@ -613,7 +644,7 @@ class ClickRow(QFrame):
 
     def mousePressEvent(self, ev):
         if self._on_click and ev.button() == Qt.MouseButton.LeftButton:
-            self._on_click()
+            fire_on_next_tick(self._on_click)
         super().mousePressEvent(ev)
 
 
@@ -635,7 +666,7 @@ class ClickLabel(QLabel):
 
     def mousePressEvent(self, ev):
         if self._on_click and ev.button() == Qt.MouseButton.LeftButton:
-            self._on_click()
+            fire_on_next_tick(self._on_click)
 
 
 class AccentBar(QWidget):

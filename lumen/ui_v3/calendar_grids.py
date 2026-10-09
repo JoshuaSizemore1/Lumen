@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import QFrame, QGridLayout, QWidget
 
 from . import theme as T
 from .widgets import (
-    ClickRow, ElideLabel, hbox, label, qcolor, vbox,
+    ClickRow, ElideLabel, fire_on_next_tick, hbox, label, qcolor, vbox,
 )
 
 WEEKDAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
@@ -79,7 +79,10 @@ class EventBlock(QFrame):
 
     def mousePressEvent(self, e):
         if self._on_click and e.button() == Qt.MouseButton.LeftButton:
-            self._on_click(self.ev)
+            # Next tick, not inside the event (#62): this callback opens the
+            # event editor, and a modal's nested event loop entered from a
+            # mouse handler is the same hazard as deleting the widget here.
+            fire_on_next_tick(lambda: self._on_click(self.ev))
 
     def paintEvent(self, e):
         p = QPainter(self)

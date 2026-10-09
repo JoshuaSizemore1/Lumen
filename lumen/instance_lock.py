@@ -62,8 +62,19 @@ def is_lumen_argv(argv: list[str]) -> bool:
                for i in range(len(argv) - 1))
 
 
-def lumen_pids() -> list[int]:
-    """Our own Lumen processes — UI, daemon, MCP servers — minus this one."""
+def is_daemon_argv(argv: list[str]) -> bool:
+    """Just the background daemon, not the UI (#47 — "stray daemons need a way
+    to be killed", without taking the running window down with them)."""
+    if not argv:
+        return False
+    if any(Path(a).name == "lumen-daemon" for a in argv[:2]):
+        return True
+    return any(argv[i] == "-m"
+               and argv[i + 1] in ("lumen.daemon", "lumen.daemon.__main__")
+               for i in range(len(argv) - 1))
+
+
+def _pids_matching(predicate) -> list[int]:
     me, uid = os.getpid(), os.getuid()
     found = []
     for entry in Path("/proc").iterdir():
@@ -75,9 +86,19 @@ def lumen_pids() -> list[int]:
             argv = entry.joinpath("cmdline").read_bytes().split(b"\0")
         except OSError:
             continue        # exited while we were looking
-        if is_lumen_argv([a.decode(errors="replace") for a in argv if a]):
+        if predicate([a.decode(errors="replace") for a in argv if a]):
             found.append(int(entry.name))
     return found
+
+
+def lumen_pids() -> list[int]:
+    """Our own Lumen processes — UI, daemon, MCP servers — minus this one."""
+    return _pids_matching(is_lumen_argv)
+
+
+def daemon_pids() -> list[int]:
+    """Only the daemons — what `lumen-daemon --stop` sweeps."""
+    return _pids_matching(is_daemon_argv)
 
 
 def terminate(pids, grace: float = TERM_GRACE_S) -> None:

@@ -107,3 +107,21 @@ def test_set_due_updates_only_due(tmp_path):
     store.set_due(tid, "2026-09-05")
     row = next(r for r in store.list_all() if r["id"] == tid)
     assert row["due_date"] == "2026-09-05"
+
+
+def test_update_preserves_tag_capitalisation(tmp_path):
+    """Tags were force-lowered, so "AbellCRM" came back "abellcrm" — the todo
+    looked altered on top of having left the filtered view (#48)."""
+    store = make_store(tmp_path)
+    store.add("Chase the invoice")
+    tid = store.list_all()[0]["id"]
+    rows = store.update(tid, tags=["AbellCRM", "Urgent"])
+    assert rows[0]["tags"] == ["AbellCRM", "Urgent"]
+
+
+def test_update_dedupes_tags_case_insensitively(tmp_path):
+    store = make_store(tmp_path)
+    store.add("Chase the invoice")
+    tid = store.list_all()[0]["id"]
+    rows = store.update(tid, tags=["AbellCRM", "abellcrm", " ABELLCRM "])
+    assert rows[0]["tags"] == ["AbellCRM"]   # one tag, first spelling wins

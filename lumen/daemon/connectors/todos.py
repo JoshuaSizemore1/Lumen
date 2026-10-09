@@ -76,12 +76,15 @@ class TodoStore:
             sets.append("due_date = ?")
             params.append(due_date or None)
         if tags is not None:
-            cleaned = [s.strip().lower() for s in tags if s and s.strip()]
-            # de-dupe, preserve order
+            # Kept as the user typed them: force-lowering turned "AbellCRM"
+            # into "abellcrm", so an edit appeared to rewrite the tag as well
+            # as (apparently) losing the todo (#48). De-duped case-insensitively
+            # — a tag typed two ways is still one tag — first spelling wins.
+            cleaned = [s.strip() for s in tags if s and s.strip()]
             seen, uniq = set(), []
             for s in cleaned:
-                if s not in seen:
-                    seen.add(s)
+                if s.casefold() not in seen:
+                    seen.add(s.casefold())
                     uniq.append(s)
             sets.append("tags = ?")
             params.append(json.dumps(uniq))

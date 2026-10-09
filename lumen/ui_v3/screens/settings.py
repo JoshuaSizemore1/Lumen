@@ -85,6 +85,8 @@ class SettingsScreen(QWidget):
         self._mcp_section(v)
         self._memory_section(v)
         self._config_section(v)
+        v.addSpacing(26)
+        self._quit_section(v)
         v.addStretch(1)
 
     def _section_label(self, text: str) -> QWidget:
@@ -364,6 +366,55 @@ class SettingsScreen(QWidget):
         v.addLayout(row)
         v.addWidget(hline(T.BORDER_FAINT))
         return w
+
+    # ---- stop everything (#47) -------------------------------------------
+    def _quit_section(self, v):
+        """A way to stop the background daemon from inside the app.
+
+        The daemon outlives the window on purpose (it is what keeps mail and
+        Canvas in sync), which is also how a stray one ends up running with no
+        window to reach it from. `lumen --quit` does this from a terminal;
+        this is the same sweep, one click, for when there isn't one."""
+        from lumen import instance_lock
+
+        v.addWidget(self._section_label("background"))
+        v.addSpacing(9)
+        try:
+            running = len(instance_lock.daemon_pids())
+        except OSError:
+            running = -1
+        state = ("couldn't check" if running < 0 else
+                 "not running" if running == 0 else
+                 f"{running} running" if running > 1 else "running")
+        stop = button("Stop background sync", "soft", px=12, height=28)
+        stop.setToolTip("Ends the daemon. Lumen restarts it next time you "
+                        "open the app; nothing saved is lost.")
+        stop.clicked.connect(self._stop_daemons)
+        v.addWidget(self._row("daemon", f"syncs mail, calendar and Canvas — {state}",
+                              right=stop))
+        quit_all = button("Quit Lumen", "ghost", px=12, height=28)
+        quit_all.setToolTip("Closes the window and stops the daemon with it.")
+        quit_all.clicked.connect(self._quit_everything)
+        v.addWidget(self._row("quit", "close the window and stop syncing",
+                              right=quit_all))
+
+    def _stop_daemons(self):
+        from lumen import instance_lock
+        pids = instance_lock.daemon_pids()
+        if not pids:
+            self.state.toast_requested.emit("No background sync was running")
+        else:
+            instance_lock.terminate(pids)
+            self.state.toast_requested.emit(
+                f"Stopped background sync ({len(pids)})")
+        self.rebuild()
+
+    def _quit_everything(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from lumen import instance_lock
+        instance_lock.terminate(instance_lock.daemon_pids())
+        QApplication.instance().quit()
 
     def _config_section(self, v):
         """Read-only values, in the mock's syntax-coloured TOML treatment."""

@@ -87,6 +87,10 @@ class TodoDetailDialog(QDialog):
             self.tid, text=self.text.text().strip() or None,
             description=self.desc.toPlainText().strip() or None,
             due_date=self.due.text().strip() or None, tags=tags)
+        # The screen decides whether the edit just hid the row (#48).
+        screen = self.parent()
+        if hasattr(screen, "note_edited"):
+            screen.note_edited(self.tid)
         self.accept()
 
     def _delete(self):
@@ -127,13 +131,38 @@ class TodosScreen(LazyRebuild, QWidget):
         self.rebuild_if_dirty()   # replay changes that landed while hidden
 
     # ---- helpers ----------------------------------------------------------
+    @staticmethod
+    def _tags(todo: dict) -> set[str]:
+        """A todo's tags, folded for comparison. "AbellCRM" and "abellcrm" are
+        one tag — the store used to force lower case, so a list can hold both
+        spellings and they must not split into two buckets (#48)."""
+        return {str(t).casefold() for t in (todo.get("tags") or [])}
+
     def _visible(self) -> list[dict]:
         out = self.state.todos
         if self.tag_filter != "all":
-            out = [t for t in out if self.tag_filter in (t.get("tags") or [])]
+            want = self.tag_filter.casefold()
+            out = [t for t in out if want in self._tags(t)]
         if not self.show_done:
             out = [t for t in out if not t["done"]]
         return out
+
+    def note_edited(self, tid) -> None:
+        """Called after a todo is edited. If the edit moved it out of the tag
+        filter currently applied, the row would simply vanish — which reads as
+        "editing my todo deleted it" (#48). Nothing was deleted, so say so and
+        get the filter out of the way rather than leaving the user staring at a
+        list their todo is no longer in."""
+        if self.tag_filter == "all":
+            return
+        if any(t["id"] == tid for t in self._visible()):
+            return                      # still matches: nothing to explain
+        was = self.tag_filter
+        self.tag_filter = "all"
+        self.rebuild()
+        emit = getattr(self.state, "toast_requested", None)
+        if emit is not None:
+            emit.emit(f"Moved out of #{was} — showing all todos")
 
     @staticmethod
     def _sorted(items: list[dict]) -> list[dict]:
@@ -198,10 +227,12 @@ class TodosScreen(LazyRebuild, QWidget):
             seen: list[str] = []
             for t in vis:
                 for tag in (t.get("tags") or ["untagged"]):
-                    if tag not in seen:
+                    if tag.casefold() not in {s.casefold() for s in seen}:
                         seen.append(tag)
             for tag in seen:
-                items = [t for t in vis if tag in (t.get("tags") or ["untagged"])]
+                fold = tag.casefold()
+                items = [t for t in vis
+                         if fold in (self._tags(t) or {"untagged"})]
                 if items:
                     groups.append((f"#{tag}", T.tag_color(tag), items))
         else:
@@ -252,7 +283,11 @@ class TodosScreen(LazyRebuild, QWidget):
         counts: dict[str, int] = {}
         for t in todos:
             for tag in (t.get("tags") or []):
-                counts[tag] = counts.get(tag, 0) + 1
+                # Fold to the first spelling already counted, so a tag typed
+                # two ways is one row in the rail, not two (#48).
+                key = next((k for k in counts if k.casefold() == tag.casefold()),
+                           tag)
+                counts[key] = counts.get(key, 0) + 1
         v.addWidget(self._tag_row("all", total, T.TEXT_OUT_MONTH))
         for tag, n in sorted(counts.items()):
             v.addWidget(self._tag_row(tag, n, T.tag_color(tag)))

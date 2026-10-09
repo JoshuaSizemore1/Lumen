@@ -4,6 +4,7 @@ until SIGINT/SIGTERM."""
 import asyncio
 import logging
 import signal
+import sys
 
 from lumen.daemon import db
 from lumen.daemon.config import load_config
@@ -141,7 +142,24 @@ async def run() -> None:
     conn.close()
 
 
+def stop() -> int:
+    """`lumen-daemon --stop` (#47). SIGTERM every daemon this user owns — the
+    clean-shutdown path, so pollers stop and in-flight writes get their grace
+    period. Leaves the UI alone; `lumen --quit` is the take-everything-down
+    switch."""
+    from lumen import instance_lock
+    pids = instance_lock.daemon_pids()
+    if not pids:
+        print("lumen-daemon: nothing running")
+        return 0
+    instance_lock.terminate(pids)
+    print(f"lumen-daemon: stopped {len(pids)} daemon(s)")
+    return 0
+
+
 def main() -> None:
+    if "--stop" in sys.argv or "--kill" in sys.argv:
+        raise SystemExit(stop())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     asyncio.run(run())
 

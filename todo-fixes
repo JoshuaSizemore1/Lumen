@@ -787,7 +787,7 @@ about how Lumen should respond at all.
       fixed, and that manual strip now hides itself when auto-sync is on.
 45. Look into why Lumen says "(no awnser)" sometimes, and how we can get rid of this possiblity forever — ✓ found and fixed at the source: `chat_with_tools` yielded `msg.get("content", "")` and returned — empty content included — so the router forwarded an empty chunk and the UI printed "(no answer)", discarding tool results it already had in hand, with nothing logged. Now a terminal answer is guaranteed: log it, retry the final round once with NO tools attached (the failure is usually the model reaching for another one), and failing that report what the tools actually found. Reaching the UI string now means the turn produced literally nothing, and it says that instead (2026-08-30)
 46. One time when I ran the auto catagories emails, it just put everthing as FIDELITY — ✓ two fixes: term weights are now scored by how EXCLUSIVE they are to a label, so a label can't win on shared vocabulary; and a degenerate-run guard drops the model's verdicts when one label takes >60% of a run of 5+ (keyword verdicts are exempt — 30 real Fidelity receipts is a correct answer) (2026-08-30)
-47. Maybe add a keybind for quiting all lumen deaemons if any are left running 
+47. Maybe add a keybind for quiting all lumen deaemons if any are left running — ✓ `lumen-daemon --stop` (daemons only), `lumen --quit`/`--kill`/`--stop` (everything), and a [background] section in Settings showing whether the daemon is running with Stop / Quit buttons (2026-08-30)
 48. When I went to add a edit a todo list and add a tag like "AbellCRM", it removed the item from the todolist
 49. Sometimes when clicking tthrough emails quickly before they even load, it will send be backwards in the list and I have to scroll back down
 50. I want to be able to use the up and down arrow key to change through emails rather than to move the scroll bar
@@ -824,6 +824,8 @@ ead do it programatically, where the email id / whatever signifies that email is
       clipped "Month" to "Iont"), so the colour legend now yields below the width
       where everything fits — scaled by text size, so it holds at any zoom.
 60. When I spam click through emails it laggs really bad, try to fix this / make emails load faster.
+62. A crash happened when I had the model off, then clicked the link to turn it on in the settings from a chat. — ✓ ClickRow/ClickLabel/EventBlock now fire their callback on the next event-loop tick, so a handler can never destroy the widget it is running inside (2026-08-30)
+63. When I click from canvas to the settings some times it creats a bunch of copys of the application window (easy to see cuase of the tiled windows manager), and the graphics lag a bunch. It did this as well another time doing something else I think it is a general bug — ✓ measured: `clear_layout` detached each row with `setParent(None)`, and a parentless widget IS a top-level window. Inside a nested event loop (any open modal) the matching deleteLater is postponed and the orphans get mapped — 40 stray windows from five Mail rebuilds. Now hidden before detaching. Never Canvas-specific: every screen rebuilds through it (2026-08-30)
 64. Swapping between labels and inbox is very laggy
 ---
 

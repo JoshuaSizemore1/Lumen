@@ -4,9 +4,10 @@ In this mode closing the main window quits the whole app (LUMEN_UNIFIED).
 A daemon that was already running (systemd, `uv run lumen-daemon`) is left
 alone on exit — the launcher only stops what it started.
 
-`lumen --quit` is the manual kill switch: it asks a running instance to quit
-and then sweeps anything left behind, including an instance that has lost its
-socket and can no longer be reached any other way.
+`lumen --quit` (also `--kill`, `--stop`) is the manual kill switch: it asks a
+running instance to quit and then sweeps anything left behind, including an
+instance that has lost its socket and can no longer be reached any other way.
+For the background daemon alone, `lumen-daemon --stop` (#47).
 """
 
 import os
@@ -113,7 +114,7 @@ def quit_running() -> None:
 def main(handoff_timeout: float = HANDOFF_TIMEOUT_S) -> None:
     from lumen.ui_v2.single_instance import try_send   # shared IPC plumbing
     from lumen.ui_v3 import SOCKET_NAME                 # cheap: no UI stack imported
-    if "--quit" in sys.argv:
+    if {"--quit", "--kill", "--stop"} & set(sys.argv):
         quit_running()
         return
 
