@@ -13,6 +13,7 @@ class FakeClient(QObject):
     done = pyqtSignal()
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
+    model_off = pyqtSignal()
     conversation = pyqtSignal(int)
     captured = pyqtSignal(dict)
     confirm_requested = pyqtSignal(dict)

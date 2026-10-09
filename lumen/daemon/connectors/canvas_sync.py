@@ -18,6 +18,7 @@ from lumen.daemon.connectors.canvas_client import CanvasClient, CanvasSessionExp
 from lumen.daemon.connectors.canvas_reconcile import reconcile_todos
 from lumen.daemon.connectors.canvas_store import CanvasStore
 from lumen.daemon.llm.canvas_flag import flag_announcements
+from lumen.daemon.llm.claude_cli import BACKGROUND
 
 log = logging.getLogger("lumen.daemon")
 
@@ -55,6 +56,9 @@ class CanvasSync:
         self._sync_lock = asyncio.Lock()
         # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
         self.paused = lambda: False
+        # The Settings model switch, wired the same way. Separate from `paused`:
+        # with the model off the mirror still syncs — only the AI passes stop.
+        self.model_paused = lambda: False
 
     @property
     def store(self) -> CanvasStore:
@@ -189,7 +193,7 @@ class CanvasSync:
                     report["todos"] = reconcile_todos(self._store, self._todos)
                 except Exception:
                     log.exception("canvas reconcile failed — mirror kept")
-                if self._llm is not None:
+                if self._llm is not None and not self.model_paused():
                     # The one allowed model touch: bounded classification of the
                     # NEW announcements only (spec). Never fails the sync.
                     try:
@@ -219,7 +223,8 @@ class CanvasSync:
         """The 'Lumen powered' passes. Off unless the AI switch is on, so the
         power budget is zero by default — the hard constraint on this laptop."""
         if (self._llm is None or self._prefs is None
-                or not self._prefs.sync_enabled() or not self._prefs.ai_mode()):
+                or not self._prefs.sync_enabled() or not self._prefs.ai_mode()
+                or self.model_paused()):
             return {}
         from lumen.daemon.llm import canvas_enrich
         out = await canvas_enrich.classify_assignments(self._store, self._llm)
@@ -395,6 +400,9 @@ class CanvasSync:
 
     async def poll_forever(self) -> None:
         """Daemon background task; cancellation is the shutdown path."""
+        # This task's model calls queue behind anything the user is waiting on
+        # (Claude mode). Task-local: a manual refresh route stays interactive.
+        BACKGROUND.set(True)
         interval = self._cfg.poll_minutes * 60
         while True:
             await self._poll_iteration()

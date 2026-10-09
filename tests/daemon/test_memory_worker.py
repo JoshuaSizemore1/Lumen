@@ -53,3 +53,15 @@ async def test_run_once_no_entries_leaves_file(tmp_path):
     (tmp_path / "memory.md").write_text("## Books\n- Likes SF. (last seen 2026-07-01)\n")
     await w.run_once(now=date(2026, 7, 14))
     assert (tmp_path / "memory.md").read_text().startswith("## Books")
+
+
+def test_model_paused_blocks_distillation(tmp_path):
+    # The Settings model switch has to reach the background passes too, or
+    # "off" would still wake the model two minutes after every chat.
+    w, m = worker(tmp_path, distill_min_entries=1)
+    for _ in range(2):
+        m.log("todos", "query", {"message": "x"})
+    now = datetime(2026, 7, 14, 12, 0, 0)
+    assert w.should_run(now) is True
+    w.model_paused = lambda: True
+    assert w.should_run(now) is False

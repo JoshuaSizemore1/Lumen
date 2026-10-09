@@ -11,7 +11,8 @@ LABELS = frozenset({"email", "calendar", "files", "todos", "books",
 _SYSTEM = (
     "Classify what the user's message involves. Reply with ONLY a "
     "comma-separated subset of these labels, or NONE:\n"
-    "email — reading or searching their email/inbox\n"
+    "email — reading or searching their email/inbox, including anything they "
+    "got or received from a person, company, or service\n"
     "send_email — writing, sending, or replying to an email\n"
     "calendar — their schedule, events, meetings, or availability\n"
     "create_event — booking or scheduling something new\n"
@@ -26,8 +27,11 @@ _SYSTEM = (
 async def classify(llm, message: str) -> set[str]:
     try:
         text = ""
+        # Framed as data, not as a message to answer: Claude (2026-09-24)
+        # replied to "tell me a joke" with a joke instead of a label.
         async for chunk in llm.chat([{"role": "system", "content": _SYSTEM},
-                                     {"role": "user", "content": message}]):
+                                     {"role": "user", "content":
+                                      f"Message to classify:\n{message}"}]):
             text += chunk
     except LLMUnavailable:
         return set()

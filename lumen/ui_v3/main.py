@@ -153,6 +153,8 @@ class LumenWindow(QWidget):
         # An in-page navigation (e.g. the calendar changing view/date) records a
         # new location on the shared history, same as a section switch below.
         self.state.nav_location_changed.connect(self._record_location)
+        self.state.model_state_changed.connect(self._sync_model_chip)
+        self._sync_model_chip()
 
         for i, (key, _, _) in enumerate(NAV):
             sc = QShortcut(QKeySequence(str(i + 1)), self)
@@ -171,6 +173,14 @@ class LumenWindow(QWidget):
         self._screen(SCREENS[0])                 # build the landing screen
         self.stack.setCurrentIndex(0)
         self._sync_chrome(0)
+
+    def _sync_model_chip(self):
+        """The sidebar's model line. It is the app's one always-visible answer
+        to "is the model running?", so it has to track the Settings switch."""
+        on = self.state.model_enabled
+        self.model_dot.set_color(T.OK if on else T.TEXT_GHOST)
+        self.model_lab.setText(f"local · {T.MODEL_NAME}" if on
+                               else "local model off")
 
     # ---- sidebar ----------------------------------------------------------
     def _sidebar(self) -> QWidget:
@@ -212,9 +222,11 @@ class LumenWindow(QWidget):
                              T.TEXT_PRIMARY))
         foot.addSpacing(6)
         model = hbox(s=7)
-        model.addWidget(Dot(6, T.OK))
-        model.addWidget(label(f"local · {T.MODEL_NAME}", 10, T.TEXT_FAINT,
-                              mono=True))
+        self.model_dot = Dot(6, T.OK)
+        model.addWidget(self.model_dot)
+        self.model_lab = label(f"local · {T.MODEL_NAME}", 10, T.TEXT_FAINT,
+                               mono=True)
+        model.addWidget(self.model_lab)
         model.addStretch(1)
         foot.addLayout(model)
         foot.addSpacing(14)

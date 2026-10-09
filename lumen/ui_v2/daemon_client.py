@@ -17,6 +17,9 @@ class DaemonClient(QObject):
     error = pyqtSignal(str)
     tool_used = pyqtSignal(str)
     cold_start = pyqtSignal()             # this turn genuinely loads the model (#22)
+    model_off = pyqtSignal()              # the local model switch is off — no answer coming
+    via = pyqtSignal(str)                 # "via Claude · Haiku" — Claude mode answer tag
+    claude_unavailable = pyqtSignal(str, str)  # (reason, message) — Claude failure
     conversation = pyqtSignal(int)        # daemon assigned this chat a conversation id
     captured = pyqtSignal(dict)           # quick capture: the todo that was created
     confirm_requested = pyqtSignal(dict)  # payload rows + confirm_id
@@ -103,8 +106,17 @@ class DaemonClient(QObject):
             elif "compose_request" in msg:
                 self.compose_requested.emit(
                     {"compose_id": msg.get("compose_id"), **msg["compose_request"]})
+            elif "model_off" in msg:
+                self.model_off.emit()
             elif "cold_start" in msg:
                 self.cold_start.emit()
+            elif "via" in msg:
+                self.via.emit(str(msg["via"]))
+            elif "claude_unavailable" in msg:
+                cu = msg["claude_unavailable"] or {}
+                self.claude_unavailable.emit(
+                    str(cu.get("reason") or ""),
+                    str(cu.get("message") or "Claude is unavailable"))
             elif "tool_used" in msg:
                 self.tool_used.emit(msg["tool_used"])
             elif "conversation_id" in msg:

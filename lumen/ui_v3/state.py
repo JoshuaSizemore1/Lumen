@@ -32,6 +32,10 @@ class AppState(_AppState):
     # the two-pane review popup over the whole window (#32). Window-level like
     # the confirm/compose overlays so it can dim the app behind it.
     suggest_review_requested = pyqtSignal()
+    # A model-off notice was clicked: the shell has already switched to
+    # Settings, and this asks that screen to flash the model switch so the user
+    # lands on the control, not just the page.
+    model_switch_highlight_requested = pyqtSignal()
 
     def open_memory_file(self) -> None:
         """Open memory.md in Lumen's own Files screen (#15).

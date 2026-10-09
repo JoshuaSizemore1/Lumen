@@ -4660,6 +4660,91 @@ async def test_resolve_removal_tolerates_a_missing_writer(tmp_path):
     assert queue.count() == 1          # still pending, safe to retry
 
 
+# ---- model on/off switch (Settings) -------------------------------------
+# Josh wants to use Lumen without the local model ever loading. The switch is
+# a hard gate in front of every LLM-touching route, so "off" means the model
+# is never pulled into RAM by anything — not chat, not a background pass.
+
+def _model_off_router(tmp_path, llm=None, **kw):
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "m.db"))
+    conns.set_enabled("model", False)
+    return Router(llm or FakeLLM(), FakeStore(), connection_state=conns, **kw), conns
+
+
+async def test_model_off_short_circuits_chat_without_touching_llm(tmp_path):
+    llm = FakeLLM()
+    router, _ = _model_off_router(tmp_path, llm)
+    out = await collect(router, "chat", {"message": "hi"})
+    assert out == [{"model_off": True}, {"done": True}]
+    assert llm.messages is None          # the model was never asked anything
+
+
+async def test_model_off_makes_warm_a_noop(tmp_path):
+    # The whole point: nothing may load the model behind the user's back.
+    llm = FakeLLM()
+    router, _ = _model_off_router(tmp_path, llm)
+    await collect(router, "warm", {})
+    assert llm.warmed is False
+
+
+async def test_model_off_reports_on_result_routes(tmp_path):
+    # Request/response routes answer with a result carrying the same marker, so
+    # the UI shows one notice everywhere instead of a raw error string.
+    router, _ = _model_off_router(tmp_path)
+    out = await collect(router, "briefing.today", {})
+    assert out[-1]["result"]["model_off"] is True
+
+
+async def test_model_on_by_default_leaves_chat_working(tmp_path):
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "m.db"))
+    router = Router(FakeLLM(), FakeStore(), connection_state=conns)
+    out = await collect(router, "chat", {"message": "hi"})
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_no_connection_state_leaves_chat_working():
+    # Every existing construction passes no ConnectionState; those must behave
+    # exactly as before (model on).
+    out = await collect(Router(FakeLLM(), FakeStore()), "chat", {"message": "hi"})
+    assert out == [{"chunk": "a"}, {"chunk": "b"}, {"done": True}]
+
+
+async def test_model_set_enabled_persists_and_unloads_immediately(tmp_path):
+    # Turning it off frees the RAM on the spot rather than waiting out the
+    # idle-unload timer — that is what the user asked the switch to do.
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    llm = FakeLLM()
+    conns = ConnectionState(db.connect(tmp_path / "m.db"))
+    router = Router(llm, FakeStore(), connection_state=conns)
+
+    out = await collect(router, "model.set_enabled", {"enabled": False})
+    assert out[-1]["result"]["model"]["enabled"] is False
+    assert conns.enabled("model") is False
+    assert llm.unloaded is True
+
+    llm.unloaded = False
+    out = await collect(router, "model.set_enabled", {"enabled": True})
+    assert out[-1]["result"]["model"]["enabled"] is True
+    assert llm.unloaded is False          # turning it back on unloads nothing
+
+
+async def test_settings_get_reports_model_enabled(tmp_path):
+    from lumen.daemon import db
+    from lumen.daemon.config import Config, GoogleConfig
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    cfg = Config(google=GoogleConfig(token_path=tmp_path / "token.json"))
+    conns = ConnectionState(db.connect(tmp_path / "m.db"))
+    conns.set_enabled("model", False)
+    router = Router(FakeLLM(), FakeStore(), config=cfg, connection_state=conns)
+    out = await collect(router, "settings.get", {})
+    assert out[-1]["result"]["model"]["enabled"] is False
+
+
 # --- concurrent IPC: which routes must still take their turn (#60/#64) -------
 
 def test_model_and_confirm_routes_are_exclusive():

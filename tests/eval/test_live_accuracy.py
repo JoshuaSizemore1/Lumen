@@ -1,4 +1,5 @@
-"""Live tool-selection eval against the configured local model. Opt-in.
+"""Live tool-selection eval against the configured local model (or Claude:
+LUMEN_EVAL_BACKEND=claude [LUMEN_EVAL_MODEL=haiku|sonnet]). Opt-in.
 
     LUMEN_EVAL_LIVE=1 uv run pytest tests/eval/test_live_accuracy.py -v
 
@@ -114,6 +115,16 @@ async def client():
     a cold load per case.
     """
     cfg = load_config()
+    if os.environ.get("LUMEN_EVAL_BACKEND") == "claude":
+        # Claude mode (2026-09-24): LUMEN_EVAL_MODEL picks a [claude] models
+        # key (haiku|sonnet). Same client class the daemon builds.
+        from lumen.daemon.llm.claude_cli import ClaudeCliClient
+        key = os.environ.get("LUMEN_EVAL_MODEL", cfg.claude.default_model)
+        c = ClaudeCliClient(cfg.claude.models[key], cli_path=cfg.claude.cli_path,
+                            timeout_seconds=cfg.claude.timeout_seconds,
+                            max_concurrent=cfg.claude.max_concurrent)
+        yield c
+        return
     model = os.environ.get("LUMEN_EVAL_MODEL", cfg.model)
     c = OllamaClient(cfg.ollama_url, model, cfg.keep_alive, think=cfg.think)
     try:

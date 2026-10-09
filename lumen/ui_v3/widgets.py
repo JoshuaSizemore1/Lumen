@@ -10,9 +10,9 @@ import math
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QPolygonF
 from PyQt6.QtWidgets import (
-    QAbstractButton, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
-    QLabel, QLayout, QPushButton, QScrollArea, QSizePolicy, QTextBrowser,
-    QVBoxLayout, QWidget,
+    QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect,
+    QHBoxLayout, QLabel, QLayout, QPushButton, QScrollArea, QSizePolicy,
+    QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from . import theme as T
@@ -667,6 +667,110 @@ class ClickLabel(QLabel):
     def mousePressEvent(self, ev):
         if self._on_click and ev.button() == Qt.MouseButton.LeftButton:
             fire_on_next_tick(self._on_click)
+
+
+class SegmentedControl(QWidget):
+    """Horizontal group of exclusive checkable buttons — Off / Local / Claude.
+
+    Wraps the existing `seg_button` + QButtonGroup pattern from Settings'
+    text-size row into a reusable widget. Each option is a (key, label) pair;
+    `on_change(key)` fires whenever the user picks a different segment."""
+
+    def __init__(self, options: list, selected: str | None = None,
+                 on_change=None, parent=None):
+        super().__init__(parent)
+        self._on_change = on_change
+        self._buttons: dict[str, QPushButton] = {}
+
+        lay = hbox(self, (0, 0, 0, 0), 4)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        for key, lbl in options:
+            b = seg_button(lbl)
+            self._buttons[key] = b
+            self._group.addButton(b)
+            b.clicked.connect(lambda checked=False, k=key: self._clicked(k))
+            lay.addWidget(b)
+
+        if selected and selected in self._buttons:
+            self._buttons[selected].setChecked(True)
+
+    def _clicked(self, key: str) -> None:
+        if self._on_change:
+            self._on_change(key)
+
+    def set_selected(self, key: str) -> None:
+        if key in self._buttons:
+            self._buttons[key].setChecked(True)
+
+    def selected(self) -> str | None:
+        for key, b in self._buttons.items():
+            if b.isChecked():
+                return key
+        return None
+
+
+class ClaudeUnavailableNotice(ClickRow):
+    """Shown when a Claude-mode request fails (offline, logged out, etc.).
+
+    Same visual slot and dashed-box style as ModelOffNotice — the two are
+    interchangeable in the chat thread, Ask bar, and launcher.  Clicking it
+    opens Settings and flashes the model row, same as the model-off path."""
+
+    def __init__(self, state, message: str = ""):
+        super().__init__(self._go)
+        self._state = state
+        self.setProperty("cls", "modeloff")
+        self.setStyleSheet(
+            f"ClickRow[cls=\"modeloff\"] {{ background: {T.BG_FIELD};"
+            f" border: 1px dashed {T.BORDER_STRONG}; border-radius: 8px; }}")
+        v = vbox(self, (14, 12, 14, 12), 4)
+        v.addWidget(label("◇ Claude is unavailable.", 13.5,
+                          T.TEXT_BODY, 500, wrap=True))
+        if message:
+            v.addWidget(label(message, 11.5, T.TEXT_MUTED, wrap=True))
+        v.addWidget(label("Check Settings ↗", 11.5, T.ACCENT, 600, mono=True))
+
+    def _go(self) -> None:
+        self._state.view_requested.emit("settings")
+        self._state.model_switch_highlight_requested.emit()
+
+    def click(self) -> None:
+        self._go()
+
+
+class ModelOffNotice(ClickRow):
+    """What every AI surface shows while the local model switch is off.
+
+    One widget for all of them (chat thread, Ask bar, launcher, Today's
+    briefing, mail suggest-labels, book recs, Files edit) so the message and
+    the destination can never drift apart. The whole row is the link: clicking
+    it opens Settings AND flashes the switch, so "take me to it" lands on the
+    control rather than merely the page.
+    """
+
+    def __init__(self, state, note: str = ""):
+        super().__init__(self._go)
+        self._state = state
+        self.setProperty("cls", "modeloff")
+        self.setStyleSheet(
+            f"ClickRow[cls=\"modeloff\"] {{ background: {T.BG_FIELD};"
+            f" border: 1px dashed {T.BORDER_STRONG}; border-radius: 8px; }}")
+        v = vbox(self, (14, 12, 14, 12), 4)
+        v.addWidget(label("◇ The local model is turned off.", 13.5,
+                          T.TEXT_BODY, 500, wrap=True))
+        if note:
+            v.addWidget(label(note, 11.5, T.TEXT_MUTED, wrap=True))
+        v.addWidget(label("Turn it on ↗", 11.5, T.ACCENT, 600, mono=True))
+
+    def _go(self):
+        self._state.view_requested.emit("settings")
+        self._state.model_switch_highlight_requested.emit()
+
+    def click(self):
+        """Programmatic activation — what a test (or a keyboard path) uses
+        instead of synthesizing a mouse press."""
+        self._go()
 
 
 class AccentBar(QWidget):

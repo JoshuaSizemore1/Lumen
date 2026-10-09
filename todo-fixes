@@ -830,6 +830,9 @@ ead do it programatically, where the email id / whatever signifies that email is
 64. Swapping between labels and inbox is very laggy
 65. When I remove items from the canvas assignment / announcment view it moves the scroll bar / the view of the sscreen up to the top of the list. — ✓ restoring the position afterwards is a losing race (three content replies land separately, each emptying its own box), so the collapse is prevented instead: the content's height is pinned for the duration of a rebuild, the scroll range never collapses, and there is nothing to put back (2026-08-30)
 66. Also make a button / thing that pulls the info from the sync and make new todos / calendar events / update incase things got removed from canvas — ✓ "Sync now" is that button: it runs a full pass (pull → todos → calendar) via the new `canvas.reconcile_now` route and then says what it did — new todos, moved due dates, calendar events written — with removals going to the existing Review queue rather than being applied silently (2026-08-30)
+67. When ever I click on the browse canvas the save login menu appears again. If It already saved the info it shouldn ot ask for it again, unless the user clicks a button for it or something
+68. With the calendar tab open I asked what the next homework due was (which was on the calendar), and instead it looked at the todo list and got the awnser wrong (on the todo list the date is right so it made a mistake). The tab level context needs to be better. DO not try to add a solution to fix only this case
+69. Even with claude CLI it does not first look for an email address  in the inbox when drafting an email. The first step when drafting an email should be finding the email adress (at some point we should add a contacts system).
 ---
 
 ## Josh's Finds — status 2026-07-21

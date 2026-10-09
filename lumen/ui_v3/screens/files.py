@@ -12,8 +12,9 @@ from PyQt6.QtWidgets import QFrame, QGridLayout, QLineEdit, QPlainTextEdit, QWid
 
 from .. import theme as T
 from ..widgets import (
-    ClickLabel, ClickRow, ElideLabel, TypingDots, button, clear_layout,
-    empty_state, eyebrow, font, hbox, hline, label, qcolor, scroll, vbox,
+    ClickLabel, ClickRow, ElideLabel, ModelOffNotice, TypingDots, button,
+    clear_layout, empty_state, eyebrow, font, hbox, hline, label, qcolor,
+    scroll, vbox,
 )
 
 TEXT_SUFFIXES = {".md", ".txt", ".toml", ".conf", ".cfg", ".ini", ".json",
@@ -314,6 +315,14 @@ class FilesScreen(QWidget):
         wrap.addWidget(self.instr_host)
         self.body_lay.addLayout(wrap)
 
+        # Same slot as the instruction row: pressing ✎ Edit with the model off
+        # shows this instead of a prompt that could never be answered.
+        self.edit_off = ModelOffNotice(self.state)
+        self.edit_off.hide()
+        off_wrap = hbox(m=(30, 8, 30, 0), s=0)
+        off_wrap.addWidget(self.edit_off)
+        self.body_lay.addLayout(off_wrap)
+
         # proposal accept/discard bar
         self.prop_host = QFrame()
         self.prop_host.setProperty("role", "ok")
@@ -369,6 +378,11 @@ class FilesScreen(QWidget):
 
     # ---- assisted edit ----------------------------------------------------
     def _ask_edit(self):
+        if not self.state.model_enabled:
+            self.instr_host.hide()
+            self.edit_off.show()
+            return
+        self.edit_off.hide()
         self.instr_host.show()
         self.instr.setFocus()
 
@@ -382,6 +396,10 @@ class FilesScreen(QWidget):
 
         def done(result):
             self.edit_status.set_static("")
+            if (result or {}).get("model_off"):
+                self.state._set_model_enabled(False)
+                self.edit_off.show()
+                return
             if not (result or {}).get("ok"):
                 self.state.toast_requested.emit(
                     f"⚠ {(result or {}).get('message', 'Edit failed')}")

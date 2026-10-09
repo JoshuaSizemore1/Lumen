@@ -9,8 +9,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 
 from .. import theme as T
 from ..widgets import (
-    ClickLabel, Select, TypingDots, button, clear_layout, eyebrow, font, hbox,
-    hline, label, scroll, vbox,
+    ClickLabel, ModelOffNotice, Select, TypingDots, button, clear_layout,
+    eyebrow, font, hbox, hline, label, scroll, vbox,
 )
 
 
@@ -38,6 +38,7 @@ class BooksScreen(QWidget):
 
         state.books_changed.connect(self._build_log)
         state.recs_changed.connect(self._build_recs)
+        state.model_state_changed.connect(self._build_recs)
         self._build_log()
         self._build_recs()
 
@@ -155,7 +156,11 @@ class BooksScreen(QWidget):
         pv.addWidget(label("◆ NOT YET READ", 9, T.BOOK_LABEL, mono=True, ls=1.5))
         pv.addSpacing(4)
 
-        if not recs:
+        if not recs and not self.state.model_enabled:
+            # Where the recommendations would be: no point offering "press
+            # refresh" for something that cannot run.
+            pv.addWidget(ModelOffNotice(self.state))
+        elif not recs:
             pv.addWidget(label("No recommendations yet — press refresh.", 12.5,
                                T.BOOK_WHY, wrap=True))
         for i, r in enumerate(recs):
@@ -203,6 +208,9 @@ class BooksScreen(QWidget):
 
     def _refresh(self):
         if self._busy:
+            return
+        if not self.state.model_enabled:
+            self._build_recs()          # repaints with the notice in place
             return
         self._busy = True
         self.rec_status.start("◇ thinking")

@@ -29,7 +29,9 @@ from lumen.daemon.connectors.procedures import ProcedureStore
 from lumen.daemon.connectors.suggestions import SuggestionStore
 from lumen.daemon.connectors.todos import TodoStore
 from lumen.daemon.ipc_server import IPCServer
+from lumen.daemon.llm.backend import LLMBackend
 from lumen.daemon.llm.client import OllamaClient
+from lumen.daemon.llm.claude_cli import ClaudeCliClient
 from lumen.daemon.llm.mcp_bridge import LazyBridge
 from lumen.daemon.llm.model_router import ModelRouter
 from lumen.daemon.llm.tool_log import ToolLog
@@ -43,7 +45,20 @@ log = logging.getLogger("lumen.daemon")
 async def run() -> None:
     cfg = load_config()
     conn = db.connect(cfg.db_path)
-    llm = OllamaClient(cfg.ollama_url, cfg.model, cfg.keep_alive, think=cfg.think)
+    ollama = OllamaClient(cfg.ollama_url, cfg.model, cfg.keep_alive, think=cfg.think)
+    claude_cfg = cfg.claude
+    claude_models = dict(claude_cfg.models)
+    default_claude_id = claude_models.get(claude_cfg.default_model,
+                                          "claude-haiku-4-5-20251001")
+    claude = ClaudeCliClient(
+        model=default_claude_id,
+        cli_path=claude_cfg.cli_path,
+        timeout_seconds=claude_cfg.timeout_seconds,
+        max_concurrent=claude_cfg.max_concurrent,
+    )
+    llm = LLMBackend(ollama, claude, conn,
+                     claude_models=claude_models,
+                     background_pause_at=claude_cfg.background_pause_at)
     bridge = LazyBridge(list(cfg.mcp.servers)) if cfg.mcp.enabled else None
     model_router = ModelRouter(cfg.model, cfg.escalation_model)
     tool_log = ToolLog(cfg.mcp.log_path) if cfg.mcp.enabled else None
@@ -80,6 +95,11 @@ async def run() -> None:
     procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
     memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,
                                  procedures=procedures)
+    # The Settings model switch, read live on the same per-tick basis: with the
+    # model off, neither background pass may pull it into RAM. Routes are gated
+    # separately inside Router (it holds `connections` already).
+    canvas.model_paused = llm.model_paused
+    memory_worker.model_paused = llm.model_paused
     broker = ConfirmBroker()   # shared: router resolves, the write gate awaits
     write_gate = (WriteGate(GrantStore(cfg.mcp.grants_path), broker,
                             write_tools_map(cfg.mcp.servers))

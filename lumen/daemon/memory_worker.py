@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 
 from lumen.daemon.config import MemoryConfig
 from lumen.daemon.llm import distill
+from lumen.daemon.llm.claude_cli import BACKGROUND
 from lumen.daemon.llm import memory as memory_mod
 
 log = logging.getLogger(__name__)
@@ -25,8 +26,14 @@ class MemoryWorker:
         self._procedures = procedures     # ProcedureStore (Task 8) — optional
         self._pending: asyncio.Task | None = None
         self._running = False
+        # The Settings model switch; __main__ wires it to ConnectionState. A
+        # distill run is the one model load the user never asked for directly,
+        # so "model off" has to stop it at the gate.
+        self.model_paused = lambda: False
 
     def should_run(self, now: datetime) -> bool:
+        if self.model_paused():
+            return False
         last = self._log_store.last_run()
         if last:
             try:
@@ -57,6 +64,7 @@ class MemoryWorker:
 
     async def _delayed_run(self) -> None:
         try:
+            BACKGROUND.set(True)     # own task: yields to interactive Claude calls
             await asyncio.sleep(self._cfg.distill_delay_seconds)
             await self.run_once()
         except asyncio.CancelledError:

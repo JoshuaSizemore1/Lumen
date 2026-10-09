@@ -17,7 +17,7 @@ from ..rebuild import LazyRebuild
 from ..components import MailRow, accent_fill
 from ..widgets import (
     Avatar, Chip, ClickChip, ClickLabel, ClickRow, Dot, FlowLayout, Glyph,
-    HtmlBody, IconButton, button,
+    HtmlBody, IconButton, ModelOffNotice, button,
     clear_layout, empty_state, eyebrow, font, hbox, hline, label, scroll, vbox,
     vline,
 )
@@ -39,23 +39,45 @@ class _BusyOverlay(QWidget):
         v.addStretch(1)
         self._label = label("", 14, T.TEXT_PRIMARY, 600)
         v.addWidget(self._label, 0, Qt.AlignmentFlag.AlignHCenter)
-        bar = QProgressBar()
-        bar.setRange(0, 0)                 # indeterminate — the "loading circle"
-        bar.setTextVisible(False)
-        bar.setFixedWidth(T.sc(220))
-        v.addWidget(bar, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)           # indeterminate — the "loading circle"
+        self._bar.setTextVisible(False)
+        self._bar.setFixedWidth(T.sc(220))
+        v.addWidget(self._bar, 0, Qt.AlignmentFlag.AlignHCenter)
+        # Swappable slot beneath the bar: the model-off notice goes here.
+        self._slot_lay = vbox(m=(0, 8, 0, 0), s=0)
+        v.addLayout(self._slot_lay)
         v.addStretch(1)
         self.hide()
 
     def start(self, message: str):
         self._label.setText(message)
+        self._bar.show()
+        self._slot_lay.setEnabled(True)
+        self._show()
+
+    def notice(self, widget):
+        """Same dimmed surface, carrying a widget instead of a progress bar —
+        used for the model-off notice, which lands exactly where the user was
+        looking when they pressed the AI chip."""
+        self._label.setText("")
+        self._bar.hide()
+        clear_layout(self._slot_lay)
+        self._slot_lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._show()
+
+    def _show(self):
         if self.parent():
             self.setGeometry(self.parent().rect())
         self.show()
         self.raise_()
 
     def mousePressEvent(self, ev):
-        ev.accept()                        # swallow clicks while busy
+        # A click on the dim (not on the notice itself) dismisses it; while a
+        # real task runs there is nothing to dismiss, so it is just swallowed.
+        if self._bar.isHidden():
+            self.hide()
+        ev.accept()
 
 
 class MailScreen(LazyRebuild, QWidget):
@@ -560,10 +582,17 @@ class MailScreen(LazyRebuild, QWidget):
     def _suggest(self):
         # Classifying is one model call per unlabeled message, so it can run for
         # a while — dim the inbox and show a busy bar until it returns (#7).
+        if not self.state.model_enabled:
+            self.busy.notice(ModelOffNotice(self.state))
+            return
         self.busy.start("Classifying inbox mail…")
         self.state.suggest_labels(cb=self._suggest_done)
 
     def _suggest_done(self, _result):
+        if isinstance(_result, dict) and _result.get("model_off"):
+            self.state._set_model_enabled(False)
+            self.busy.notice(ModelOffNotice(self.state))
+            return
         # Results now open a two-pane review popup rather than inline chips
         # (#32): the shell owns that window-level overlay, so ask it to open when
         # there's at least one suggestion.

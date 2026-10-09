@@ -5,6 +5,7 @@ A local-first daily assistant running on-device LLMs (Ollama/llama.cpp) that man
 
 ## Core principles (non-negotiable across every feature)
 - **Local-first**: the LLM and all personal data storage run on-device. Cloud APIs are used sparingly and deliberately (e.g. one-off writing-style derivation), never as a silent dependency for core operation.
+  - *Claude mode (2026-09-24)* is the one sanctioned exception for the LLM. It is opt-in from Settings (Off / Local / Claude), and Local is the default on a fresh install. It is stated plainly in Settings that answers and the mail/calendar/Canvas text they use go to Anthropic, and it **never** falls back between backends silently. Storage stays on-device in every mode.
 - **Power/thermal discipline**: models idle-unload, no tight polling loops, always benchmark on actual hardware before assuming a model size is viable.
 - **No silent writes, ever**: anything that sends, creates, modifies, or deletes something external (email, calendar events) requires explicit user confirmation, shown clearly, before executing.
 - **Lookup-grounded, not memory-grounded**: any recommendation or factual claim sourced externally (books, search results) must come from an actual tool/API call in that request — never invented from the model's own training data.

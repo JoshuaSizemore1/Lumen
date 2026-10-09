@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import QDialog, QFrame, QLineEdit, QWidget
 from . import theme as T
 from .components import accent_fill
 from .widgets import (
-    NO_REPLY_STATUS, NO_REPLY_TEXT, Chip, ClickRow, TypingDots, clear_layout,
-    font, hbox, hline, label, scroll,
+    NO_REPLY_STATUS, NO_REPLY_TEXT, Chip, ClickRow, ClaudeUnavailableNotice,
+    ModelOffNotice, TypingDots, clear_layout, font, hbox, hline, label, scroll,
     shadow, vbox,
 )
 
@@ -49,6 +49,7 @@ class LauncherPalette(QFrame):
         self._on_command = on_command
         self._busy = False
         self._cold = False    # set by the daemon when this turn actually loads the model
+        self._via = ""        # "via Claude · Haiku" tag
         self._acc = ""
         self._filtered = list(COMMANDS)
         self.status = None
@@ -90,7 +91,12 @@ class LauncherPalette(QFrame):
             self.chat.error.connect(self._on_error)
             self.chat.captured.connect(self._on_captured)
             self.chat.cold_start.connect(self._on_cold)
+            self.chat.model_off.connect(self._on_model_off)
             self.chat.conversation.connect(self._on_conversation)
+            if hasattr(self.chat, "via"):
+                self.chat.via.connect(self._on_via)
+            if hasattr(self.chat, "claude_unavailable"):
+                self.chat.claude_unavailable.connect(self._on_claude_unavailable)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
@@ -171,10 +177,18 @@ class LauncherPalette(QFrame):
 
     # ---- ask fallthrough --------------------------------------------------
     def _ask(self, msg: str):
-        if not msg or self._busy or self.chat is None:
+        if not msg or self._busy:
+            return
+        # Ahead of the chat-client guard: answered locally, no daemon needed.
+        if not self.state.model_enabled:
+            self._show_model_off(msg)
+            self.input.clear()
+            return
+        if self.chat is None:
             return
         self._busy = True
         self._cold = False
+        self._via = ""
         self._acc = ""
         self.input.clear()
         clear_layout(self.body_lay)
@@ -197,12 +211,48 @@ class LauncherPalette(QFrame):
             payload["capture_ok"] = True
         self.chat.send("chat", payload)
 
+    def _show_model_off(self, question: str):
+        """The palette's answer area, carrying the notice. Clicking it opens
+        Settings in the main window, so the overlay gets out of the way."""
+        clear_layout(self.body_lay)
+        self.body_lay.addWidget(label(question, 12, T.TEXT_MUTED, wrap=True))
+        self.body_lay.addSpacing(8)
+        notice = ModelOffNotice(self.state)
+        # The palette is a transient overlay: leaving it up over the Settings
+        # screen it just opened would hide the switch it pointed at.
+        inner = notice._go
+        notice._on_click = lambda: (self._on_command and self._on_command(),
+                                    inner(), self.window().hide())
+        self.body_lay.addWidget(notice)
+        self.body_lay.addStretch(1)
+
+    def _on_model_off(self):
+        if not self._busy:
+            return
+        self._busy = False
+        self._wake.stop()
+        self._show_model_off("")
+
     def _set_status(self, text: str, color: str):
         if self.status is not None:
             self.status.set_static(text, color)
 
-    def _on_cold(self):
+    def _on_via(self, tag: str) -> None:
         if self._busy:
+            self._via = tag
+
+    def _on_claude_unavailable(self, reason: str, message: str) -> None:
+        """Claude failed — show the notice in the palette body."""
+        if not self._busy:
+            return
+        self._busy = False
+        self._wake.stop()
+        clear_layout(self.body_lay)
+        self.body_lay.addWidget(ClaudeUnavailableNotice(self.state, message))
+        self.body_lay.addStretch(1)
+
+    def _on_cold(self):
+        if self._busy and getattr(self.state, "model_mode", "local") != "claude":
             self._cold = True
 
     def _on_wake(self):
@@ -230,7 +280,9 @@ class LauncherPalette(QFrame):
         if not self._busy:
             return
         self._wake.stop()
-        self._set_status("◇ ANSWER · GENERATED LOCALLY", T.INFO)
+        status_text = (f"◇ ANSWER · {self._via.upper()}" if self._via
+                       else "◇ ANSWER · GENERATED LOCALLY")
+        self._set_status(status_text, T.INFO)
         self._acc += text
         self.answer.setText(self._acc)
 

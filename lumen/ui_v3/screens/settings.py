@@ -4,14 +4,15 @@ The mock renders config.toml as syntax-coloured text; that treatment is kept for
 read-only values, while everything Lumen can actually change (accents, accounts,
 MCP toggles, memory) gets real controls in the same visual language.
 """
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QButtonGroup, QFrame, QWidget
 
 from .. import theme as T
 from ..components import accent_fill
 from ..widgets import (
-    ClickLabel, ClickRow, Dot, Switch, button, clear_layout, eyebrow, font,
-    hbox, hline, label, scroll, seg_button, vbox,
+    ClickLabel, ClickRow, Dot, ProgressBar, Select, SegmentedControl, Switch,
+    button, clear_layout, eyebrow, font, hbox, hline, label, scroll, seg_button,
+    vbox,
 )
 
 
@@ -23,6 +24,8 @@ class SettingsScreen(QWidget):
         self._snapshot: dict = {}
         self._learned: dict = {}
         self._rules: list[dict] = []
+        self.model_switch = None      # rebuilt each pass; see _model_section
+        self._flash_model = False     # arrive-from-a-notice highlight (one shot)
 
         outer = hbox(self, (0, 0, 0, 0), 0)
         host = QWidget()
@@ -40,6 +43,11 @@ class SettingsScreen(QWidget):
         outer.addWidget(scroll(host), 1)
 
         state.procedures_changed.connect(self.rebuild)
+        state.model_state_changed.connect(self.rebuild)
+        # Clicking a "the model is off" notice anywhere in the app lands here;
+        # flashing the row is what makes it land on the *switch* rather than
+        # merely on this page.
+        state.model_switch_highlight_requested.connect(self._highlight_model)
         self.rebuild()
 
     def showEvent(self, ev):
@@ -79,6 +87,7 @@ class SettingsScreen(QWidget):
                           10.5, T.TEXT_FAINTER, mono=True))
         v.addSpacing(20)
 
+        self._model_section(v)
         self._accent_section(v)
         self._accounts_section(v)
         self._rules_section(v)
@@ -110,6 +119,187 @@ class SettingsScreen(QWidget):
         return w
 
     # ---- sections ---------------------------------------------------------
+    # ---- model mode: off / local / claude --------------------------------
+    def _model_section(self, v):
+        """3-way mode control: Off / Local / Claude.
+
+        First section on the page — the one setting that changes what the whole
+        app can do, and where every model-off / claude-unavailable notice points.
+        """
+        v.addWidget(self._section_label("model"))
+        v.addSpacing(9)
+
+        model = self._snapshot.get("model") or {}
+        # Prefer the snapshot's mode; fall back to cached state before the first
+        # settings.get reply arrives.
+        mode = model.get("mode") or getattr(self.state, "model_mode", "local")
+        if mode not in ("off", "local", "claude"):
+            mode = "off" if not model.get("enabled", True) else "local"
+
+        # The mode row (gets flash-highlighted when arriving from a notice).
+        self.model_row = QWidget()
+        self.model_row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        rv = vbox(self.model_row, (0, 0, 0, 0), 0)
+        row = hbox(m=(12, 10, 12, 10), s=10)
+        k = label("mode", 12.5, T.TEXT_BODY, mono=True)
+        k.setFixedWidth(T.sc(150))
+        row.addWidget(k)
+        self.model_seg = SegmentedControl(
+            [("off", "Off"), ("local", "Local"), ("claude", "Claude")],
+            selected=mode,
+            on_change=self._set_mode,
+        )
+        self.model_switch = None   # no Switch widget; tests that filter by identity still work
+        row.addWidget(self.model_seg)
+        row.addStretch(1)
+        rv.addLayout(row)
+        rv.addWidget(hline(T.BORDER_FAINT))
+        v.addWidget(self.model_row)
+
+        # Mode-dependent sub-section.
+        if mode == "off":
+            v.addWidget(label(
+                "Off means the model never loads — no RAM, no fan. Mail, "
+                "calendar, todos, Canvas and search keep working; anything "
+                "that needs the model says so and points back here.",
+                11.5, T.TEXT_MUTED, wrap=True))
+            v.addSpacing(6)
+        elif mode == "local":
+            local_name = (model.get("local_name") or model.get("name")
+                          or T.MODEL_NAME)
+            v.addWidget(self._row("name", local_name))
+            v.addWidget(label(
+                "Off means the model never loads — no RAM, no fan. Mail, "
+                "calendar, todos, Canvas and search keep working; anything "
+                "that needs the model says so and points back here.",
+                11.5, T.TEXT_MUTED, wrap=True))
+            v.addSpacing(6)
+        else:
+            self._claude_rows(v)
+
+        v.addSpacing(22)
+        if self._flash_model:
+            self._flash_model = False
+            self._paint_flash()
+
+    def _set_mode(self, mode: str) -> None:
+        # The daemon's reply drives model_state_changed → rebuild.
+        self.state.set_model_mode(mode)
+        self.state.toast_requested.emit(
+            {"off": "Model off — unloaded from memory",
+             "local": "Local model on",
+             "claude": "Claude mode on"}.get(mode, f"Mode: {mode}"))
+
+    def _claude_rows(self, v) -> None:
+        """Rows shown only in Claude mode: model picker, CLI status, usage."""
+        model = self._snapshot.get("model") or {}
+        claude = model.get("claude") or {}
+        claude_models = (model.get("claude_models")
+                         or {"haiku": "Haiku 4.5", "sonnet": "Sonnet 5"})
+        current_cm = (model.get("claude_model")
+                      or getattr(self.state, "model_claude_model", "haiku"))
+
+        # claude_model dropdown
+        cw = QWidget()
+        rv = vbox(cw, (0, 0, 0, 0), 0)
+        dr = hbox(m=(12, 10, 12, 10), s=12)
+        ck = label("claude_model", 12.5, T.TEXT_BODY, mono=True)
+        ck.setFixedWidth(T.sc(150))
+        dr.addWidget(ck)
+        sel = Select()
+        for key, display in claude_models.items():
+            sel.addItem(display, key)
+        for i in range(sel.count()):
+            if sel.itemData(i) == current_cm:
+                sel.setCurrentIndex(i)
+                break
+        sel.currentIndexChanged.connect(
+            lambda _idx, s=sel: self._set_claude_model(s.currentData()))
+        dr.addWidget(sel)
+        dr.addStretch(1)
+        rv.addLayout(dr)
+        rv.addWidget(hline(T.BORDER_FAINT))
+        v.addWidget(cw)
+
+        # CLI status row
+        installed = claude.get("installed", True)
+        logged_in = claude.get("logged_in")
+        account = claude.get("account") or ""
+        if not installed:
+            cli_val, cli_status, cli_col = "", "not installed", T.WARN
+        elif logged_in is False:
+            cli_val = ""
+            cli_status = "logged out — run `claude auth login`"
+            cli_col = T.WARN
+        else:
+            cli_val = "installed"
+            cli_status = f"logged in as {account}" if account else ""
+            cli_col = T.OK
+        v.addWidget(self._row("cli", cli_val,
+                               status=cli_status if cli_status else None,
+                               status_color=cli_col))
+
+        # Usage bars (hidden when daemon hasn't reported usage yet)
+        usage = claude.get("usage")
+        if usage:
+            fh = usage.get("five_hour") or {}
+            sd = usage.get("seven_day") or {}
+            v.addWidget(self._usage_row(fh, sd))
+
+        # Privacy note
+        v.addWidget(label(
+            "Answers and the email/calendar/Canvas text they use are sent to "
+            "Anthropic. The local model stays unloaded.",
+            11.5, T.TEXT_MUTED, wrap=True))
+        v.addSpacing(6)
+
+    def _set_claude_model(self, key: str) -> None:
+        if not key:
+            return
+        self.state.set_claude_model(key)
+
+    def _usage_row(self, five_hour: dict, seven_day: dict) -> QWidget:
+        """Two inline mini progress bars: '5h ░░ 22%  7d ░ 9%'."""
+        w = QWidget()
+        rv = vbox(w, (0, 0, 0, 0), 0)
+        row = hbox(m=(12, 10, 12, 10), s=20)
+        k = label("usage", 12.5, T.TEXT_BODY, mono=True)
+        k.setFixedWidth(T.sc(150))
+        row.addWidget(k)
+        for window_lbl, info in (("5h", five_hour), ("7d", seven_day)):
+            pct = float(info.get("utilization", 0.0))
+            pct_int = round(pct * 100)
+            grp = hbox(s=5)
+            grp.addWidget(label(window_lbl, 10, T.TEXT_FAINT, mono=True))
+            bar = ProgressBar(pct)
+            bar.setFixedWidth(T.sc(56))
+            grp.addWidget(bar)
+            grp.addWidget(label(f"{pct_int}%", 10, T.TEXT_MUTED, mono=True))
+            row.addLayout(grp)
+        row.addStretch(1)
+        rv.addLayout(row)
+        rv.addWidget(hline(T.BORDER_FAINT))
+        return w
+
+    def _set_model(self, on: bool) -> None:
+        # Legacy: kept so any existing callers (e.g. test stubs) don't crash.
+        self.state.set_model_enabled(on)
+
+    def _highlight_model(self):
+        """Arriving from a model-off notice. The rebuild that follows the tab
+        switch would drop any styling applied now, so arm a flag it honours."""
+        self._flash_model = True
+        self._paint_flash()
+
+    def _paint_flash(self):
+        row = getattr(self, "model_row", None)
+        if row is None:
+            return
+        row.setStyleSheet(f"QWidget {{ background: {accent_fill()};"
+                          f" border-left: 2px solid {T.ACCENT}; }}")
+        QTimer.singleShot(1600, lambda: row.setStyleSheet("")
+                          if row is not None else None)
+
     def _accent_section(self, v):
         v.addWidget(self._section_label("theme"))
         v.addSpacing(9)
@@ -423,7 +613,6 @@ class SettingsScreen(QWidget):
         sync = self._snapshot.get("sync") or {}
         cols.addWidget(self._toml_block("model", [
             ("runtime", model.get("runtime", "ollama"), "str"),
-            ("name", model.get("name", T.MODEL_NAME), "str"),
             ("context", model.get("context", 8192), "num"),
             ("idle_timeout", model.get("idle_timeout", 600), "num",
              "# unload when idle"),

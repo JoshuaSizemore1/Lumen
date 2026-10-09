@@ -15,7 +15,7 @@ from ..calendar_grids import DayColumn
 from ..components import LinkRow, MailRow, TodoRow, column_head, section_head
 from ..rebuild import LazyRebuild
 from ..widgets import (
-    Chip, ClickLabel, Dot, button, clear_layout, eyebrow, font,
+    Chip, ClickLabel, Dot, ModelOffNotice, button, clear_layout, eyebrow, font,
     hbox, hline, label, scroll, vbox, vline,
 )
 
@@ -85,6 +85,11 @@ class TodayScreen(LazyRebuild, QWidget):
         bv.addWidget(eyebrow("Morning briefing", T.ACCENT))
         self.brief_text = label("", 14, T.TEXT_BODY, wrap=True)
         bv.addWidget(self.brief_text)
+        # Occupies the same slot as the briefing text, so a model-off press
+        # fills the panel exactly where the briefing would have been.
+        self.brief_off = ModelOffNotice(self.state)
+        self.brief_off.hide()
+        bv.addWidget(self.brief_off)
         self.brief_panel.hide()
         self.lay.addWidget(self.brief_panel)
 
@@ -246,9 +251,23 @@ class TodayScreen(LazyRebuild, QWidget):
 
     def _briefing(self):
         self.brief_panel.show()
+        if not self.state.model_enabled:
+            self.brief_text.hide()
+            self.brief_off.show()
+            return
+        self.brief_off.hide()
+        self.brief_text.show()
         self.brief_text.setText("Collecting your briefing…")
 
         def done(result):
-            self.brief_text.setText((result or {}).get("text", "")
+            result = result or {}
+            # The daemon can still answer model_off — the switch may have moved
+            # since this screen last read it.
+            if result.get("model_off"):
+                self.brief_text.hide()
+                self.brief_off.show()
+                self.state._set_model_enabled(False)
+                return
+            self.brief_text.setText(result.get("text", "")
                                     or "No briefing available.")
         self.state.fetch_briefing(done)

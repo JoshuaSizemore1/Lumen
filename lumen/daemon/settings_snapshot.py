@@ -23,8 +23,9 @@ def _server_detail(server) -> str:
 def build_settings_snapshot(cfg) -> dict:
     return {
         "model": {
-            "runtime": "ollama",
+            "runtime": "ollama",   # overridden to "claude-cli" when mode=claude
             "name": cfg.model,
+            "local_name": cfg.model,
             "escalation_model": cfg.escalation_model,
             "num_ctx": NUM_CTX,
             "idle_unload_minutes": cfg.idle_unload_minutes,

@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 
 from . import theme as T
 from .widgets import (
-    NO_REPLY_STATUS, NO_REPLY_TEXT, Chip, ClickLabel, TypingDots, clear_layout,
-    font, hbox, label, scroll, vbox,
+    NO_REPLY_STATUS, NO_REPLY_TEXT, Chip, ClickLabel, ClaudeUnavailableNotice,
+    ModelOffNotice, TypingDots, clear_layout, font, hbox, label, scroll, vbox,
 )
 
 WAKE_THRESHOLD_MS = 1500
@@ -39,6 +39,7 @@ class AskBar(QFrame):
         self._context = context_provider
         self._busy = False
         self._cold = False    # set by the daemon when this turn actually loads the model
+        self._via = ""        # "via Claude · Haiku" tag
         self._acc = ""
         self._question = ""   # the last asked question, for "open in Chat" (#24)
         self._tools: list[str] = []
@@ -75,7 +76,12 @@ class AskBar(QFrame):
             self.chat.error.connect(self._on_error)
             self.chat.tool_used.connect(self._on_tool)
             self.chat.cold_start.connect(self._on_cold)
+            self.chat.model_off.connect(self._on_model_off)
             self.chat.conversation.connect(self._on_conversation)
+            if hasattr(self.chat, "via"):
+                self.chat.via.connect(self._on_via)
+            if hasattr(self.chat, "claude_unavailable"):
+                self.chat.claude_unavailable.connect(self._on_claude_unavailable)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
@@ -88,10 +94,19 @@ class AskBar(QFrame):
     # ---- submit -----------------------------------------------------------
     def submit(self):
         msg = self.input.text().strip()
-        if not msg or self._busy or self.chat is None:
+        if not msg or self._busy:
+            return
+        # Ahead of the chat-client guard: answered locally, no daemon needed.
+        if not self.state.model_enabled:
+            self._question = msg
+            self._show_model_off(msg)
+            self.input.clear()
+            return
+        if self.chat is None:
             return
         self._busy = True
         self._cold = False
+        self._via = ""
         self._acc = ""
         self.input.clear()
         self._open_panel(msg)
@@ -147,6 +162,29 @@ class AskBar(QFrame):
         self.panel_lay.addStretch(1)
         self.status.start("◇ thinking")
 
+    def _show_model_off(self, question: str):
+        """The answer panel, carrying the notice instead of an answer — same
+        place the answer would have appeared, so nothing moves."""
+        clear_layout(self.panel_lay)
+        self.panel.show()
+        head = hbox(s=8)
+        head.addStretch(1)
+        head.addWidget(ClickLabel("✕", 11, T.TEXT_GHOST, on_click=self.dismiss,
+                                  tooltip="Dismiss"))
+        self.panel_lay.addLayout(head)
+        self.panel_lay.addWidget(label(question, 13, T.TEXT_MUTED, wrap=True))
+        self.panel_lay.addSpacing(10)
+        self.panel_lay.addWidget(ModelOffNotice(self.state))
+        self.panel_lay.addStretch(1)
+
+    def _on_model_off(self):
+        """The switch moved after this question was sent."""
+        if not self._busy:
+            return
+        self._busy = False
+        self._wake.stop()
+        self._show_model_off(getattr(self, "_question", ""))
+
     def dismiss(self):
         self.panel.hide()
         clear_layout(self.panel_lay)
@@ -170,8 +208,30 @@ class AskBar(QFrame):
         if getattr(self, "status", None) is not None:
             self.status.set_static(text, color)
 
-    def _on_cold(self):
+    def _on_via(self, tag: str) -> None:
+        """Claude mode: 'via Claude · Haiku' arrives early in the stream."""
         if self._busy:
+            self._via = tag
+
+    def _on_claude_unavailable(self, reason: str, message: str) -> None:
+        """Claude failed — replace the answer panel content with the notice."""
+        if not self._busy:
+            return
+        self._busy = False
+        self._wake.stop()
+        if not self.panel.isVisible():
+            self._open_panel(getattr(self, "_question", ""))
+        clear_layout(self.panel_lay)
+        head = hbox(s=8)
+        head.addStretch(1)
+        head.addWidget(ClickLabel("✕", 11, T.TEXT_GHOST, on_click=self.dismiss,
+                                  tooltip="Dismiss"))
+        self.panel_lay.addLayout(head)
+        self.panel_lay.addWidget(ClaudeUnavailableNotice(self.state, message))
+        self.panel_lay.addStretch(1)
+
+    def _on_cold(self):
+        if self._busy and getattr(self.state, "model_mode", "local") != "claude":
             self._cold = True
 
     def _on_wake(self):
@@ -198,7 +258,9 @@ class AskBar(QFrame):
         if not self._busy:
             return
         self._wake.stop()
-        self._status("◇ ANSWER · GENERATED LOCALLY", T.INFO)
+        status_text = (f"◇ ANSWER · {self._via.upper()}" if self._via
+                       else "◇ ANSWER · GENERATED LOCALLY")
+        self._status(status_text, T.INFO)
         self._acc += text
         self.answer.setText(self._acc)
         vsb = self.panel_scroll.verticalScrollBar()
@@ -216,8 +278,11 @@ class AskBar(QFrame):
             # (#34). _on_chunk already sets it static when text does arrive.
             self._status(NO_REPLY_STATUS, T.TEXT_FAINT)
             self.answer.setText(NO_REPLY_TEXT)
-        self.foot.setText(f"answered on-device · {T.MODEL_NAME} · "
-                          "0 tokens sent externally")
+        if self._via:
+            self.foot.setText(self._via)
+        else:
+            self.foot.setText(f"answered on-device · {T.MODEL_NAME} · "
+                              "0 tokens sent externally")
         # "open in Chat" is offered whenever there's an answer to carry over —
         # it no longer depends on a persisted thread (there isn't one, #24).
         if self._acc:

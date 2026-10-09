@@ -506,3 +506,24 @@ async def test_a_failed_calendar_refresh_never_fails_the_sync(tmp_path):
     _store, sync, _queue, writer = calendar_sync(tmp_path, _client(), calendar=Boom())
     assert await sync.sync_once() is True
     assert len(writer.created) == 1
+
+
+async def test_model_paused_skips_ai_enrichment(tmp_path):
+    # Canvas's "Lumen powered" passes are the other background model load; the
+    # Settings switch turns them off the same way it turns off chat.
+    from lumen.daemon.connectors.canvas_prefs import CanvasPrefs
+    conn = db.connect(tmp_path / "e.db")
+    store, prefs = CanvasStore(conn), CanvasPrefs(conn)
+    prefs.set_sync_enabled(True)
+    prefs.set_ai_mode(True)
+
+    class BoomLLM:
+        async def chat(self, messages):
+            raise AssertionError("the model must not be touched while paused")
+            yield ""
+
+    sync = CanvasSync(store, CanvasConfig(enabled=True),
+                      client_factory=lambda: _client(), prefs=prefs,
+                      llm=BoomLLM())
+    sync.model_paused = lambda: True
+    assert await sync._enrich() == {}

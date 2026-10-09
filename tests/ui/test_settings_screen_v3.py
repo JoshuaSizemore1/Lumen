@@ -96,7 +96,10 @@ def test_rules_section_lists_each_rule_with_toggle_and_delete(qtbot):
 
     texts = [c.text() for c in w.findChildren(QLabel)]
     assert "Bills" in texts and "Bank" in texts
-    assert len(w.findChildren(Switch)) == 2               # one per rule
+    # One switch per rule. The page also carries the local-model switch, so
+    # count the rule ones rather than every Switch on the screen.
+    rule_switches = [sw for sw in w.findChildren(Switch) if sw is not w.model_switch]
+    assert len(rule_switches) == 2
     assert any(c.text() == "✕" for c in w.findChildren(ClickLabel))
 
 

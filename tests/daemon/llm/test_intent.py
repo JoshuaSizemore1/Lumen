@@ -39,7 +39,8 @@ async def test_llm_down_degrades_to_empty():
 async def test_prompt_carries_message_and_label_menu():
     llm = FakeLLM("NONE")
     await intent.classify(llm, "any emals from Ada?")
-    assert llm.messages[-1]["content"] == "any emals from Ada?"
+    # Framed as data to classify, not a message to answer (Claude, 2026-09-24).
+    assert llm.messages[-1]["content"] == "Message to classify:\nany emals from Ada?"
     system = llm.messages[0]["content"]
     for label in intent.LABELS:
         assert label in system

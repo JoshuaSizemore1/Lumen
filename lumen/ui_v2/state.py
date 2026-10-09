@@ -141,6 +141,9 @@ class AppState(QObject):
     toast_requested = pyqtSignal(str)
     accent_requested = pyqtSignal(str)    # accent hex from the settings picker
     status_requested = pyqtSignal(str)    # transient status line (daemon offline/errors)
+    # The local model switch flipped (either end: the user, or a daemon reply
+    # correcting a stale UI). Every AI surface repaints off this.
+    model_state_changed = pyqtSignal()
 
     def __init__(self, data=None, chat=None, confirm=None):
         super().__init__()
@@ -171,6 +174,16 @@ class AppState(QObject):
         # user who turns it off gets the click-to-load bar back.
         self.load_remote_images = True
 
+        # The local model switch. Optimistic default: the app opens assuming the
+        # model is on, and the daemon's settings.get corrects it a moment later
+        # — so a slow daemon never flashes a false "model is off" notice.
+        self.model_enabled = True
+        # Claude-backend mode (off | local | claude) and chosen Claude sub-model.
+        # Default to local so the UI never flashes "Claude mode" before the first
+        # settings.get reply arrives.
+        self.model_mode: str = "local"
+        self.model_claude_model: str = "haiku"
+
         self.suggestions: list[dict] = []
         self.proposed_procedures: list[dict] = []
         self.active_procedures: list[dict] = []
@@ -184,9 +197,12 @@ class AppState(QObject):
             if chat is not None:
                 self.attach_confirm_source(chat)
                 self.attach_compose_source(chat)
+                # A streamed turn that comes back "model off" is the daemon
+                # telling us the switch moved (another window, an edited DB).
+                chat.model_off.connect(self._on_model_off)
             self.refresh_todos()
             self.refresh_books()
-            self.fetch_settings(self._apply_mail_settings)
+            self.fetch_settings(self._apply_startup_settings)
             self.sync_inbox()    # launch → immediate Gmail delta-sync
             self.refresh_suggestions()
             self.refresh_procedures()
@@ -247,7 +263,14 @@ class AppState(QObject):
 
     def warm_model(self) -> None:
         """Preload the model when the user engages the launcher, so the cold
-        start happens behind their typing instead of after they hit enter."""
+        start happens behind their typing instead of after they hit enter.
+
+        Skipped in off or claude mode — off has nothing to warm, and claude's
+        `warm` is a daemon no-op (the CLI process is short-lived per request).
+        Also skipped when model_enabled is False regardless of how it got there,
+        so a direct assignment (test helpers, old callers) is still honoured."""
+        if self.model_mode != "local" or not self.model_enabled:
+            return
         if self._chat is not None:
             self._chat.send("warm", {})
 
@@ -579,9 +602,23 @@ class AppState(QObject):
             self._data.request("memory.procedures", {}, self._set_procedures)
 
     def fetch_settings(self, cb) -> None:
-        """One-shot read of the live daemon config for the Settings screen."""
-        if self._data is not None:
-            self._data.request("settings.get", {}, cb)
+        """One-shot read of the live daemon config for the Settings screen.
+
+        Every reply refreshes the model-switch cache on the way past, whoever
+        asked for it — so opening Settings (or any screen that reads settings)
+        also corrects a switch that moved elsewhere."""
+        if self._data is None:
+            return
+
+        def done(snapshot):
+            self._apply_model_settings(snapshot)
+            cb(snapshot)
+        self._data.request("settings.get", {}, done)
+
+    def _apply_startup_settings(self, snapshot) -> None:
+        """The startup read: fetch_settings has already applied the model
+        switch, so this only adds the mail-image cache."""
+        self._apply_mail_settings(snapshot)
 
     def _apply_mail_settings(self, snapshot) -> None:
         """Cache the image-loading preference so the reading pane can decide
@@ -589,6 +626,95 @@ class AppState(QObject):
         if isinstance(snapshot, dict):
             mail = snapshot.get("mail") or {}
             self.load_remote_images = bool(mail.get("load_remote_images", True))
+
+    # ---- model mode (off | local | claude) + enabled flag ---------------
+    def _apply_model_settings(self, snapshot) -> None:
+        """Mirror the daemon's model state. Every settings.get reply carries it,
+        so any screen that refreshes settings also keeps this current.
+
+        Tolerant of older daemons that only send `enabled`: when `mode` is
+        absent, derive it from `enabled` (True → local, False → off)."""
+        if not isinstance(snapshot, dict) or "model" not in snapshot:
+            return
+        m = snapshot["model"] or {}
+        mode = m.get("mode")
+        if mode not in ("off", "local", "claude"):
+            # Old daemon: derive from the enabled flag.
+            mode = "off" if not m.get("enabled", True) else "local"
+        claude_model = m.get("claude_model") or "haiku"
+        enabled = (mode != "off")
+        changed = (
+            mode != self.model_mode
+            or claude_model != self.model_claude_model
+            or enabled != self.model_enabled
+        )
+        self.model_mode = mode
+        self.model_claude_model = claude_model
+        self.model_enabled = enabled
+        if changed:
+            self.model_state_changed.emit()
+
+    def _set_model_enabled(self, on: bool) -> None:
+        """Legacy helper: flip enabled/mode without a full snapshot."""
+        new_mode = "local" if on else "off"
+        changed = (on != self.model_enabled or new_mode != self.model_mode)
+        self.model_enabled = on
+        self.model_mode = new_mode
+        if changed:
+            self.model_state_changed.emit()
+
+    def _on_model_off(self) -> None:
+        """Stream event: the local model was off for this turn."""
+        self._set_model_enabled(False)
+
+    def set_model_enabled(self, on: bool, cb=None) -> None:
+        """Flip the switch. The daemon owns the value — the reply, not the
+        click, is what moves the UI, so a failed write can't desync them."""
+        if self._data is None:
+            self._set_model_enabled(on)
+            if cb:
+                cb({"model": {"enabled": on}})
+            return
+
+        def done(result):
+            self._apply_model_settings(result if isinstance(result, dict) else {})
+            if cb:
+                cb(result)
+        self._data.request("model.set_enabled", {"enabled": on}, done)
+
+    def set_model_mode(self, mode: str, cb=None) -> None:
+        """Switch between off / local / claude. The daemon reply carries the
+        full model_state dict and moves the UI."""
+        if self._data is None:
+            self._apply_model_settings(
+                {"model": {"mode": mode, "enabled": mode != "off",
+                           "claude_model": self.model_claude_model}})
+            if cb:
+                cb({"model": {"mode": mode}})
+            return
+
+        def done(result):
+            self._apply_model_settings(result if isinstance(result, dict) else {})
+            if cb:
+                cb(result)
+        self._data.request("model.set_mode", {"mode": mode}, done)
+
+    def set_claude_model(self, model_key: str, cb=None) -> None:
+        """Choose haiku or sonnet. The daemon reply updates the full state."""
+        if self._data is None:
+            changed = model_key != self.model_claude_model
+            self.model_claude_model = model_key
+            if changed:
+                self.model_state_changed.emit()
+            if cb:
+                cb({"model": {"claude_model": model_key}})
+            return
+
+        def done(result):
+            self._apply_model_settings(result if isinstance(result, dict) else {})
+            if cb:
+                cb(result)
+        self._data.request("model.set_claude_model", {"model": model_key}, done)
 
     def approve_procedure(self, slug: str) -> None:
         if self._data is not None:

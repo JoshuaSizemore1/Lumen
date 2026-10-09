@@ -18,11 +18,13 @@ from pathlib import Path
 from lumen.daemon.connectors import free_slots, local_files, mail_rules
 from lumen.daemon import local_tools
 from lumen.daemon.connectors.capture import classify
+from lumen.daemon.connectors.connection_state import ConnectionState
 from lumen.daemon.llm import (commitments, intent, label_keywords,
                               label_suggest, meeting_prep, notes_qa, triage)
 from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
+from lumen.daemon.llm.claude_cli import ClaudeUnavailable
 from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
                                             revise_email)
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
@@ -756,6 +758,18 @@ class Router:
             "canvas": {"connected": cs["connected"], "enabled": enabled("canvas")},
         }
 
+    def _model_state(self) -> dict:
+        """Full model-state dict (Daemon ↔ UI contract). With LLMBackend
+        returns the full spec shape; with a legacy client returns the old shape
+        so existing tests keep working."""
+        if hasattr(self._llm, "model_state"):
+            return self._llm.model_state()
+        result: dict = {"enabled": self.model_enabled()}
+        m = getattr(self._llm, "model", None)
+        if m is not None:
+            result["name"] = m
+        return result
+
     def _calendar_enabled(self) -> bool:
         """#38's runtime Disable. The poll loops consult it every tick; a manual
         refresh has to as well, or "disabled" would still mean "talks to Google
@@ -948,6 +962,14 @@ class Router:
                 return name
         return "chat"
 
+    def model_enabled(self) -> bool:
+        """The Settings model switch. With LLMBackend delegates to mode != off;
+        without it falls back to the legacy ConnectionState check so tests with
+        a FakeLLM keep working unchanged."""
+        if hasattr(self._llm, "mode"):
+            return self._llm.mode != "off"
+        return (self._connection_state is None
+                or self._connection_state.enabled(ConnectionState.MODEL))
 
     # --- fire-and-forget work (todo-fixes #60) ---------------------------
     # Some routes have a Gmail write to do but nothing to say about it. Holding
@@ -983,14 +1005,26 @@ class Router:
         return type_ in EXCLUSIVE_ROUTES
 
     async def handle(self, type_: str, payload: dict) -> AsyncIterator[dict]:
+        # One gate in front of every model-touching route (see the route lists
+        # above) rather than a check scattered through each branch: a route
+        # added later is covered by naming it in one place.
+        if not self.model_enabled():
+            if type_ in _MODEL_STREAM_ROUTES:
+                yield {"model_off": True}
+                yield {"done": True}
+                return
+            if type_ in _MODEL_RESULT_ROUTES:
+                yield {"result": {"model_off": True}}
+                return
+            if type_ in _MODEL_SILENT_ROUTES:
+                return
         if type_ == "chat":
             message = payload.get("message", "")
-            # Tell the UI only when this turn genuinely pays a model load, so it
-            # says "cold start" only then — not on every slow prompt-eval (#22).
-            # Emitted first, before any sub-path touches the model; the UI treats
-            # the absence of this event as "warm". A client that can't report
-            # load state degrades to warm (no false alarm), never an error.
-            if hasattr(self._llm, "is_loaded") and not await self._llm.is_loaded():
+            # In Claude mode: emit a "via" label so the UI shows the backend.
+            # In local mode: tell the UI only when a cold load actually happens.
+            if hasattr(self._llm, "mode") and self._llm.mode == "claude":
+                yield {"via": self._llm.model}
+            elif hasattr(self._llm, "is_loaded") and not await self._llm.is_loaded():
                 yield {"cold_start": True}
             # Quick capture (launcher only sets capture_ok): note-shaped text
             # becomes a todo instead of a chat turn — before any conversation
@@ -1105,6 +1139,14 @@ class Router:
                     acct["enabled"] = (self._connection_state.enabled(name)
                                        if self._connection_state is not None
                                        else True)
+                # The model switch lives in the same runtime state as the
+                # per-connection pauses, so the snapshot builder (pure over
+                # Config) can't know it either — injected here alongside them.
+                # With LLMBackend, merge in the full live state; legacy path
+                # just sets "enabled" as before.
+                if hasattr(self._llm, "refresh_status"):
+                    await self._llm.refresh_status()
+                snap.setdefault("model", {}).update(self._model_state())
                 yield {"result": snap}
         elif type_ == "google.reconnect":
             # Settings 'Reconnect' button — re-run the Google consent flow when
@@ -1151,6 +1193,65 @@ class Router:
             if self._canvas is not None:
                 self._canvas.clear_session()
             yield {"result": self._canvas_status()}
+        elif type_ == "model.status":
+            yield {"result": {"model": self._model_state()}}
+        elif type_ == "model.set_mode":
+            # Off | Local | Claude selector (spec: Daemon ↔ UI contract).
+            if not hasattr(self._llm, "set_mode"):
+                yield {"error": "model.set_mode unavailable"}
+                return
+            mode = str(payload.get("mode") or "")
+            if mode not in ("off", "local", "claude"):
+                yield {"error": "model.set_mode: mode must be 'off', 'local', or 'claude'"}
+                return
+            prev = self._llm.mode
+            self._llm.set_mode(mode)
+            if prev == "local" and mode != "local":
+                try:
+                    await self._llm.unload()
+                except Exception:
+                    log.debug("ollama unload on mode switch failed", exc_info=True)
+            if mode == "claude":
+                # Settings rebuilds from this reply: without a probe it would
+                # show "not installed" until the next settings.get.
+                await self._llm.refresh_status()
+            yield {"result": {"model": self._model_state()}}
+        elif type_ == "model.set_claude_model":
+            # Switch between haiku and sonnet.
+            if not hasattr(self._llm, "set_claude_model"):
+                yield {"error": "model.set_claude_model unavailable"}
+                return
+            key = str(payload.get("model") or "")
+            try:
+                self._llm.set_claude_model(key)
+            except ValueError as e:
+                yield {"error": str(e)}
+                return
+            yield {"result": {"model": self._model_state()}}
+        elif type_ == "model.set_enabled":
+            # Legacy switch: false→off, true→restore last non-off mode.
+            # Kept so existing UI code that hasn't adopted set_mode still works.
+            if hasattr(self._llm, "set_mode_enabled"):
+                on = bool(payload.get("enabled"))
+                prev_mode = self._llm.mode
+                self._llm.set_mode_enabled(on)
+                if not on or (on and prev_mode == "local" and self._llm.mode != "local"):
+                    try:
+                        await self._llm.unload()
+                    except Exception:
+                        log.debug("model unload on set_enabled failed", exc_info=True)
+                yield {"result": {"model": self._model_state()}}
+            elif self._connection_state is None:
+                yield {"error": "model switch unavailable"}
+            else:
+                on = bool(payload.get("enabled"))
+                self._connection_state.set_enabled(ConnectionState.MODEL, on)
+                if not on:
+                    try:
+                        await self._llm.unload()
+                    except Exception:
+                        log.debug("model unload on disable failed", exc_info=True)
+                yield {"result": {"model": self._model_state()}}
         elif type_ == "connections.set_enabled":
             # #38 Disable/Enable: pause or resume a connection's sync without
             # touching its login. Persisted, so it survives a restart; the poll
@@ -2187,6 +2288,10 @@ class Router:
                     [{"role": "system", "content": system},
                      {"role": "user", "content": user}]):
                 topic += chunk
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2217,6 +2322,10 @@ class Router:
         try:
             async for chunk in self._llm.chat(messages):
                 yield {"chunk": chunk}
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2321,6 +2430,10 @@ class Router:
         try:
             res = await commitments.scan(self._llm, self._mail_store,
                                          self._suggestions)
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2369,6 +2482,10 @@ class Router:
         try:
             async for chunk in compose_briefing(self._llm, self._briefing_sections()):
                 yield {"chunk": chunk}
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2435,6 +2552,10 @@ class Router:
         try:
             async for chunk in meeting_prep.compose_prep(self._llm, data):
                 yield {"chunk": chunk}
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2447,6 +2568,10 @@ class Router:
             await self._notes.reindex()
             hits = (await self._notes.search(message, k=NOTES_K)
                     if self._notes.file_count() else [])
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2464,6 +2589,10 @@ class Router:
         try:
             async for chunk in notes_qa.compose_answer(self._llm, message, data):
                 yield {"chunk": chunk}
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -2472,6 +2601,10 @@ class Router:
     async def _recommend_chat(self, message: str):
         try:
             result = await self._recommend(message)
+        except ClaudeUnavailable as e:
+            yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+            yield {"done": True}
+            return
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
@@ -3068,6 +3201,10 @@ class Router:
             try:
                 async for chunk in self._llm.chat(messages):
                     yield {"chunk": chunk}
+            except ClaudeUnavailable as e:
+                yield {"claude_unavailable": {"reason": e.reason, "message": str(e)}}
+                yield {"done": True}
+                return
             except LLMUnavailable as e:
                 yield {"error": str(e)}
                 return
@@ -3136,6 +3273,9 @@ class Router:
                         messages, tools, executor, model=model,
                         max_iterations=self._max_iterations):
                     await queue.put(ev)
+            except ClaudeUnavailable as e:
+                await queue.put({"_pump_claude_err": {"reason": e.reason,
+                                                       "message": str(e)}})
             except LLMUnavailable as e:
                 await queue.put({"_pump_error": str(e)})
             finally:
@@ -3144,6 +3284,10 @@ class Router:
         task = asyncio.create_task(pump())
         try:
             while (ev := await queue.get()) is not done:
+                if "_pump_claude_err" in ev:
+                    yield {"claude_unavailable": ev["_pump_claude_err"]}
+                    yield {"done": True}
+                    return
                 if "_pump_error" in ev:
                     yield {"error": ev["_pump_error"]}
                     return

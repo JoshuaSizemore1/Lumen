@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import QFrame, QLineEdit, QWidget
 from .. import theme as T
 from ..components import accent_fill
 from ..widgets import (
-    NO_REPLY_STATUS, NO_REPLY_TEXT, ClickLabel, ClickRow, Dot, ElideLabel,
-    TypingDots, button, clear_layout,
+    NO_REPLY_STATUS, NO_REPLY_TEXT, ClickLabel, ClickRow, ClaudeUnavailableNotice,
+    Dot, ElideLabel, ModelOffNotice, TypingDots, button, clear_layout,
     empty_state, font, hbox, hline, label, scroll, vbox, vline,
 )
 
@@ -27,12 +27,14 @@ class ChatScreen(QWidget):
         self.chat = chat_client
         self._busy = False
         self._cold = False    # set by the daemon when this turn actually loads the model
+        self._via = ""        # "via Claude · Haiku" tag, set by the via stream event
         self._acc = ""
         self._messages: list[dict] = []
         self._conversations: list[dict] = []
         self.resp_label = None
         self.tool_label = None
         self.status = None
+        self._holder = None    # the in-flight answer bubble, if any
 
         root = hbox(self, (0, 0, 0, 0), 0)
 
@@ -63,9 +65,11 @@ class ChatScreen(QWidget):
         hrow.addWidget(self.title)
         hrow.addStretch(1)
         model = hbox(s=6)
-        model.addWidget(Dot(6, T.OK))
-        model.addWidget(label(f"local · {T.MODEL_NAME}", 10, T.TEXT_MUTED,
-                              mono=True))
+        self.model_dot = Dot(6, T.OK)
+        model.addWidget(self.model_dot)
+        self.model_lab = label(f"local · {T.MODEL_NAME}", 10, T.TEXT_MUTED,
+                               mono=True)
+        model.addWidget(self.model_lab)
         hrow.addLayout(model)
         pv.addWidget(self.head)
         pv.addWidget(hline(T.BORDER_MED))
@@ -97,13 +101,20 @@ class ChatScreen(QWidget):
             self.chat.error.connect(self._on_error)
             self.chat.tool_used.connect(self._on_tool)
             self.chat.cold_start.connect(self._on_cold)
+            self.chat.model_off.connect(self._on_model_off)
             self.chat.conversation.connect(self._on_conversation)
+            if hasattr(self.chat, "via"):
+                self.chat.via.connect(self._on_via)
+            if hasattr(self.chat, "claude_unavailable"):
+                self.chat.claude_unavailable.connect(self._on_claude_unavailable)
 
         self._wake = QTimer(self)
         self._wake.setSingleShot(True)
         self._wake.setInterval(WAKE_THRESHOLD_MS)
         self._wake.timeout.connect(self._on_wake)
 
+        self.state.model_state_changed.connect(self._sync_model_chip)
+        self._sync_model_chip()
         self._refresh_list()
         self._render_thread()
 
@@ -111,6 +122,21 @@ class ChatScreen(QWidget):
         super().showEvent(ev)
         self.state.warm_model()
         self._refresh_list()
+
+    def _sync_model_chip(self):
+        """The header's live/asleep chip. Reflects the current mode."""
+        on = self.state.model_enabled
+        mode = getattr(self.state, "model_mode", "local")
+        if not on:
+            chip_text = "model off"
+        elif mode == "claude":
+            cm = getattr(self.state, "model_claude_model", "haiku")
+            _labels = {"haiku": "Haiku 4.5", "sonnet": "Sonnet 5"}
+            chip_text = f"claude · {_labels.get(cm, cm)}"
+        else:
+            chip_text = f"local · {T.MODEL_NAME}"
+        self.model_dot.set_color(T.OK if on else T.TEXT_GHOST)
+        self.model_lab.setText(chip_text)
 
     # ---- conversation list ------------------------------------------------
     def _refresh_list(self):
@@ -219,23 +245,35 @@ class ChatScreen(QWidget):
     # ---- streaming --------------------------------------------------------
     def _send(self):
         msg = self.input.text().strip()
-        if not msg or self._busy or self.chat is None:
+        if not msg or self._busy:
+            return
+        # Before the chat-client guard: the notice is answered locally, so it
+        # does not need a daemon connection to appear.
+        if not self.state.model_enabled:
+            # Answered locally — the daemon would reply model_off anyway, and
+            # the round trip only delays the notice. The message still joins
+            # the thread so it is obvious what went unanswered.
+            self._append_user(msg)
+            self.thread_lay.addWidget(ModelOffNotice(
+                self.state, "Lumen still has your mail, calendar, and todos — "
+                            "only the answering needs the model."))
+            self.thread_lay.addStretch(1)
+            self.input.clear()
+            return
+        if self.chat is None:
             return
         self._busy = True
         self._cold = False
+        self._via = ""
         self._acc = ""
         self.input.clear()
         if not self._messages:
             self.title.setText(msg[:40])
 
-        if not self._messages:
-            clear_layout(self.thread_lay)      # drop the empty-state placeholder
-        else:
-            self.thread_lay.takeAt(self.thread_lay.count() - 1)   # drop stretch
-        self._messages.append({"role": "user", "text": msg})
-        self.thread_lay.addWidget(self._bubble("user", msg))
+        self._append_user(msg)
 
         holder = QWidget()
+        self._holder = holder
         hv = vbox(holder, (0, 0, 0, 16), 6)
         self.tool_label = label("", 10, T.TEXT_FAINT, mono=True)
         self.tool_label.hide()
@@ -265,14 +303,40 @@ class ChatScreen(QWidget):
             payload["conversation_id"] = self.state.active_conv_id
         self.chat.send("chat", payload)
 
+    def _append_user(self, msg: str):
+        """Put the user's line in the thread, opening the layout for whatever
+        follows it (a streaming bubble, or the model-off notice)."""
+        if not self._messages:
+            clear_layout(self.thread_lay)      # drop the empty-state placeholder
+        else:
+            self.thread_lay.takeAt(self.thread_lay.count() - 1)   # drop stretch
+        self._messages.append({"role": "user", "text": msg})
+        self.thread_lay.addWidget(self._bubble("user", msg))
+
+    def _on_model_off(self):
+        """The daemon answered "the switch is off" mid-turn — the switch moved
+        after this turn started. Replace the pending bubble with the notice."""
+        if not self._busy:
+            return
+        self._busy = False
+        self._wake.stop()
+        if self._holder is not None:
+            self._holder.setParent(None)
+            self._holder.deleteLater()
+            self._holder = None
+        self.thread_lay.takeAt(self.thread_lay.count() - 1)   # drop stretch
+        self.thread_lay.addWidget(ModelOffNotice(self.state))
+        self.thread_lay.addStretch(1)
+
     def _status(self, text: str, color: str):
         if self.status is not None:
             self.status.set_static(text, color)
 
     def _on_cold(self):
         # The daemon says this turn genuinely loads the model — the wake message
-        # may honestly say "cold start". Arrives well before the wake timer.
-        if self._busy:
+        # may honestly say "cold start". Guard: never set in Claude mode, since
+        # the daemon won't send cold_start there, but protect against stale signals.
+        if self._busy and getattr(self.state, "model_mode", "local") != "claude":
             self._cold = True
 
     def _on_wake(self):
@@ -293,11 +357,32 @@ class ChatScreen(QWidget):
             self.tool_label.setText(f"◆ used {name}")
             self.tool_label.show()
 
+    def _on_via(self, tag: str) -> None:
+        """Claude mode: 'via Claude · Haiku' arrives early in the stream."""
+        if self._busy:
+            self._via = tag
+
+    def _on_claude_unavailable(self, reason: str, message: str) -> None:
+        """Claude failed — replace the pending bubble with the notice."""
+        if not self._busy:
+            return
+        self._busy = False
+        self._wake.stop()
+        if self._holder is not None:
+            self._holder.setParent(None)
+            self._holder.deleteLater()
+            self._holder = None
+        self.thread_lay.takeAt(self.thread_lay.count() - 1)   # drop stretch
+        self.thread_lay.addWidget(ClaudeUnavailableNotice(self.state, message))
+        self.thread_lay.addStretch(1)
+
     def _on_chunk(self, text: str):
         if not self._busy:
             return
         self._wake.stop()
-        self._status("LUMEN", T.TEXT_FAINT)
+        # Label the in-flight bubble: "via Claude" in Claude mode, else "LUMEN".
+        status_text = self._via if self._via else "LUMEN"
+        self._status(status_text, T.TEXT_FAINT)
         self._acc += text
         self.resp_label.setText(self._acc)
 
@@ -311,6 +396,10 @@ class ChatScreen(QWidget):
             # with no text — otherwise the spinner runs forever (#34).
             self._status(NO_REPLY_STATUS, T.TEXT_FAINT)
             self.resp_label.setText(NO_REPLY_TEXT)
+        else:
+            # Show via tag in the bubble header if present.
+            if self._via:
+                self._status(self._via, T.TEXT_FAINT)
         self._messages.append({"role": "assistant", "text": self._acc})
         self._refresh_list()
         # A turn may have run add_todo/complete_todo; pull fresh state so the

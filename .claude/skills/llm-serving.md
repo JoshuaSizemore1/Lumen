@@ -74,7 +74,51 @@ so the next benchmark that shows llama.cpp "beating" Ollama doesn't restart the 
   matters later, attack Ollama's own overhead — don't add a process. Full workings in
   `docs/research/local-inference-eval.md` and the 2026-07-18 tool-accuracy spec.
 
+## Claude mode via the `claude` CLI (built 2026-09-24)
+Opt-in third mode (Settings → model: **Off / Local / Claude**). Spec + measurements:
+`docs/superpowers/specs/2026-09-24-claude-backend-design.md`. It runs on Josh's own subscription
+(Pro), not an API key. There is no second model server: each request spawns one short-lived
+`claude -p` process.
+
+- **Seam:** `daemon/llm/backend.py` `LLMBackend` wraps `OllamaClient` + `claude_cli.ClaudeCliClient`
+  and is handed to everything that used to get the `OllamaClient`, so feature modules are backend-agnostic.
+  Mode and the Haiku/Sonnet choice are stored in the SQLite `llm_state` table. `embed` **always** goes to Ollama
+  (notes search keeps `nomic-embed-text`). Entering Claude or Off unloads the Ollama chat model at once.
+- **Invocation is locked down:** `--tools "" --setting-sources "" --strict-mcp-config
+  --disable-slash-commands --no-session-persistence`, thinking off via `--settings
+  '{"alwaysThinkingEnabled":false}'`, cwd `~/.local/state/lumen/claude-cwd` (0700).
+  None of Josh's Claude Code hooks, plugins, CLAUDE.md or MCP servers apply.
+- **Privacy:** the user turn goes on stdin, and the **system prompt goes via `--system-prompt-file`**
+  (a 0600 temp file, deleted after the call). Lumen's system message carries mail/calendar/todo
+  context and the memory blob, and argv is readable in `ps`.
+- **Tool loop stays in the daemon.** Each iteration is one CLI call with `--json-schema`
+  `{tool_calls:[{name(enum), arguments}], answer}`, and the tool list is exactly the router's. This keeps the
+  confirm gates and the tool log unchanged. Haiku sometimes calls an offered tool *natively*, the CLI refuses
+  it, and then Haiku says the tool "isn't available". `_run_json_call` harvests those native calls as the
+  real request and stops the run at the refusal. It also repeats the framing at the end of the prompt.
+- **Plain `chat()`** appends a one-line "never write tool-call markup" note. Without it, Haiku typed fake
+  `<function_calls>` XML when routed to plain chat. Keep the note one line: a chattier note talked Haiku
+  into prose on strict-format calls (intent labels, triage).
+- **Usage:** every run emits `rate_limit_event` (5h/7d utilization), which is cached for Settings and for the
+  background backoff (canvas/memory worker pause at ≥ `background_pause_at`, default 0.80).
+  **`status: "allowed_warning"` still answers** (seen at 90%). Only non-`allowed*` statuses are a limit.
+  Background tasks set the `BACKGROUND` contextvar and yield the 2-slot semaphore to interactive calls.
+- **Measured live (Haiku 4.5):** plain answer 1.6–4 s. One-lookup questions 6–7 s (email, files). The book
+  lookup took 30 s (2 lookups). Briefing 3.4 s. Triage of 20 mails took 44 s. A calendar event went through
+  the confirm dialog, which still gated it. Eval: 17/19 tool-selection cases. Both misses were answered
+  from injected mail context instead of re-searching, which is acceptable. `ollama ps` was empty throughout.
+  Eval command: `LUMEN_EVAL_LIVE=1 LUMEN_EVAL_BACKEND=claude [LUMEN_EVAL_MODEL=sonnet] uv run pytest tests/eval/test_live_accuracy.py`.
+- **Failures never fall back to local** (product decision). `ClaudeUnavailable.reason` ∈ not_installed |
+  logged_out | rate_limited | offline | timeout | error. Chat paths emit `claude_unavailable` + `done` (the UI
+  notice links to Settings). Other routes return `{"error": friendly text}`.
+
 ## What NOT to do
+- Don't put anything from the system prompt in `claude` argv (see Claude mode above). Don't let Claude
+  mode silently fall back to the local model, and don't give the CLI its own tools or MCP servers. The
+  confirm gate lives in the daemon's executor.
+- Don't locate `claude` with PATH alone. A daemon launched from the desktop or systemd has no
+  `~/.local/bin` on its PATH, and it reported a working install as "not installed". Use
+  `claude_cli._resolve_cli`, which falls back to the standard install locations.
 - Don't run a second model server "just in case" — one Ollama instance, one idle-unload policy.
   (This rule pre-dated the llama.cpp experiment above and was correct; the experiment cost a day
   to arrive back at it. Check this list *before* benchmarking an alternative runtime.)

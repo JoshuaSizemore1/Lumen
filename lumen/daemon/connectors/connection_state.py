@@ -13,6 +13,11 @@ next poll without restarting anything.
 
 class ConnectionState:
     NAMES = ("gmail", "google_calendar", "canvas")
+    # The local model rides the same table but is not a "connection": it never
+    # appears in the accounts block, and Settings gives it its own switch. Kept
+    # here rather than in a table of its own because the semantics are
+    # identical — a named thing the user can pause, absent row means on.
+    MODEL = "model"
 
     def __init__(self, conn):
         self._conn = conn
