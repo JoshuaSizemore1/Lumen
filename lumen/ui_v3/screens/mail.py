@@ -13,6 +13,7 @@ from ...ui_v2 import mail_html
 from .. import theme as T
 # One image loader for both the inbox pane and the suggest-review popup (#32).
 from ..mail_body import ImageLoader as _ImageLoader
+from ..rebuild import LazyRebuild
 from ..components import MailRow, accent_fill
 from ..widgets import (
     Avatar, Chip, ClickChip, ClickLabel, ClickRow, Dot, FlowLayout, Glyph,
@@ -57,9 +58,10 @@ class _BusyOverlay(QWidget):
         ev.accept()                        # swallow clicks while busy
 
 
-class MailScreen(QWidget):
+class MailScreen(LazyRebuild, QWidget):
     def __init__(self, state):
         super().__init__()
+        self.init_rebuild()
         self.setObjectName("screen")
         self.state = state
         self._loaded_images: dict[str, str] = {}
@@ -100,7 +102,7 @@ class MailScreen(QWidget):
 
         self.busy = _BusyOverlay(self)
 
-        state.mails_changed.connect(self.rebuild)
+        state.mails_changed.connect(self.schedule_rebuild)
         self.rebuild()
 
     # ---- folder nav (collapsible mailbox column, #10) --------------------
@@ -124,9 +126,16 @@ class MailScreen(QWidget):
         return self.nav
 
     def _build_nav(self):
+        # Nothing in this column depends on which message is open, yet it was
+        # torn down and rebuilt on every selection. Rebuild only when what it
+        # actually shows has moved.
+        unread = self.state.unread_count()
+        sig = (unread, tuple(self.state.mail_labels), self.state.mail_scope)
+        if sig == getattr(self, "_nav_sig", None):
+            return
+        self._nav_sig = sig
         clear_layout(self.nav_rows_lay)
         v = self.nav_rows_lay
-        unread = self.state.unread_count()
         # Inbox here means "standard, unlabeled mail" — labeling moves a message
         # out of the inbox, so the inbox is exactly Josh's "standard" bucket.
         for key, name, count in (("inbox", "Inbox", None),
@@ -172,6 +181,7 @@ class MailScreen(QWidget):
 
     def showEvent(self, ev):
         super().showEvent(ev)
+        self.rebuild_if_dirty()      # catch up on polls that landed while hidden
         self.state.sync_inbox()
 
     # ---- header -----------------------------------------------------------
@@ -247,6 +257,10 @@ class MailScreen(QWidget):
     def _build_chips(self):
         # Scope selection (inbox/unread/sent/labels) moved to the collapsible
         # mailbox nav (#10); the chip row now carries only the action chips.
+        # Both are static, so this runs once rather than on every rebuild.
+        if getattr(self, "_chips_built", False):
+            return
+        self._chips_built = True
         clear_layout(self.chip_lay)
         self.chip_lay.addWidget(ClickChip(
             "✦ suggest labels", T.ACCENT, T.ACCENT, px=9, dashed=True,
@@ -258,20 +272,40 @@ class MailScreen(QWidget):
             tooltip="Mail rules", on_click=self.state.open_rule_editor))
 
     def _build_list(self):
-        clear_layout(self.list_lay)
+        """Reuse the rows that are already there.
+
+        This used to tear down and rebuild all fifty MailRows on every rebuild
+        — and a rebuild runs on every selection, every poll, and every body
+        that finishes loading. That was 148 ms of the 166 ms rebuild, and it is
+        what made clicking a message feel slow. Now the common case (same
+        messages, different selection or read state) touches only the rows that
+        actually changed; a real membership change still rebuilds.
+        """
         mails = self.state.mails
+        sel = self.state.selected_mail
+        rows = getattr(self, "_rows", {})
+
+        if mails and all(m["id"] in rows and rows[m["id"]].can_update_to(m)
+                         for m in mails) and len(rows) == len(mails):
+            for m in mails:
+                rows[m["id"]].update_from(m, m["id"] == sel)
+            return
+
+        clear_layout(self.list_lay)
+        self._rows = {}
         if not mails:
             self.list_lay.addWidget(empty_state(
                 "No mail matches",
                 "Clear the search or pick another label"))
             return
-        sel = self.state.selected_mail
         for m in mails:
             mid = m["id"]
-            self.list_lay.addWidget(MailRow(
+            row = MailRow(
                 m, selected=(mid == sel),
                 on_click=lambda i=mid: self.state.select_mail(i),
-                on_delete=lambda i=mid: self.state.delete_mail(i)))
+                on_delete=lambda i=mid: self.state.delete_mail(i))
+            self._rows[mid] = row
+            self.list_lay.addWidget(row)
         self.list_lay.addStretch(1)
 
     # ---- reading pane -----------------------------------------------------

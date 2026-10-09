@@ -45,6 +45,37 @@ SCREENS = tuple(k for k, _, _ in NAV) + ("settings",)
 _active_window = None   # keeps the rebuilt window alive across an accent switch
 
 
+class _LazyScreens:
+    """`window.screens` — a mapping that builds each screen on first lookup.
+
+    A plain dict here meant every screen was constructed at launch. This keeps
+    the same `screens["mail"]` / `screens.get("mail")` surface the rest of the
+    app already uses, so laziness comes from nobody touching a screen until it
+    is actually needed. `in` deliberately does NOT build: it answers "is this a
+    real screen key?", which several call sites ask before navigating.
+    """
+
+    def __init__(self, window):
+        self._w = window
+
+    def __getitem__(self, key: str):
+        if key not in SCREENS:
+            raise KeyError(key)
+        return self._w._screen(key)
+
+    def get(self, key: str, default=None):
+        return self[key] if key in SCREENS else default
+
+    def __contains__(self, key: str) -> bool:
+        return key in SCREENS
+
+    def __iter__(self):
+        return iter(SCREENS)
+
+    def items(self):
+        return ((k, self[k]) for k in SCREENS)
+
+
 def _settings() -> QSettings:
     return QSettings("lumen", "ui_v3")
 
@@ -69,20 +100,17 @@ class LumenWindow(QWidget):
         main.setObjectName("main")
         mv = vbox(main, (0, 0, 0, 0), 0)
 
+        # Screens are built the first time they are shown, not all nine at
+        # launch: constructing them eagerly cost ~424 ms of startup, most of it
+        # in Canvas and Calendar, for pages the user may never open in a
+        # session. `self.screens[key]` builds on demand, so every existing call
+        # site is unchanged — see _LazyScreens.
         self.stack = QStackedWidget()
-        self.screens = {
-            "today": TodayScreen(self.state),
-            "calendar": CalendarScreen(self.state),
-            "mail": MailScreen(self.state),
-            "todos": TodosScreen(self.state),
-            "books": BooksScreen(self.state),
-            "chat": ChatScreen(self.state, chat_client),
-            "files": FilesScreen(self.state),
-            "canvas": CanvasScreen(self.state),
-            "settings": SettingsScreen(self.state),
-        }
-        for key in SCREENS:
-            self.stack.addWidget(self.screens[key])
+        self._screen_cache: dict[str, QWidget] = {}
+        self._built = {k: False for k in SCREENS}
+        self.screens = _LazyScreens(self)
+        for _key in SCREENS:
+            self.stack.addWidget(QWidget())      # placeholder, swapped on build
         mv.addWidget(self.stack, 1)      # greedy: screens absorb the growth
 
         self.askbar = AskBar(self.state, chat_client, self._ask_context)
@@ -140,6 +168,7 @@ class LumenWindow(QWidget):
         self._update_badges()
         # The stack already sits on index 0, so setCurrentIndex(0) emits nothing
         # and the first screen would open with no nav highlight. Sync directly.
+        self._screen(SCREENS[0])                 # build the landing screen
         self.stack.setCurrentIndex(0)
         self._sync_chrome(0)
 
@@ -203,14 +232,53 @@ class LumenWindow(QWidget):
 
     # ---- behavior ---------------------------------------------------------
     def switch_to(self, key: str):
-        if key in self.screens:
+        if key in SCREENS:
+            self._screen(key)                    # built on first visit
             self.stack.setCurrentIndex(SCREENS.index(key))
+
+    # ---- lazy screen construction -----------------------------------------
+    def _screen(self, key: str) -> QWidget:
+        """The screen for `key`, building it the first time it is asked for."""
+        screen = self._screen_cache.get(key)
+        if screen is not None:
+            return screen
+        screen = self._make_screen(key)
+        self._screen_cache[key] = screen
+        self._built[key] = True
+        idx = SCREENS.index(key)
+        placeholder = self.stack.widget(idx)
+        # Signals blocked across the swap: removeWidget renumbers the stack, so
+        # it emits currentChanged for an index change that is pure bookkeeping.
+        # Letting that through ran _sync_chrome mid-swap, which asked for the
+        # screen at the shifted index and built every screen in a cascade.
+        was = self.stack.blockSignals(True)
+        try:
+            self.stack.insertWidget(idx, screen)   # takes the placeholder's slot
+            self.stack.removeWidget(placeholder)
+        finally:
+            self.stack.blockSignals(was)
+        placeholder.deleteLater()
+        return screen
+
+    def _make_screen(self, key: str) -> QWidget:
+        if key == "chat":
+            return ChatScreen(self.state, self.chat_client)
+        return {
+            "today": TodayScreen, "calendar": CalendarScreen,
+            "mail": MailScreen, "todos": TodosScreen, "books": BooksScreen,
+            "files": FilesScreen, "canvas": CanvasScreen,
+            "settings": SettingsScreen,
+        }[key](self.state)
 
     # ---- app-wide back/forward history (#18) ------------------------------
     def _current_entry(self) -> NavEntry:
         key = SCREENS[self.stack.currentIndex()]
-        screen = self.screens[key]
-        token = screen.nav_token() if hasattr(screen, "nav_token") else None
+        # Never build a screen just to record where we are: an unbuilt screen
+        # has no in-page position to remember, and forcing it would undo the
+        # lazy construction this method happens to run alongside.
+        screen = self._screen_cache.get(key)
+        token = (screen.nav_token()
+                 if screen is not None and hasattr(screen, "nav_token") else None)
         return NavEntry(key, token)
 
     def _record_location(self):

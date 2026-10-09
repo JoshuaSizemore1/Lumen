@@ -13,15 +13,17 @@ from PyQt6.QtWidgets import QFrame, QWidget
 from .. import theme as T
 from ..calendar_grids import DayColumn
 from ..components import LinkRow, MailRow, TodoRow, column_head, section_head
+from ..rebuild import LazyRebuild
 from ..widgets import (
     Chip, ClickLabel, Dot, button, clear_layout, eyebrow, font,
     hbox, hline, label, scroll, vbox, vline,
 )
 
 
-class TodayScreen(QWidget):
+class TodayScreen(LazyRebuild, QWidget):
     def __init__(self, state):
         super().__init__()
+        self.init_rebuild()
         self.setObjectName("screen")
         self.state = state
         self._events: list[dict] = []
@@ -31,14 +33,15 @@ class TodayScreen(QWidget):
         self.lay = vbox(self.inner, (34, 26, 34, 40), 0)
         outer.addWidget(scroll(self.inner), 1)
 
-        state.todos_changed.connect(self.rebuild)
-        state.mails_changed.connect(self.rebuild)
-        state.suggestions_changed.connect(self.rebuild)
+        state.todos_changed.connect(self.schedule_rebuild)
+        state.mails_changed.connect(self.schedule_rebuild)
+        state.suggestions_changed.connect(self.schedule_rebuild)
         self.rebuild()
 
     # ---- data -------------------------------------------------------------
     def showEvent(self, ev):
         super().showEvent(ev)
+        self.rebuild_if_dirty()
         today = date.today().isoformat()
         # Same debounced sync the Calendar tab uses (#59) — the agenda here is
         # the calendar too, and it was equally stuck on the daemon's cache. The

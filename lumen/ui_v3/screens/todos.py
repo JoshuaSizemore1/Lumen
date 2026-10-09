@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 
 from .. import theme as T
 from ..components import TodoRow, accent_fill
+from ..rebuild import LazyRebuild
 from ..widgets import (
     ClickRow, Dot, ProgressBar, Switch, button, clear_layout, eyebrow, font,
     hbox, hline, label, scroll, scroll_fixed, seg_button, vbox, vline,
@@ -96,9 +97,10 @@ GROUP_META = (("today", "Today", None), ("upcoming", "Upcoming", T.WARN),
               ("none", "No date", T.TEXT_MUTED))
 
 
-class TodosScreen(QWidget):
+class TodosScreen(LazyRebuild, QWidget):
     def __init__(self, state):
         super().__init__()
+        self.init_rebuild()
         self.setObjectName("screen")
         self.state = state
         self.tag_filter = "all"
@@ -117,8 +119,12 @@ class TodosScreen(QWidget):
         self.rail_lay = vbox(self.rail, (20, 24, 20, 24), 0)
         root.addWidget(scroll_fixed(self.rail, T.TODO_RAIL_W))
 
-        state.todos_changed.connect(self.rebuild)
+        state.todos_changed.connect(self.schedule_rebuild)
         self.rebuild()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.rebuild_if_dirty()   # replay changes that landed while hidden
 
     # ---- helpers ----------------------------------------------------------
     def _visible(self) -> list[dict]:

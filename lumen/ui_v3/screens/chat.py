@@ -195,10 +195,15 @@ class ChatScreen(QWidget):
             row.addStretch(1)
         bub = QFrame()
         bub.setMaximumWidth(640)
+        # Scoped by property, not by "QFrame": QLabel derives from QFrame, so a
+        # bare QFrame rule paints a box around every line of text inside the
+        # bubble as well as around the bubble.
+        bub.setProperty("cls", "bubble")
         bub.setStyleSheet(
-            f"QFrame {{ background: {accent_fill() if is_user else T.BG_FIELD};"
+            f'QFrame[cls="bubble"] {{ background:'
+            f" {accent_fill() if is_user else T.BG_FIELD};"
             f" border: 1px solid {T.ACCENT if is_user else T.BORDER_FIELD};"
-            " border-radius: 10px; }}")
+            " border-radius: 10px; }")
         bv = vbox(bub, (15, 11, 15, 11), 6)
         bv.addWidget(label("YOU" if is_user else "LUMEN", 9,
                            T.ACCENT if is_user else T.TEXT_FAINT, mono=True,
@@ -236,8 +241,9 @@ class ChatScreen(QWidget):
         hv.addWidget(self.tool_label)
         bub = QFrame()
         bub.setMaximumWidth(640)
+        bub.setProperty("cls", "bubble")      # see _bubble: QLabel is a QFrame
         bub.setStyleSheet(
-            f"QFrame {{ background: {T.BG_FIELD};"
+            f'QFrame[cls="bubble"] {{ background: {T.BG_FIELD};'
             f" border: 1px solid {T.BORDER_FIELD}; border-radius: 10px; }}")
         bv = vbox(bub, (15, 11, 15, 11), 6)
         self.status = TypingDots("◇ thinking", 9, T.INFO, ls=1.5)

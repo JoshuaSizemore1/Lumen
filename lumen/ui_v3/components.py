@@ -4,6 +4,7 @@ Mail rows and todo rows each appear twice in the mock (dense on Today, full on
 their own screen), so both take a `compact` flag rather than being duplicated.
 """
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import QFrame, QLabel, QWidget
 
 from . import theme as T
@@ -76,27 +77,35 @@ class MailRow(ClickRow):
                    s=10 if compact else 11)
 
         unread = mail.get("unread", False)
-        dot = Dot(7, T.ACCENT if unread else "transparent",
-                  border=None if unread else T.TEXT_GHOST)
+        self.mail_id = mail.get("id")
+        # Every mutable piece is kept as an attribute so `update_from` can move
+        # it in place. Selecting a message used to rebuild all fifty rows —
+        # 188 ms of teardown per click on the target hardware.
+        self.dot = Dot(7, T.ACCENT if unread else "transparent",
+                       border=None if unread else T.TEXT_GHOST)
         col = vbox(m=(0, 0, 0, 0), s=2)
         wrap = vbox(m=(0, 6, 0, 0), s=0)   # marginTop:6px on the dot
-        wrap.addWidget(dot)
+        wrap.addWidget(self.dot)
         wrap.addStretch(1)
         row.addLayout(wrap)
 
         top = hbox(m=(0, 0, 0, 0), s=8)
-        top.addWidget(label(mail.get("from", ""), 12.5,
-                            T.TEXT_PRIMARY if unread else T.TEXT_READ,
-                            700 if unread else 500, mono=True))
+        self.from_lab = label(mail.get("from", ""), 12.5,
+                              T.TEXT_PRIMARY if unread else T.TEXT_READ,
+                              700 if unread else 500, mono=True)
+        top.addWidget(self.from_lab)
         top.addStretch(1)
-        top.addWidget(label(mail.get("time", ""), 9.5, T.TEXT_FAINT, mono=True))
+        self.time_lab = label(mail.get("time", ""), 9.5, T.TEXT_FAINT, mono=True)
+        top.addWidget(self.time_lab)
         if on_delete is not None and not compact:
             top.addWidget(ClickLabel("✕", 11, T.TEXT_GHOST, on_click=on_delete,
                                      tooltip="Move to Trash"))
         col.addLayout(top)
-        col.addWidget(ElideLabel(mail.get("subj", ""), 14 if compact else 14.5,
-                                 T.TEXT_PRIMARY))
-        col.addWidget(ElideLabel(mail.get("preview", ""), 11.5, T.TEXT_MUTED))
+        self.subj_lab = ElideLabel(mail.get("subj", ""),
+                                   14 if compact else 14.5, T.TEXT_PRIMARY)
+        col.addWidget(self.subj_lab)
+        self.prev_lab = ElideLabel(mail.get("preview", ""), 11.5, T.TEXT_MUTED)
+        col.addWidget(self.prev_lab)
 
         names = mail.get("label_names") or []
         if (names or suggestion) and not compact:
@@ -120,11 +129,63 @@ class MailRow(ClickRow):
         inner.addLayout(row, 1)
         outer.addLayout(inner)
         outer.addWidget(hline(T.BORDER_FAINT))
+        self._unread = unread
+        self._labels = tuple((mail.get("label_names") or [])[:4])
+        self._has_suggestion = suggestion is not None
         self._paint_bg()
 
     def _paint_bg(self):
         bg = accent_fill() if self._selected else "transparent"
         self.setStyleSheet(f'QFrame[cls="mailrow"] {{ background: {bg}; }}')
+
+    # ---- in-place updates -------------------------------------------------
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_selected(self, on: bool) -> None:
+        """Move the highlight without rebuilding anything. Two of these replace
+        a fifty-row teardown on every click."""
+        on = on and not self._compact
+        if on == self._selected:
+            return
+        self._selected = on
+        if hasattr(self, "bar"):
+            self.bar.set_on(on)
+        self._paint_bg()
+
+    def set_unread(self, unread: bool) -> None:
+        if unread == self._unread:
+            return
+        self._unread = unread
+        self.dot.set_color(T.ACCENT if unread else "transparent",
+                           border=None if unread else T.TEXT_GHOST)
+        self.from_lab.setFont(font(12.5, 700 if unread else 500, mono=True))
+        pal = self.from_lab.palette()
+        pal.setColor(QPalette.ColorRole.WindowText,
+                     qcolor(T.TEXT_PRIMARY if unread else T.TEXT_READ))
+        self.from_lab.setPalette(pal)
+
+    def can_update_to(self, mail: dict, suggestion=None) -> bool:
+        """True when `update_from` can carry this row to the new data.
+
+        Chips are laid out at construction, so a change in the label set (or a
+        suggestion appearing/disappearing) still needs a fresh row — that is
+        rare, unlike selection and read-state, which change constantly.
+        """
+        return (mail.get("id") == self.mail_id
+                and tuple((mail.get("label_names") or [])[:4]) == self._labels
+                and (suggestion is not None) == self._has_suggestion)
+
+    def update_from(self, mail: dict, selected: bool) -> None:
+        self.set_unread(mail.get("unread", False))
+        self.set_selected(selected)
+        # ElideLabel keeps the full string on the QLabel and elides at paint
+        # time, so plain setText is the whole update.
+        for lab, key in ((self.subj_lab, "subj"), (self.prev_lab, "preview")):
+            if lab.text() != mail.get(key, ""):
+                lab.setText(mail.get(key, ""))
+        if self.time_lab.text() != mail.get("time", ""):
+            self.time_lab.setText(mail.get("time", ""))
 
 
 class TodoRow(ClickRow):
