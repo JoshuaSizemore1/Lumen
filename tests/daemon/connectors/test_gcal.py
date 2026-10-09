@@ -188,3 +188,27 @@ async def test_sync_once_api_error_keeps_stale_cache(tmp_path):
     assert await sync2.sync_once() is False
     assert [r["id"] for r in store.list_range("2026-01-01", "2026-12-31")] == ["t1"]
     assert store.last_sync() == before
+
+
+# --- #59: manual refresh means two callers can now sync at once --------------
+async def test_overlapping_syncs_collapse_into_one_fetch(tmp_path):
+    """Until #59 only the 5-minute poll tick ever called sync_once, so it could
+    never race itself. Now a Canvas write and a user pressing ↻ can both land
+    inside one poll tick, and pulling the whole window twice is pure cost on a
+    laptop that has none to spare — so the second caller rides the first."""
+    import asyncio
+
+    service = FakeService([CALS[0]], {"primary": [{"items": [TIMED]}]})
+    store, sync = make_sync(tmp_path, service)
+    results = await asyncio.gather(sync.sync_once(), sync.sync_once())
+    assert results == [True, True]                 # both callers see a success
+    assert len(service.events_api.seen_kwargs) == 1
+    assert [r["id"] for r in store.list_range("2026-01-01", "2026-12-31")] == ["t1"]
+
+
+async def test_busy_reports_a_sync_in_flight(tmp_path):
+    service = FakeService([CALS[0]], {"primary": [{"items": [TIMED]}]})
+    _store, sync = make_sync(tmp_path, service)
+    assert sync.busy is False
+    await sync.sync_once()
+    assert sync.busy is False

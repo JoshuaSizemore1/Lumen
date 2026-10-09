@@ -26,7 +26,7 @@ class CanvasSync:
     def __init__(self, store: CanvasStore, canvas_cfg, *,
                  todos=None, llm=None, client_factory=None, session_path=None,
                  markers=None, prefs=None, queue=None, alerts=None,
-                 proposals=None, events=None):
+                 proposals=None, events=None, calendar=None):
         self._store = store
         self._cfg = canvas_cfg
         self._todos = todos
@@ -45,6 +45,7 @@ class CanvasSync:
         self._queue = queue              # CanvasQueue (proposed removals)
         self._alerts = alerts            # CanvasAlerts
         self._events = events            # EventStore, for conflict detection
+        self._calendar = calendar        # CalendarSync, to re-read what we wrote
         self._proposals = proposals      # CanvasProposals (AI, never auto-created)
         self._sync_lock = asyncio.Lock()
         # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
@@ -212,7 +213,32 @@ class CanvasSync:
         counts = canvas_calendar.commit_calendar(
             self._store, self._queue, self._alerts, results, conflicts)
         log.info("canvas calendar: %s", counts)
+        await self._refresh_calendar_cache(counts)
         return counts
+
+    async def _refresh_calendar_cache(self, counts: dict) -> None:
+        """Pull what we just wrote back into the local event cache (#59).
+
+        These events are created straight on Google through CalendarMarkerWriter.
+        The calendar screen never talks to Google — `calendar.list` only reads
+        the cache CalendarSync fills — so until that cache is refreshed a new
+        assignment simply does not exist as far as the UI is concerned. Its only
+        refreshers were the 5-minute poll tick and daemon startup, which is why
+        Josh's fix was to close Lumen entirely.
+
+        Every user-initiated write in the router already re-syncs for exactly
+        this reason ("show the new event promptly"); the background path was the
+        one that never did. Gated on a real write so an idle tick — the common
+        case — still costs nothing, and swallowed so a Google outage on the
+        re-read can't cost us the Canvas mirror we just earned."""
+        if self._calendar is None:
+            return
+        if not any(counts.get(k) for k in ("created", "updated", "recreated")):
+            return
+        try:
+            await self._calendar.sync_once()
+        except Exception:
+            log.exception("calendar re-read after canvas write failed")
 
     def _conflicts(self, actions):
         """Deterministic overlap check against the cached calendar window — no

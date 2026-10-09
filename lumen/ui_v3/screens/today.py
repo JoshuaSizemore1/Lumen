@@ -40,10 +40,15 @@ class TodayScreen(QWidget):
     def showEvent(self, ev):
         super().showEvent(ev)
         today = date.today().isoformat()
-        self.state.fetch_calendar(today, today, self._on_events)
+        # Same debounced sync the Calendar tab uses (#59) — the agenda here is
+        # the calendar too, and it was equally stuck on the daemon's cache. The
+        # debounce is shared state, so opening both tabs still costs one sync.
+        self.state.sync_calendar(today, today, self._on_events)
         self.state.refresh_manabi()
 
     def _on_events(self, result: dict):
+        if result.get("error"):
+            return
         self._events = result.get("events", [])
         self.rebuild()
 

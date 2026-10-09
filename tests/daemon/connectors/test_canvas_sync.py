@@ -290,7 +290,7 @@ class FakeWriter:
         return True
 
 
-def calendar_sync(tmp_path, client, *, sync_on=True):
+def calendar_sync(tmp_path, client, *, sync_on=True, calendar=None):
     from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
     from lumen.daemon.connectors.canvas_prefs import CanvasPrefs
     from lumen.daemon.connectors.canvas_queue import CanvasQueue
@@ -300,7 +300,8 @@ def calendar_sync(tmp_path, client, *, sync_on=True):
     queue, alerts, writer = CanvasQueue(conn), CanvasAlerts(conn), FakeWriter()
     sync = CanvasSync(store, CanvasConfig(enabled=True),
                       client_factory=lambda: client, markers=writer,
-                      prefs=prefs, queue=queue, alerts=alerts)
+                      prefs=prefs, queue=queue, alerts=alerts,
+                      calendar=calendar)
     sync.set_session({"canvas_session": "abc"})
     return store, sync, queue, writer
 
@@ -383,3 +384,85 @@ async def test_a_calendar_failure_does_not_fail_the_sync(tmp_path):
     sync._markers = Boom()
     assert await sync.sync_once() is True
     assert [a["name"] for a in store.assignments()] == ["HW1"]
+
+
+# --- #59: the calendar cache must see what the Canvas pass just wrote ---------
+class FakeCalendarCache:
+    """Stands in for CalendarSync — the local gcal mirror that the UI's
+    `calendar.list` reads. Canvas writes go straight to Google through
+    CalendarMarkerWriter, so this cache is the only thing standing between a
+    newly-created assignment event and the calendar screen."""
+
+    def __init__(self, ok=True):
+        self.synced = 0
+        self._ok = ok
+
+    @property
+    def busy(self):
+        return False
+
+    async def sync_once(self):
+        self.synced += 1
+        return self._ok
+
+
+async def test_creating_canvas_events_refreshes_the_calendar_cache(tmp_path):
+    """#59: Josh had to close Lumen entirely before new Canvas assignments
+    showed on the calendar. The events really were on Google — but the daemon's
+    event cache, which is all `calendar.list` ever reads, was only refreshed by
+    CalendarSync's 5-minute tick and by daemon startup. A restart was simply the
+    fastest way to force that refresh."""
+    cal = FakeCalendarCache()
+    _store, sync, _queue, writer = calendar_sync(tmp_path, _client(), calendar=cal)
+    assert await sync.sync_once() is True
+    assert len(writer.created) == 1
+    assert cal.synced == 1
+
+
+async def test_a_pass_that_writes_nothing_does_not_touch_google(tmp_path):
+    """The refresh is a real Calendar API round trip. It is owed only to a pass
+    that actually changed something — otherwise every idle poll tick would pull
+    the whole window down again, on a laptop where that cost is the constraint."""
+    cal = FakeCalendarCache()
+    _store, sync, _queue, _writer = calendar_sync(tmp_path, _client(),
+                                                  calendar=cal, sync_on=False)
+    assert await sync.sync_once() is True
+    assert cal.synced == 0
+
+
+async def test_a_steady_state_resync_does_not_refresh_again(tmp_path):
+    """First pass creates and refreshes; the second plans no actions at all, so
+    it must stay silent. This is the common case — most poll ticks change
+    nothing."""
+    cal = FakeCalendarCache()
+    _store, sync, _queue, _writer = calendar_sync(tmp_path, _client(), calendar=cal)
+    await sync.sync_once()
+    assert cal.synced == 1
+    await sync.sync_once()
+    assert cal.synced == 1
+
+
+async def test_a_queued_removal_alone_refreshes_nothing(tmp_path):
+    """Removals are only ever *proposed* — the loop never deletes from Google.
+    Nothing changed there, so there is nothing to re-read."""
+    cal = FakeCalendarCache()
+    _store, sync, queue, writer = calendar_sync(tmp_path, _client(), calendar=cal)
+    await sync.sync_once()
+    cal.synced = 0
+    sync._client_factory = lambda: _client(submitted=True)
+    await sync.sync_once()
+    assert queue.count() == 1
+    assert writer.deleted == []
+    assert cal.synced == 0
+
+
+async def test_a_failed_calendar_refresh_never_fails_the_sync(tmp_path):
+    """The Canvas mirror is the valuable part; a Google outage on the refresh
+    must not cost it — same rule the write half already follows."""
+    class Boom(FakeCalendarCache):
+        async def sync_once(self):
+            raise RuntimeError("google is down")
+
+    _store, sync, _queue, writer = calendar_sync(tmp_path, _client(), calendar=Boom())
+    assert await sync.sync_once() is True
+    assert len(writer.created) == 1

@@ -62,7 +62,10 @@ async def run() -> None:
                         session_path=cfg.canvas.session_path,
                         markers=markers, prefs=canvas_prefs,
                         queue=canvas_queue, alerts=canvas_alerts,
-                        proposals=canvas_proposals, events=events)
+                        proposals=canvas_proposals, events=events,
+                        # #59: re-read the window after Canvas writes to it, or
+                        # the new assignments sit on Google unseen by the UI.
+                        calendar=calendar)
     # Before any task starts, so `connected` is already true for the first
     # status query a freshly-launched UI makes.
     canvas.restore_session()

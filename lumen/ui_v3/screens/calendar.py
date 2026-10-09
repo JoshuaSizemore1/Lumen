@@ -135,9 +135,28 @@ class CalendarScreen(QWidget):
         self.body_lay = vbox(self.body, (0, 0, 0, 0), 0)
         root.addWidget(self.body, 1)     # greedy: the grid absorbs growth
 
+    # Below this the header cannot seat every control at its natural width, and
+    # Qt clips labels mid-word rather than dropping anything.
+    LEGEND_MIN_W = 1180
+
+    def _fit_header(self):
+        self.legend.setVisible(self.width() >= T.sc(self.LEGEND_MIN_W))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._fit_header()
+
     def showEvent(self, ev):
         super().showEvent(ev)
-        self.refresh()
+        # Also here: a widget that has never been shown gets no resize event, so
+        # the first paint would otherwise use whatever the last resize decided.
+        self._fit_header()
+        # Entering the tab is the moment the user expects to be looking at
+        # current data (#59). Before this it re-read the daemon's event cache,
+        # which no amount of clicking could ever move — so a Canvas assignment
+        # created since the last poll tick stayed invisible until Lumen was
+        # restarted. Debounced in AppState to one Google sync a minute.
+        self.sync()
 
     # ---- header -----------------------------------------------------------
     def _header(self) -> QWidget:
@@ -163,13 +182,18 @@ class CalendarScreen(QWidget):
         row.addWidget(self.title)
         row.addStretch(1)
 
-        legend = hbox(s=12)
+        # Wrapped in a widget so it can be hidden wholesale: the header's fixed
+        # furniture already ran the row tight, and adding ↻ tipped it over at
+        # 1280px — "Month" rendering as "Iont". The legend is the only
+        # decorative item here, so it is the one that yields (see resizeEvent).
+        self.legend = QWidget()
+        legend = hbox(self.legend, (0, 0, 0, 0), 12)
         for name, color in T.CAL_COLORS.items():
             item = hbox(s=5)
             item.addWidget(Dot(8, color, radius=2))
             item.addWidget(label(name, 10, T.TEXT_MUTED, mono=True))
             legend.addLayout(item)
-        row.addLayout(legend)
+        row.addWidget(self.legend)
 
         seg = hbox(s=5)
         self.seg_group = QButtonGroup(self)
@@ -182,6 +206,10 @@ class CalendarScreen(QWidget):
             b.clicked.connect(lambda _, k=key: self._set_view(k))
             seg.addWidget(b)
         row.addLayout(seg)
+
+        self.refresh_btn = IconButton("refresh", on_click=self.force_refresh,
+                                      tooltip="Sync with Google Calendar")
+        row.addWidget(self.refresh_btn)
 
         add = button("+ Event", "primary", px=13, height=28)
         add.clicked.connect(self._new_event)
@@ -200,10 +228,30 @@ class CalendarScreen(QWidget):
         return self.anchor, self.anchor
 
     def refresh(self):
+        """Re-read the daemon's cache. Cheap and instant — what navigation wants,
+        since one Google fetch per chevron press is the tight polling the
+        project's power budget forbids."""
         frm, to = self._range()
         self.state.fetch_calendar(frm.isoformat(), to.isoformat(), self._loaded)
 
+    def sync(self):
+        """Refresh against Google, debounced (#59). Tab entry uses this."""
+        frm, to = self._range()
+        self.state.sync_calendar(frm.isoformat(), to.isoformat(), self._loaded)
+
+    def force_refresh(self):
+        """The ↻ button: always a real sync, debounce or not. A button that
+        silently did nothing would be worse than no button."""
+        frm, to = self._range()
+        self.refresh_btn.setEnabled(False)
+        self.state.refresh_calendar(frm.isoformat(), to.isoformat(), self._loaded)
+
     def _loaded(self, result: dict):
+        # Unconditional: an error reply is still a reply, and a button that
+        # latches off after one failed sync strands the user.
+        self.refresh_btn.setEnabled(True)
+        if result.get("error"):
+            return                     # keep the events already on screen
         self._events = result.get("events", [])
         self._connected = result.get("connected", True)
         self.rebuild()

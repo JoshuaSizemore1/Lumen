@@ -90,6 +90,11 @@ class CalendarSync:
         self._service_factory = service_factory or self._build_service
         # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
         self.paused = lambda: False
+        # #59 gave this two more callers than the poll tick — the manual refresh
+        # route and the Canvas write's re-read — so it can now race itself. A
+        # second caller arriving mid-sync rides the running fetch instead of
+        # pulling the whole window down again.
+        self._inflight: asyncio.Task | None = None
 
     @property
     def connected(self) -> bool:
@@ -117,11 +122,26 @@ class CalendarSync:
         from googleapiclient.discovery import build
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
+    @property
+    def busy(self) -> bool:
+        return self._inflight is not None and not self._inflight.done()
+
     async def sync_once(self) -> bool:
-        """True on a successful refresh; False keeps the stale cache untouched."""
-        # API calls block in a worker thread; SQLite writes stay on the loop
-        # thread (the connection — and the daemon's single-writer rule — is
-        # thread-bound).
+        """True on a successful refresh; False keeps the stale cache untouched.
+
+        Coalesced: a caller arriving mid-sync awaits the fetch already running
+        rather than starting a second one — its answer is the fresh window that
+        caller wanted anyway. A lock would not do: `Lock.acquire` yields even
+        uncontended, so both callers get past a `locked()` check before either
+        holds it. Sharing the task decides who fetches with no await in between.
+
+        Shielded so one caller going away — an IPC client that disconnected —
+        cannot cancel the refresh the other callers are still waiting on."""
+        if self._inflight is None or self._inflight.done():
+            self._inflight = asyncio.create_task(self._fetch_and_store())
+        return await asyncio.shield(self._inflight)
+
+    async def _fetch_and_store(self) -> bool:
         fetched = await asyncio.to_thread(self._fetch_blocking)
         if fetched is None:
             return False

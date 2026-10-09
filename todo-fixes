@@ -801,6 +801,28 @@ ead do it programatically, where the email id / whatever signifies that email is
 57. When I logged into canvas using the browse canvas button in the canvas tab, it took me to a white screen with the url simply of https://utah.instructure.com/ (it finally loaded after a long time, so I am guessing ti is the correct url but took a long time for some reason)
 58. The auto sync for canvas scrapping might be broken as well as it is not showing my new classes.
 59. I had to close lumen fully to get the calendar to fully update with the new canvas assignments
+    — ✔ fixed 2026-08-27. Root cause: the Canvas pass writes its due-date
+      events straight to Google through CalendarMarkerWriter, but `calendar.list`
+      — the only thing the calendar screen ever reads — serves the daemon's local
+      event cache. Nothing linked the two, so a new assignment was invisible until
+      something refilled that cache. The only things that did were CalendarSync's
+      5-minute tick and daemon startup, which is exactly why restarting worked.
+      Every user-initiated calendar write in the router already re-synced for this
+      reason ("show the new event promptly"); the background path never did.
+      Three parts: (1) `CanvasSync` now re-reads the window after a pass that
+      actually created/updated/recreated something — gated on a real write, so an
+      idle tick still costs nothing; (2) a `calendar.refresh` IPC route, the
+      calendar's answer to `mail.refresh`: sync against Google first, then reply
+      in the same shape as `calendar.list`, honouring #38's Disable switch;
+      (3) the Calendar and Today screens sync on tab entry (debounced to one
+      Google round trip a minute, like Mail's), and the Calendar header gains a
+      ↻ button that always forces a real sync. Month/week arrows deliberately
+      stay on the cache — one fetch per chevron press is the tight polling the
+      power budget forbids. Verified live against the real account: the route
+      takes 1.1s, advances `last_sync`, and the UI renders 9 real Canvas
+      assignments. Adding ↻ tipped an already-tight header over (at 1280px Qt
+      clipped "Month" to "Iont"), so the colour legend now yields below the width
+      where everything fits — scaled by text size, so it holds at any zoom.
 ---
 
 ## Josh's Finds — status 2026-07-21

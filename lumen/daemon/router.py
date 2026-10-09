@@ -688,6 +688,13 @@ class Router:
             "canvas": {"connected": cs["connected"], "enabled": enabled("canvas")},
         }
 
+    def _calendar_enabled(self) -> bool:
+        """#38's runtime Disable. The poll loops consult it every tick; a manual
+        refresh has to as well, or "disabled" would still mean "talks to Google
+        whenever the calendar screen is opened"."""
+        return (self._connection_state is None
+                or self._connection_state.enabled("google_calendar"))
+
     def _kick_canvas_sync(self) -> None:
         """Run a sync in the background, ignoring the outcome. A strong ref is
         kept until it finishes — a bare create_task() may be garbage-collected
@@ -1405,10 +1412,17 @@ class Router:
                 return
             async for ev in self._gated_update(event, changes):
                 yield ev
-        elif type_ == "calendar.list":
+        elif type_ in ("calendar.list", "calendar.refresh"):
+            # list = pure cache read. refresh = the same answer, but pull from
+            # Google first (#59). The cache used to move only on the 5-minute
+            # poll tick and at daemon startup, so nothing the user could press
+            # brought new events in — including the ones the Canvas pass had
+            # just written. Same shape either way, so one round trip repaints.
             if self._calendar is None:
                 yield {"error": "calendar unavailable"}
             else:
+                if type_ == "calendar.refresh" and self._calendar_enabled():
+                    await self._calendar.sync_once()
                 today = date.today().isoformat()
                 yield {"result": {
                     "events": self._calendar.list_range(

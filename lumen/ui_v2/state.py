@@ -159,6 +159,7 @@ class AppState(QObject):
         self.mail_syncing = False
         self.mail_last_sync = None
         self._last_sync_req: float | None = None   # monotonic; sync debounce
+        self._last_cal_sync_req: float | None = None   # #59, same for calendar
         self.selected_mail = "m1"
         self.mail_scope = "inbox"      # "inbox" | "unread" | a label name
         self.mail_labels: list[str] = []
@@ -989,19 +990,52 @@ class AppState(QObject):
         self._data.request("books.recommend", {}, handle)
 
     # ---- calendar ----
+    def _calendar_handler(self, cb):
+        """Shared by calendar.list and calendar.refresh — they answer in the
+        same shape, so the caller never has to know which one ran."""
+        tz = datetime.now().astimezone().tzinfo
+
+        def handle(result):
+            cb({"events": [_norm_event(e, tz) for e in result.get("events", [])],
+                "connected": result.get("connected", True),
+                "window": result.get("window"),
+                "error": result.get("error")})
+        return handle
+
     def fetch_calendar(self, frm: str, to: str, cb) -> None:
         """cb(result) with result = {events(normalized), connected, window, error}."""
         if self._data is not None:
-            tz = datetime.now().astimezone().tzinfo
-
-            def handle(result):
-                cb({"events": [_norm_event(e, tz) for e in result.get("events", [])],
-                    "connected": result.get("connected", True),
-                    "window": result.get("window"), "error": None})
-            self._data.request("calendar.list", {"from": frm, "to": to}, handle)
+            self._data.request("calendar.list", {"from": frm, "to": to},
+                               self._calendar_handler(cb))
         else:
             evs = [e for e in _sample_events() if frm <= e["date"] <= to]
             cb({"events": evs, "connected": True, "window": None, "error": None})
+
+    def refresh_calendar(self, frm: str, to: str, cb) -> None:
+        """Manual ↻: make the daemon sync against Google, then answer with the
+        fresh window (#59). `fetch_calendar` alone only ever reads the daemon's
+        event cache, so before this there was no way — from anywhere in the UI —
+        to pull down an event that had appeared since the last poll tick. New
+        Canvas assignments were the case that made it visible: restarting Lumen
+        was the only refresh the app offered."""
+        if self._data is None:
+            self.fetch_calendar(frm, to, cb)
+            return
+        self._last_cal_sync_req = time.monotonic()
+        self._data.request("calendar.refresh", {"from": frm, "to": to},
+                           self._calendar_handler(cb))
+
+    def sync_calendar(self, frm: str, to: str, cb) -> None:
+        """Automatic refresh (Calendar or Today shown): a real Google sync,
+        debounced to one a minute so tab-flipping cannot hammer the API — the
+        same bargain Mail's sync_inbox strikes. Inside the window it still
+        re-reads the cache, so the view is never stale-by-omission."""
+        now = time.monotonic()
+        if (self._last_cal_sync_req is not None
+                and now - self._last_cal_sync_req < self.SYNC_DEBOUNCE_S):
+            self.fetch_calendar(frm, to, cb)
+        else:
+            self.refresh_calendar(frm, to, cb)
 
     def create_event(self, proposal: dict, cb=None) -> None:
         """Daemon validates + gates behind the confirm overlay, then creates."""

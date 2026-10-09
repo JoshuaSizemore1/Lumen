@@ -1470,6 +1470,49 @@ async def test_calendar_list_without_calendar_errors():
     assert "unavailable" in out[0]["error"]
 
 
+# ---- #59: a calendar the user can actually refresh ---------------------------
+async def test_calendar_refresh_syncs_then_returns_the_fresh_window():
+    """`calendar.list` is a pure cache read, so no amount of clicking in the UI
+    could ever pull new events down — the cache only moved on the 5-minute tick
+    or at daemon startup. This route is the calendar's `mail.refresh`: sync
+    first, then answer in the same shape, so one round trip repaints the grid."""
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
+                        "calendar.refresh",
+                        {"from": "2026-07-01", "to": "2026-07-31"})
+    assert cal.synced == 1
+    assert out[-1]["result"]["events"] == [CAL_ROW]
+    assert out[-1]["result"]["connected"] is True
+    assert cal.seen == [("2026-07-01", "2026-07-31")]   # read AFTER the sync
+
+
+async def test_calendar_refresh_defaults_to_today():
+    cal = SyncingFakeCal()
+    await collect(Router(FakeLLM(), FakeStore(), calendar=cal), "calendar.refresh", {})
+    today = date.today().isoformat()
+    assert cal.seen == [(today, today)]
+
+
+async def test_calendar_refresh_respects_the_disable_switch(tmp_path):
+    """#38's Disable means "stop syncing this account". A manual refresh must
+    honour that rather than quietly reaching for Google anyway — the user still
+    gets the cache back, just no network."""
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "s.db"))
+    conns.set_enabled("google_calendar", False)
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal,
+                               connection_state=conns), "calendar.refresh", {})
+    assert cal.synced == 0
+    assert out[-1]["result"]["events"] == [CAL_ROW]
+
+
+async def test_calendar_refresh_without_calendar_errors():
+    out = await collect(Router(FakeLLM(), FakeStore()), "calendar.refresh", {})
+    assert "unavailable" in out[0]["error"]
+
+
 # ---- Phase 5 write half: confirm.response routing ----
 
 from lumen.daemon.confirm import ConfirmBroker
