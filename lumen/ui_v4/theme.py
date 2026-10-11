@@ -7,7 +7,13 @@ follows the OS color scheme while in system mode, re-applies the app palette +
 stylesheet on every switch, and emits `changed(theme)` so custom-painted
 widgets can repaint.
 """
+import configparser
+import functools
+import json
 import os
+import re
+import shutil
+import subprocess
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,11 +163,100 @@ def settings() -> QSettings:
     return QSettings("lumen", "ui_v4")
 
 
+# ---- text size ----------------------------------------------------------------
+TEXT_SIZES = (50, 75, 100, 125, 150)
+_FONT_PX = re.compile(r"font-size:\s*(\d+)px")
+
+
+def _v3_settings() -> QSettings:
+    return QSettings("lumen", "ui_v3")
+
+
+def text_size() -> int:
+    """The saved text size, as a percentage. v4's first run carries over
+    ui_v3's choice (its "font_scale", same five steps) once."""
+    s = settings()
+    if not s.contains("text_size"):
+        pct = _v3_settings().value("font_scale", 100)
+        try:
+            pct = int(pct)
+        except (TypeError, ValueError):
+            pct = 100
+        pct = pct if pct in TEXT_SIZES else 100
+        s.setValue("text_size", pct)
+        return pct
+    try:
+        pct = int(s.value("text_size", 100, int))
+    except (TypeError, ValueError):
+        pct = 100
+    return pct if pct in TEXT_SIZES else 100
+
+
+def scale_qss(qss: str, pct: int) -> str:
+    """Every stylesheet `font-size: Npx`, scaled to the text size."""
+    if pct == 100:
+        return qss
+    k = pct / 100.0
+    return _FONT_PX.sub(
+        lambda m: f"font-size: {max(8, round(int(m.group(1)) * k))}px", qss)
+
+
+def _ini_value(path: Path, section: str, key: str) -> str | None:
+    cp = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        if not cp.read(path):
+            return None
+        return cp.get(section, key, fallback=None)
+    except (configparser.Error, OSError, UnicodeDecodeError):
+        return None
+
+
+def _run(*argv: str) -> str:
+    if shutil.which(argv[0]) is None:
+        return ""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=1).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+@functools.lru_cache(maxsize=1)
+def system_reduced_motion() -> bool:
+    """The desktop's own "turn animations off", wherever it can be read:
+    GTK's settings.ini, KDE's AnimationDurationFactor, Hyprland's
+    animations:enabled, GNOME's enable-animations. Read once per run."""
+    cfg = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    for gtk in ("gtk-4.0", "gtk-3.0"):
+        v = _ini_value(cfg / gtk / "settings.ini", "Settings",
+                       "gtk-enable-animations")
+        if v is not None and v.strip().lower() in ("false", "0", "no"):
+            return True
+    factor = _ini_value(cfg / "kdeglobals", "KDE", "AnimationDurationFactor")
+    try:
+        if factor is not None and float(factor) == 0:
+            return True
+    except ValueError:
+        pass
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        try:
+            if json.loads(_run("hyprctl", "getoption", "animations:enabled",
+                               "-j") or "{}").get("int") == 0:
+                return True
+        except (ValueError, AttributeError):
+            pass
+    return _run("gsettings", "get", "org.gnome.desktop.interface",
+                "enable-animations") == "false"
+
+
 def reduced_motion() -> bool:
+    """Lumen's toggle, LUMEN_REDUCED_MOTION, or the desktop asking for it."""
     env = os.environ.get("LUMEN_REDUCED_MOTION", "").strip().lower()
     if env in ("1", "true", "yes", "on"):
         return True
-    return settings().value("reduced_motion", False, bool)
+    if settings().value("reduced_motion", False, bool):
+        return True
+    return system_reduced_motion()
 
 
 def ms(duration: int) -> int:
@@ -275,14 +370,15 @@ class ThemeManager(QObject):
         self.changed.emit(theme)
 
     def apply(self, app=None) -> None:
-        """Push palette + stylesheet onto the application."""
+        """Push palette + stylesheet onto the application, at the saved text
+        size — so it holds from startup and across theme switches."""
         from .styles import app_palette, build_qss
         app = app or QGuiApplication.instance()
         if app is None:
             return
         app.setPalette(app_palette(self._theme))
         if hasattr(app, "setStyleSheet"):
-            app.setStyleSheet(build_qss(self._theme))
+            app.setStyleSheet(scale_qss(build_qss(self._theme), text_size()))
 
 
 _manager: ThemeManager | None = None

@@ -1,0 +1,80 @@
+# Skill: UI spec (ui_v4, "Field Notes")
+
+The desktop UI being finished is `lumen/ui_v4/` (opt-in as `lumen-ui-v4`;
+`lumen` still opens ui_v3 until Josh signs off on v4 — see
+`.claude/ui_v4-fixes-and-integration-plan.md` §6). Read this before changing
+any v4 screen, and update it when you add or change behaviour.
+
+## Sources of truth
+- **Spec:** review.md's "How v4 fixes each problem" table, in the Open Design
+  project `~/.local/share/open-design/namespaces/aur/data/projects/5305ac28-b077-4301-9bdd-43f57bf9ea38/`
+  (`index.html` there is a static visual reference only). It requires feature
+  parity with ui_v3.
+- **Design system:** Open Design project `ds-field-notes` (`DESIGN.md`,
+  `tokens.css`). In code: `theme.py` holds every colour literal and token;
+  `styles.py` builds the one app stylesheet from QSS roles/properties;
+  `components.py` holds the building blocks. Screens never set inline colours.
+- **Josh's product decisions (2026-10-10), overriding review.md where noted:**
+  - Ask bar answers **inline on the page** (ephemeral, not saved; "Continue in
+    Ask Lumen" seeds a conversation) — overrides review.md's jump-to-Ask.
+  - Today keeps the **hour grid** — overrides review.md's list.
+  - Super+L raises the window with the Ask bar focused; a second press hides it.
+  - Mail: no per-row trash; Delete is the reading pane's danger button.
+  - Compose: "Review & send" and Ctrl+Enter show a "Send this email?" confirm.
+  - No accent picker (fixed forest green). No under-600px top rail.
+
+## Shell (`main.py`)
+- 232px sidebar (Today / Daily / Library / Ask Lumen, Settings + theme at the
+  foot); a 64px icon rail below 900px. Ctrl+1–8, Ctrl+, , Ctrl+K palette,
+  Ctrl+L Ask bar, Alt+←/→ history. Shortcuts do nothing while any `_Overlay`
+  is open (window's or a screen's).
+- Screens are built lazily on first `switch_to(key)`; contract in
+  `screens/__init__.py`. `on_shown(**kw)` runs on every switch, and again
+  (with `resumed=True`, throttled to 30 s) when the window comes back from the
+  tray. History is recorded after `on_shown` applies its kwargs.
+- The model is warmed only by a user's switch to Ask, never by restoring Ask
+  at login.
+
+## Ask (`askbar.py`, `screens/ask.py`)
+- The bar and the Ask screen share one chat connection: one turn at a time
+  (`window.chat_busy()`); each ignores stream events it didn't ask for.
+- Page context is built once (`askbar.context_dict` / `chat_payload`). A
+  screen's `ask_context()` may return a str (summary) or a dict; Inbox's dict
+  carries `message` so `open_email` is sent ("label this email").
+- Ask screen empty state: what Lumen can see + three suggested prompts.
+
+## Screen notes
+- **Inbox:** rows size to their content (no fixed min height). Up/Down browse
+  from a focused row without marking read. Below 900px the mailboxes are a
+  chip row. Forward warns that attachments aren't carried.
+- **Todos:** tag chips + Show completed sit directly above the list; the rail
+  has progress and group-by. A tag chip click never opens the edit card.
+- **Files:** hidden files off by default (switch, remembered), list/grid
+  toggle (remembered), "N more not shown" past 500 entries. An open file sits
+  in an editor pane beside a folder list (≥960px), full page when narrower.
+  The panes rebuild separately; unsaved edits are never rebuilt away, kept as
+  a draft when you navigate off the file, and Close offers Undo.
+- **Calendar:** events paint in Google's colours (the event's own, else its
+  calendar's); the legend uses calendar colours. Out-of-month days are muted
+  text on the same ground. The edit dialog accepts 24:00 and reads an end at
+  or before the start as the next day.
+- **Settings:** all three answer modes are explained; Canvas Connect starts
+  the sign-in from Accounts; Advanced shows only keys the daemon reports.
+- **Model naming:** plain words ("On this computer", "Claude · Haiku"); the
+  raw model tag lives in tooltips.
+
+## Invariants (tested in `tests/ui/*_v4.py`)
+- Every outside write goes through the daemon's confirm gate or the window
+  ConfirmOverlay; an approved confirm's `toast` is shown by the overlay.
+- A daemon error or dropped connection must settle any waiting UI:
+  `DaemonClient.request(..., on_error=)`; state exposes `mail_error` /
+  `todos_error`, and calendar callbacks get `{"error": ...}`. No skeleton or
+  busy scrim may wait forever.
+- Power: hidden screens defer rebuilds; QtWebEngine is imported only when
+  Canvas first builds its view; the Canvas page is Frozen when hidden and
+  Discarded on Done; no timers run on hidden screens.
+- Text size and reduced motion: `theme.text_size()` is applied by
+  `ThemeManager.apply` (every stylesheet apply); `theme.reduced_motion()`
+  also follows the desktop's animation setting.
+- Tests must isolate QSettings via `tests/ui/v4_support.py::v4_settings`
+  (it is Josh's real preference store otherwise).

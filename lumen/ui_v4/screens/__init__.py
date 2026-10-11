@@ -29,12 +29,16 @@ Window API (`window` = LumenWindow):
   .rules.open(prefill)    or state.open_rule_editor(prefill)
   .theme                  current theme.Theme (tokens); theme.manager().changed
   .ask(question, context=None)  switches to Ask and calls AskScreen.start(...)
+                          (the Ask bar itself answers inline: askbar.py)
+  .chat_busy()            True while the bar or the Ask screen is streaming
   .screen(key)            a built screen or None (never builds)
   .current_key(), .go_back(), .go_forward(), .cycle_theme()
 
 Optional screen hooks (all called through a guard that logs + toasts errors):
   on_shown(**kw)          every switch_to() onto the screen, including first
-  ask_context() -> str    page context the Ask bar sends with a question
+  ask_context() -> str | dict   page context the Ask bar sends with a
+                          question; a dict may carry `screen`, `file`/`dir`
+                          (Files) or `message` {id, subject, from} (Inbox)
   refresh()               reload data (screens own when it's called)
   apply_theme()           after a theme switch, for custom-painted colors
   nav_token() / nav_restore(token)   in-page back/forward history

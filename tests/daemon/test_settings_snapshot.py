@@ -40,3 +40,16 @@ def test_snapshot_paths_use_tilde(tmp_path, monkeypatch):
     snap = build_settings_snapshot(cfg)
     assert snap["paths"]["db"].startswith("~/")
     assert snap["paths"]["memory"].startswith("~/")
+
+
+def test_snapshot_reports_where_the_config_was_read_from(tmp_path, monkeypatch):
+    """ui_v4 Settings showed a hard-coded ~/.config path (plan M7)."""
+    from lumen.daemon.config import load_config
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg_file = tmp_path / "lumen" / "config.toml"
+    cfg_file.parent.mkdir()
+    cfg_file.write_text('[llm]\nmodel = "qwen3:4b-instruct"\n')
+    snap = build_settings_snapshot(load_config(cfg_file))
+    assert snap["paths"]["config"] == "~/lumen/config.toml"
+    missing = load_config(tmp_path / "nope.toml")
+    assert build_settings_snapshot(missing)["paths"]["config"] == "~/nope.toml"

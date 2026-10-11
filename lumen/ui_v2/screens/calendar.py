@@ -243,9 +243,10 @@ class CalendarScreen(QWidget):
         self.state.fetch_calendar(frm, to, self._on_events)
 
     def _on_events(self, result: dict):
-        self._events = result.get("events", [])
-        self._connected = result.get("connected", True)
         self._error = result.get("error")
+        if not self._error:     # a failed refresh keeps what's already shown
+            self._events = result.get("events", [])
+            self._connected = result.get("connected", True)
         self._by_date = {}
         for e in self._events:
             self._by_date.setdefault(e["date"], []).append(e)

@@ -30,7 +30,7 @@ class FakeClient(QObject):
         self.requests: list[tuple] = []
         self.sent: list[tuple] = []
 
-    def request(self, type_, payload, cb):
+    def request(self, type_, payload, cb, on_error=None):
         self.requests.append((type_, payload, cb))
 
     def send(self, type_, payload):

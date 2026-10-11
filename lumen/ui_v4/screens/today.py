@@ -137,9 +137,11 @@ class TodayScreen(QWidget):
         self.rebuild()
 
     # ---- hooks --------------------------------------------------------------
-    def on_shown(self):
+    def on_shown(self, brief=False):
         if self._dirty:
             self.rebuild()
+        if brief and self.brief_btn.isEnabled():  # command palette; not twice
+            fire_on_next_tick(self._briefing)
         today = date.today().isoformat()
         # The Calendar screen's debounced sync (#59): the schedule here is the
         # calendar too. The debounce is shared, so both screens cost one sync.
@@ -385,12 +387,20 @@ class TodayScreen(QWidget):
     def _todo_col(self) -> QWidget:
         due = self._due_todos()
         loaded = self._seen_todos
+        n_due = sum(1 for t in due if not t["done"])
         open_n = self.state.open_count()
-        card = self._col_card("Due today", f"{open_n} open" if loaded else "",
-                              "All todos", "todos")
+        # The count is what this card lists, not every open todo (review.md:
+        # "6 open" over 3 rows read as a mismatch); the link carries the total.
+        card = self._col_card("Due today", f"{n_due} due" if loaded else "",
+                              f"All todos ({open_n})" if loaded else "All todos",
+                              "todos")
         if not loaded:
             for _ in range(3):
                 card.lay.addWidget(SkeletonRow(1, height=T.ROW_H))
+        elif not due and self.state.todos_error and not self.state.todos:
+            card.lay.addWidget(Label("Couldn't load your todos. Lumen's "
+                                     "background service may not be running.",
+                                     "muted", wrap=True))
         elif due:
             for i, t in enumerate(sorted(due, key=lambda t: t["done"])):
                 if i:
@@ -418,7 +428,7 @@ class TodayScreen(QWidget):
             self._finish(card)
             return card
         if self._ev_error:
-            card.lay.addWidget(Label("Couldn't reach Google Calendar. Try the "
+            card.lay.addWidget(Label("Couldn't load today's calendar. Try the "
                                      "sync button on the Calendar screen.",
                                      "muted", wrap=True))
         all_day = [e for e in evs if e.get("all_day")]
@@ -461,6 +471,10 @@ class TodayScreen(QWidget):
         if not loaded:
             for _ in range(3):
                 card.lay.addWidget(SkeletonRow(2, height=56))
+        elif st.mail_error and not st.mails:
+            card.lay.addWidget(Label("Couldn't load your mail. Lumen's "
+                                     "background service may not be running.",
+                                     "muted", wrap=True))
         elif not st.mail_connected and not unread:
             card.lay.addWidget(EmptyState(
                 "mail", "Mail isn't connected",
@@ -557,7 +571,11 @@ class TodayScreen(QWidget):
                 f"Checked {_plural(n, 'sent email')}. "
                 + (f"Found {found} new." if found else "Nothing new."))
             self._schedule()
-        self.state.scan_commitments(done)
+
+        def failed(_msg):
+            self._scanning = False
+            self._schedule()
+        self.state.scan_commitments(done, on_error=failed)
 
     # ---- briefing -------------------------------------------------------------
     def _briefing(self):
@@ -568,6 +586,7 @@ class TodayScreen(QWidget):
         self.brief_off.hide()
         self.brief_text.hide()
         self.brief_status.show()
+        self.brief_status.set_role("muted")
         self.brief_status.start("Collecting your briefing")
         self.brief_btn.set_busy(True, "Collecting…")
 
@@ -588,7 +607,16 @@ class TodayScreen(QWidget):
             self.brief_text.setText(result.get("text", "")
                                     or "There's no briefing for today yet.")
             self.brief_text.show()
-        self.state.fetch_briefing(done)
+
+        def failed(msg):
+            try:
+                self.brief_btn.set_busy(False)
+            except RuntimeError:
+                return
+            self.brief_status.set_static("Couldn't collect the briefing", "error")
+            self.brief_text.setText(msg)
+            self.brief_text.show()
+        self.state.fetch_briefing(done, on_error=failed)
         fire_on_next_tick(lambda: self.scroll.ensureWidgetVisible(self.brief_card))
 
     def _brief_off(self):

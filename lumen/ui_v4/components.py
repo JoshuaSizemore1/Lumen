@@ -731,20 +731,22 @@ class Badge(QLabel):
 
 class TagChip(QFrame):
     """Label/tag chip: small colored dot + fg2 text, 4px radius. `slot` picks
-    the categorical color (int), else it's hashed from the text."""
+    the categorical color (int), else it's hashed from the text. dot=False
+    for a chip that isn't a tag (an "All" filter)."""
 
     clicked = pyqtSignal()
 
     def __init__(self, text: str, slot: int | None = None, on_click=None,
-                 active: bool = False):
+                 active: bool = False, dot: bool = True):
         super().__init__()
         self.text = text
         self.setProperty("role", "tag")
         self.setProperty("active", active)
         key = slot if slot is not None else text
         h = hbox(self, (8, 3, 8, 3), 6)
-        h.addWidget(Dot(lambda: T.tag_color(key), 8), 0,
-                    Qt.AlignmentFlag.AlignVCenter)
+        if dot:
+            h.addWidget(Dot(lambda: T.tag_color(key), 8), 0,
+                        Qt.AlignmentFlag.AlignVCenter)
         self.label = QLabel(text)
         h.addWidget(self.label)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -766,12 +768,17 @@ class TagChip(QFrame):
     def mousePressEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton and self._on_click:
             self._fire()
+            # Handled: letting it propagate also clicked the row the chip
+            # sits on (a todo's tag opened the edit card, M4).
+            ev.accept()
+            return
         super().mousePressEvent(ev)
 
     def keyPressEvent(self, ev):
         if self._on_click and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter,
                                            Qt.Key.Key_Space):
             self._fire()
+            ev.accept()
         else:
             super().keyPressEvent(ev)
 
@@ -916,7 +923,13 @@ class EmptyState(QWidget):
         self.body.setVisible(bool(body))
         self.body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.addWidget(self.body, 0, Qt.AlignmentFlag.AlignHCenter)
+        # Centred by stretches, not an alignment flag: with one, the layout
+        # gives a wrapped label its narrow size hint and clips the text.
+        brow = hbox(s=0)
+        brow.addStretch(1)
+        brow.addWidget(self.body, 100)
+        brow.addStretch(1)
+        v.addLayout(brow)
         self.action = None
         if action_text:
             v.addSpacing(T.S2)

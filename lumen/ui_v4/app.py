@@ -4,8 +4,8 @@ the daemon.
 Mirrors ui_v3/app.py — same daemon clients, same AppState wiring, same tray,
 plain `app.exec()` event loop (AppState's IPC is Qt-driven; no asyncio loop in
 the UI process). Differences: its own single-instance socket, and no separate
-launcher overlay — "toggle-launcher" brings the window up with the Ask bar
-focused instead.
+launcher overlay — "toggle-launcher" (Super+L) brings the window up with the
+Ask bar focused instead, and hides it when Lumen is already in front.
 Launch with: lumen-ui-v4, or python -m lumen.ui_v4
 """
 import os
@@ -27,15 +27,12 @@ from . import theme as T
 
 
 def _prepare_webengine() -> None:
-    """QtWebEngine (the Canvas login view) must be set up before QApplication
-    exists: GL context sharing on, and its module imported, or the embedded
-    browser can crash on the iGPU / refuse to start."""
+    """QtWebEngine (the Canvas sign-in view) needs GL context sharing on
+    before QApplication exists, or it can't be imported later. That's all it
+    needs: the module itself is imported only when Canvas first builds the
+    view, as ui_v3 does — importing it here cost ~33 MB RSS and ~30 ms on
+    every launch (measured 2026-10-10)."""
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
-    try:
-        import PyQt6.QtWebEngineWidgets  # noqa: F401
-    except ImportError:
-        print("[lumen.ui_v4] PyQt6-WebEngine not available; the Canvas login "
-              "view will be disabled.", file=sys.stderr)
 
 
 def _apply_app_style(app: QApplication) -> None:
@@ -64,6 +61,9 @@ def main() -> None:
     app.setDesktopFileName("lumen")
     app.setQuitOnLastWindowClosed(False)
     _apply_app_style(app)
+    # Resolve the desktop's animation setting now (it can shell out to
+    # hyprctl/gsettings), not lazily on the first animation mid-session.
+    T.reduced_motion()
 
     # Claim the name before building anything, so a second launch during the
     # (slow) window build can't become a second tray icon. Nothing is
@@ -101,10 +101,20 @@ def main() -> None:
         present_window()
         win._focus_ask()
 
+    def toggle_ask() -> None:
+        """Super+L (Josh, 2026-10-10): raise the window with the Ask bar
+        focused; pressing it again while Lumen is in front hides it."""
+        if win.isVisible() and win.isActiveWindow() and not win.isMinimized():
+            win.hide()
+        else:
+            summon_ask()
+
     def dispatch(cmd: str) -> None:
         if cmd == "quit":
             app.quit()          # `lumen --quit`; unified mode stops the daemon
-        elif cmd in ("toggle-launcher", "show-launcher"):
+        elif cmd == "toggle-launcher":
+            toggle_ask()
+        elif cmd == "show-launcher":
             summon_ask()
         else:
             present_window()

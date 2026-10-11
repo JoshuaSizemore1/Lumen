@@ -344,6 +344,8 @@ QFrame#askField {{ background: {t.surface}; border: 1px solid {t.border_strong};
                   border-radius: {r}px; }}
 QFrame#askField[focused="true"] {{ border: 2px solid {t.accent}; }}
 QLabel#askLabel {{ font-size: 13px; font-weight: 600; color: {t.meta}; }}
+QFrame#askPanel {{ background: {t.surface}; border: none;
+                  border-bottom: 1px solid {t.border_soft}; }}
 QFrame#statusLine {{ background: transparent; }}
 """
 

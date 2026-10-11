@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS events (
     calendar_id TEXT NOT NULL,
     calendar_name TEXT,
     color TEXT,                             -- calendar-level color, hex
+    event_color TEXT,                       -- the event's own colorId, as hex
     title TEXT,
     start_at TEXT NOT NULL,                 -- RFC3339 as given; ISO date if all-day
     end_at TEXT,
@@ -283,6 +284,9 @@ def connect(db_path: Path) -> sqlite3.Connection:
     if "included" not in cc_cols:
         conn.execute(
             "ALTER TABLE canvas_courses ADD COLUMN included INTEGER NOT NULL DEFAULT 1")
+    ev_cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
+    if "event_color" not in ev_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN event_color TEXT")
     todo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(todos)")}
     if "description" not in todo_cols:
         conn.execute("ALTER TABLE todos ADD COLUMN description TEXT")

@@ -21,13 +21,10 @@ Preserves every ui_v3 Settings flow:
 New in v4: theme System / Light / Dark through the theme manager, text size
 (stored in QSettings("lumen", "ui_v4") "text_size"), reduce motion.
 
-Text size: ui_v4's foundation has no text-scale hook, so `apply_text_size`
-re-applies the app stylesheet with every `font-size: Npx` scaled.
-`install_text_size()` applies the saved size and keeps it applied across
-theme switches; the library screens call it when they're built.
+Text size: the theme manager scales every stylesheet `font-size: Npx` by the
+saved size whenever it applies the sheet (theme.text_size / scale_qss), so
+it holds from startup and across theme switches.
 """
-import re
-
 from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import QApplication, QBoxLayout, QPlainTextEdit, QWidget
@@ -42,54 +39,8 @@ from ..components import (
 MAX_W = 840
 NARROW = 640          # content width below which label/control rows stack
 
-# ---- text size (shared with the other library screens) -----------------------
-TEXT_SIZES = (50, 75, 100, 125, 150)
-_FONT_PX = re.compile(r"font-size:\s*(\d+)px")
-_ts_installed = False
-
-
-def text_size() -> int:
-    try:
-        pct = int(T.settings().value("text_size", 100, int))
-    except (TypeError, ValueError):
-        pct = 100
-    return pct if pct in TEXT_SIZES else 100
-
-
-def _scaled_qss(pct: int) -> str:
-    from ..styles import build_qss
-    k = pct / 100.0
-    return _FONT_PX.sub(lambda m: f"font-size: {max(8, round(int(m.group(1)) * k))}px",
-                        build_qss(T.current()))
-
-
-def apply_text_size(pct: int | None = None) -> None:
-    """Scale every stylesheet font size. 100% puts the stock sheet back."""
-    app = QApplication.instance()
-    if app is None:
-        return
-    pct = text_size() if pct is None else pct
-    if pct == 100:
-        T.manager().apply(app)
-    else:
-        app.setStyleSheet(_scaled_qss(pct))
-
-
-def _reapply_after_theme(_theme=None) -> None:
-    if text_size() != 100:
-        apply_text_size()
-
-
-def install_text_size() -> None:
-    """Idempotent: apply the saved size once, and again after each theme
-    switch (the theme manager re-applies the stock sheet first)."""
-    global _ts_installed
-    if _ts_installed or QApplication.instance() is None:
-        return
-    _ts_installed = True
-    T.manager().changed.connect(_reapply_after_theme)
-    if text_size() != 100:
-        apply_text_size()
+TEXT_SIZES = T.TEXT_SIZES
+text_size = T.text_size
 
 
 # ---- small widgets -----------------------------------------------------------
@@ -176,7 +127,7 @@ class SettingsScreen(QWidget):
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._end_flash)
-        install_text_size()
+        self._flashing = False     # the model card stays highlighted across rebuilds
 
         outer = vbox(self, (0, 0, 0, 0), 0)
         self.scroll = ScrollArea()
@@ -226,6 +177,9 @@ class SettingsScreen(QWidget):
         s = self.state
         s.procedures_changed.connect(self._build_assistant)
         s.model_state_changed.connect(self._on_model_changed)
+        sig = getattr(s, "rules_changed", None)
+        if sig is not None:
+            sig.connect(lambda: s.list_rules(self._on_rules))
         sig = getattr(s, "model_switch_highlight_requested", None)
         if sig is not None:
             sig.connect(self._highlight_model)
@@ -334,17 +288,35 @@ class SettingsScreen(QWidget):
             mode, accessible_name="Where answers come from")
         self.mode_seg.changed.connect(self._set_mode)
         c.addWidget(self.mode_seg, 0, Qt.AlignmentFlag.AlignLeft)
-        helper = {
-            "off": "Off means the model never loads: no memory used, no fan. "
-                   "Mail, calendar, todos, Canvas and search keep working. "
-                   "Anything that needs the model says so and points back here.",
-            "local": "Answers are generated on this computer. Nothing you ask "
-                     "leaves the laptop. The model unloads itself when idle.",
-            "claude": "Answers come from Anthropic's Claude. Your question and "
-                      "the mail, calendar or Canvas text it needs are sent to "
-                      "Anthropic. The local model stays unloaded.",
-        }[mode]
-        c.addWidget(Label(helper, "muted", wrap=True))
+        # All three explained, not just the one picked (review.md), so the
+        # choice can be made before making it.
+        modes = QWidget()
+        mv = vbox(modes, (0, T.S1, 0, 0), T.S4)
+        for key, name, helper in (
+                ("off", "Off",
+                 "The model never loads: no memory used, no fan. Mail, "
+                 "calendar, todos, Canvas and search keep working. Anything "
+                 "that needs the model says so and points back here."),
+                ("local", "On this computer",
+                 "Answers are generated on this computer. Nothing you ask "
+                 "leaves the laptop. The model unloads itself when idle."),
+                ("claude", "Claude",
+                 "Answers come from Anthropic's Claude. Your question and the "
+                 "mail, calendar or Canvas text it needs are sent to "
+                 "Anthropic. The local model stays unloaded.")):
+            grp = vbox(s=2)
+            row = hbox(s=T.S3)
+            row.addWidget(Label(name, "field-label"), 0,
+                          Qt.AlignmentFlag.AlignVCenter)
+            if key == mode:
+                row.addWidget(Badge("accent", "In use"), 0,
+                              Qt.AlignmentFlag.AlignVCenter)
+            row.addStretch(1)
+            grp.addLayout(row)
+            grp.addWidget(Label(helper, "muted" if key != mode else "small",
+                                wrap=True))
+            mv.addLayout(grp)
+        c.addWidget(modes)
 
         model = self._snapshot.get("model") or {}
         if mode == "local":
@@ -357,6 +329,10 @@ class SettingsScreen(QWidget):
             c.addWidget(Divider())
             self._claude_rows(c, model)
         lay.addWidget(self.model_card)
+        if self._flashing:
+            # The replies to on_shown rebuild this card within milliseconds of
+            # the highlight; carry it over (M6, v3's _flash_model).
+            self._paint_flash()
 
         # ---- memory ----
         mem = Card(padding=T.S5, spacing=T.S3)
@@ -470,9 +446,14 @@ class SettingsScreen(QWidget):
         QTimer.singleShot(0, self._flash)
 
     def _flash(self):
-        card = getattr(self, "model_card", None)
-        if card is None:
+        if getattr(self, "model_card", None) is None:
             return
+        self._flashing = True
+        self._paint_flash()
+        self._flash_timer.start(T.ms(1600) or 1600)
+
+    def _paint_flash(self):
+        card = self.model_card
         try:
             t = T.current()
             card.setStyleSheet(
@@ -481,10 +462,10 @@ class SettingsScreen(QWidget):
             self.scroll.ensureWidgetVisible(card, 0, T.S8)
             self.mode_seg.setFocus()
         except RuntimeError:
-            return
-        self._flash_timer.start(T.ms(1600) or 1600)
+            pass
 
     def _end_flash(self):
+        self._flashing = False
         card = getattr(self, "model_card", None)
         try:
             if card is not None:
@@ -518,10 +499,16 @@ class SettingsScreen(QWidget):
         card.lay.addWidget(r)
         card.lay.addWidget(Divider())
 
-        motion = SwitchRow("Reduce motion",
-                           "Turns off sliding and fading animations.",
-                           bool(T.settings().value("reduced_motion", False, bool)))
-        motion.toggled.connect(self._set_reduced_motion)
+        if T.system_reduced_motion():
+            motion = SwitchRow("Reduce motion", "Your desktop has animations "
+                                                "turned off, so Lumen does too.",
+                               True)
+            motion.switch.setEnabled(False)
+        else:
+            motion = SwitchRow(
+                "Reduce motion", "Turns off sliding and fading animations.",
+                bool(T.settings().value("reduced_motion", False, bool)))
+            motion.toggled.connect(self._set_reduced_motion)
         card.lay.addWidget(motion)
         lay.addWidget(card)
 
@@ -531,8 +518,7 @@ class SettingsScreen(QWidget):
         except ValueError:
             return
         T.settings().setValue("text_size", pct)
-        install_text_size()
-        apply_text_size(pct)
+        T.manager().apply()
         self.win.show_toast(f"Text size set to {pct}%")
 
     def _set_reduced_motion(self, on: bool):
@@ -595,9 +581,12 @@ class SettingsScreen(QWidget):
             b.clicked.connect(lambda _=False, btn=b: self._reconnect_google(btn))
             r.add(b)
         elif not connected and is_canvas:
-            r.add(Button("Connect in Canvas", "secondary", icon="arrow-right",
-                         size="sm",
-                         on_click=lambda: self.win.switch_to("canvas")))
+            # Connect starts the sign-in right here in the flow: the sign-in
+            # browser lives on the Canvas screen, which opens on it.
+            b = Button("Connect", "secondary", size="sm",
+                       on_click=lambda: self.win.switch_to("canvas", connect=True))
+            b.setToolTip("Opens the Canvas sign-in page")
+            r.add(b)
         if connected:
             r.add(Button("Resume sync" if not enabled else "Pause sync",
                          "secondary", size="sm",
@@ -609,19 +598,39 @@ class SettingsScreen(QWidget):
         return r
 
     def _confirm_disconnect(self, key: str, name: str, refresh):
-        payload = {
-            "icon": "logout", "title": f"Disconnect {name}?",
-            "intro": f"Lumen signs out of {name} and stops syncing it. What's "
+        if key in ("gmail", "google_calendar"):
+            # One Google sign-in covers both, and the daemon drops it (L8).
+            name = "Gmail and Google Calendar"
+            intro = ("Lumen signs out of your Google account, so Gmail and "
+                     "Google Calendar both stop syncing. What's already saved "
+                     "on this computer stays. You can connect again at any "
+                     "time.")
+            title = "Disconnect your Google account?"
+        else:
+            intro = (f"Lumen signs out of {name} and stops syncing it. What's "
                      "already saved on this computer stays. You can connect "
-                     "again at any time.",
+                     "again at any time.")
+            title = f"Disconnect {name}?"
+        payload = {
+            "icon": "logout", "title": title, "intro": intro,
             "rows": [("Account", name)],
             "confirm_label": "Disconnect", "danger": True,
             "toast": f"{name} disconnected",
         }
 
         def done(ok, _p):
-            if ok:
-                self.state.disconnect_connection(key, refresh)
+            if not ok:
+                return
+            self.state.disconnect_connection(key, refresh)
+            if key == "canvas":
+                # The daemon forgets its session; the sign-in browser's own
+                # cookie jar has to go too, or Connect reuses it (L11).
+                scr = self.win.screen("canvas")
+                if scr is not None:
+                    scr.forget_browser_session()
+                else:
+                    from .canvas import mark_browser_session_stale
+                    mark_browser_session_stale()
         self.win.confirm.open(payload, done)
 
     def _reconnect_google(self, btn):
@@ -713,9 +722,9 @@ class SettingsScreen(QWidget):
         # Paths
         paths = Card(padding=T.S5, spacing=T.S2)
         paths.lay.addWidget(Heading("Files", 3))
-        r = self._row("Config file", "Edit it here or in your editor; Lumen "
-                                     "reloads it when saved.")
-        cfg = snap.get("config_path", "~/.config/lumen/config.toml")
+        r = self._row("Config file", "Edit it in your editor; restart Lumen "
+                                     "for changes to take effect.")
+        cfg = (snap.get("paths") or {}).get("config") or "config.toml"
         r.add(Label(cfg, "small", selectable=True))
         paths.lay.addWidget(r)
         paths.lay.addWidget(Divider())
@@ -743,17 +752,18 @@ class SettingsScreen(QWidget):
         # MCP servers
         mcp = Card(padding=T.S5, spacing=T.S2)
         mcp.lay.addWidget(Heading("Connected tools (MCP servers)", 3))
-        servers = snap.get("mcp_servers") or {}
+        # The daemon sends {"mcp": {"enabled", "servers": [{name, detail,
+        # enabled}]}} (M7: this read a key that never existed).
+        servers = (snap.get("mcp") or {}).get("servers") or []
         if not servers:
-            mcp.lay.addWidget(Label("No servers configured in [mcp_servers].",
+            mcp.lay.addWidget(Label("No servers configured in [mcp.servers].",
                                     "muted", wrap=True))
-        for i, (name, cfg_) in enumerate(servers.items()):
+        for i, srv in enumerate(servers):
             if i:
                 mcp.lay.addWidget(Divider())
-            cfg_ = cfg_ or {}
-            desc = cfg_.get("description") or cfg_.get("transport") or "Not configured"
-            r = self._row(name, desc)
-            on = bool(cfg_.get("enabled"))
+            srv = srv or {}
+            r = self._row(srv.get("name", "?"), srv.get("detail") or "")
+            on = bool(srv.get("enabled"))
             r.add(Badge("success" if on else "neutral", "On" if on else "Off"))
             mcp.lay.addWidget(r)
         lay.addWidget(mcp)
@@ -800,25 +810,32 @@ class SettingsScreen(QWidget):
                 return str(v)
             return f'"{v}"'
 
-        lines = ["[model]",
-                 f"mode = {val(self._mode())}",
-                 f"runtime = {val(model.get('runtime', 'ollama'))}",
-                 f"context = {val(model.get('context', 8192))}",
-                 f"idle_timeout = {val(model.get('idle_timeout', 600))}"
-                 "   # seconds before the model unloads",
-                 "",
-                 "[sync]",
-                 f"interval = {val(sync.get('interval', 5))}   # minutes",
-                 f"on_wake = {val(bool(sync.get('on_wake', True)))}",
-                 f"confirm_writes = {val(bool(sync.get('confirm_writes', True)))}",
-                 "",
-                 "[mail]",
-                 f"load_remote_images = {val(bool(self.state.load_remote_images))}",
-                 "",
-                 "# ui_v4 preferences (QSettings lumen/ui_v4)",
-                 f"theme = {val(T.manager().pref)}",
-                 f"text_size = {text_size()}",
-                 f"reduced_motion = {val(T.reduced_motion())}"]
+        # Only keys the daemon really reports (M7: the old view showed made-up
+        # keys with defaults). Mode is runtime state, not a config.toml key.
+        lines = [f"# answers come from: {self._mode()} (set above)",
+                 "[llm]"]
+        for key in ("model", "escalation_model", "idle_unload_minutes",
+                    "ollama_url"):
+            v = model.get("name" if key == "model" else key)
+            if v is not None:
+                lines.append(f"{key} = {val(v)}")
+        if model.get("num_ctx") is not None:
+            lines.append(f"# context window: {model['num_ctx']} tokens")
+        lines += ["", "[sync]"]
+        for key in ("gmail_poll_minutes", "calendar_poll_minutes",
+                    "gmail_window_months", "calendar_window_past_days",
+                    "calendar_window_future_days"):
+            if sync.get(key) is not None:
+                lines.append(f"{key} = {val(sync[key])}")
+        mail = snap.get("mail") or {}
+        lines += ["", "[mail]",
+                  f"load_remote_images = "
+                  f"{val(bool(mail.get('load_remote_images', self.state.load_remote_images)))}",
+                  "",
+                  "# ui_v4 preferences (QSettings lumen/ui_v4)",
+                  f"theme = {val(T.manager().pref)}",
+                  f"text_size = {text_size()}",
+                  f"reduced_motion = {val(T.reduced_motion())}"]
         view = QPlainTextEdit("\n".join(lines))
         view.setProperty("role", "code")
         view.setReadOnly(True)

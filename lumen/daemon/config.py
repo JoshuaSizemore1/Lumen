@@ -37,6 +37,10 @@ def default_style_rules_path() -> Path:
     return root / "lumen" / "writing-style.md"
 
 
+def default_config_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "config.toml"
+
+
 def default_memory_path() -> Path:
     base = os.environ.get("XDG_DATA_HOME")
     root = Path(base) if base else Path.home() / ".local" / "share"
@@ -203,6 +207,7 @@ class Config:
     canvas: "CanvasConfig" = field(default_factory=lambda: CanvasConfig())
     memory_path: Path = field(default_factory=default_memory_path)
     procedures_dir: Path = field(default_factory=default_procedures_dir)
+    config_path: Path = field(default_factory=default_config_path)  # where it was read from
 
     @property
     def keep_alive(self) -> str:
@@ -218,9 +223,9 @@ def _parse_hhmm(value: str) -> tuple[int, int]:
 
 
 def load_config(path: Path | None = None) -> Config:
-    path = path or Path(__file__).resolve().parent.parent / "config.toml"
+    path = path or default_config_path()
     if not path.exists():
-        return Config()
+        return Config(config_path=path)
     with open(path, "rb") as f:
         try:
             data = tomllib.load(f)
@@ -385,4 +390,4 @@ def load_config(path: Path | None = None) -> Config:
             f"lumen: idle_unload_minutes must be positive (got {idle_unload_minutes}) "
             "— idle-unload is non-negotiable"
         )
-    return Config(**kwargs)
+    return Config(config_path=path, **kwargs)

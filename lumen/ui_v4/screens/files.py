@@ -14,6 +14,17 @@ Same data flow as ui_v3's Files screen:
     `state.nav_location_changed`).
   - `open_path(path)` opens a file requested from elsewhere (Settings' memory
     file, `state.open_file_requested`).
+
+From review.md: hidden files are off by default (a switch shows them), the
+folder view has a list/grid toggle, and an open file sits in an editor pane
+beside the folder (the folder becomes a list) — it takes the whole page only
+on narrow windows. The two panes rebuild separately, so browsing never
+touches the editor. "Ask about this file" focuses the Ask bar, which already
+carries the file.
+
+Unsaved edits are never dropped silently: Close offers Undo, and leaving a
+file any other way (back/forward, opening another file) keeps the draft until
+the file is opened again (plan L12).
 """
 from pathlib import Path
 
@@ -24,8 +35,9 @@ from PyQt6.QtWidgets import (
 
 from .. import theme as T
 from ..components import (
-    Badge, Button, ElideLabel, EmptyState, FlowLayout, IconLabel, Label,
-    ModelOffNotice, Panel, ScreenHeader, ScrollArea, TextField, TypingDots,
+    Badge, Button, ClickRow, Divider, ElideLabel, EmptyState, FlowLayout,
+    IconButton, IconLabel, Label, ModelOffNotice, Panel, ScreenHeader,
+    ScrollArea, SegmentedControl, SwitchRow, TextField, TypingDots,
     clear_layout, fire_on_next_tick, hbox, vbox,
 )
 
@@ -37,6 +49,8 @@ PROSE_SUFFIXES = {".md", ".txt", ".log"}
 CARD_MIN_W = 168
 CARD_GAP = T.S3
 NARROW = 720          # content width below which toolbars stack
+SPLIT_MIN = 960       # content width the folder + editor side by side need
+SIDE_W = 300          # the folder list beside an open file
 
 
 def _size(n) -> str:
@@ -57,6 +71,10 @@ def _pretty(p: Path) -> str:
     except ValueError:
         return str(p)
     return "~" if str(rel) == "." else f"~/{rel}"
+
+
+def _openable(entry: dict, target: Path) -> bool:
+    return entry["dir"] or target.suffix.lower() in TEXT_SUFFIXES
 
 
 class _CardGrid(QWidget):
@@ -142,6 +160,26 @@ class _FileCard(QFrame):
             super().keyPressEvent(ev)
 
 
+def _file_row(entry: dict, target: Path, openable: bool, on_open,
+              selected: bool) -> QWidget:
+    """List-mode row: icon, name, size."""
+    is_dir = entry["dir"]
+    kind = "Folder" if is_dir else ("Text file" if openable else "File")
+    row = ClickRow(on_open if openable else None, selected=selected,
+                   accessible_name=f"{kind}: {entry['name']}")
+    row.setMinimumHeight(40)
+    row.setToolTip(f"Open {entry['name']}" if openable
+                   else "Lumen can only open folders and text files.")
+    h = hbox(row, (T.S2, 4, T.S2, 4), T.S3)
+    h.addWidget(IconLabel("files" if is_dir else "file",
+                          "accent" if is_dir else ("fg2" if openable else "muted"),
+                          T.ICON_SM))
+    h.addWidget(ElideLabel(entry["name"], "small" if openable else "muted"), 1)
+    if not is_dir:
+        h.addWidget(Label(_size(entry.get("size")), "meta"))
+    return row
+
+
 class FilesScreen(QWidget):
     def __init__(self, window):
         super().__init__()
@@ -154,34 +192,42 @@ class FilesScreen(QWidget):
         self._proposal: str | None = None
         self._error: str | None = None
         self._narrow = False
+        self._split = False
         self.editor: QPlainTextEdit | None = None
-        try:
-            from .settings import install_text_size
-            install_text_size()
-        except Exception:
-            pass
+        self._drafts: dict[Path, str] = {}    # unsaved edits left behind (L12)
+        self._draft_restored = False
+        self._editor_file: Path | None = None  # the file the editor widget shows
+        prefs = T.settings()
+        self.show_hidden = bool(prefs.value("files/show_hidden", False, bool))
+        self.view_mode = prefs.value("files/view", "grid", str)
+        if self.view_mode not in ("grid", "list"):
+            self.view_mode = "grid"
 
         root = vbox(self, (T.S8, T.S6, T.S8, T.S6), T.S5)
-        self.header = ScreenHeader(
-            "Files", "Browse and edit text files on this computer. Nothing "
-                     "here is uploaded.")
+        self.header = ScreenHeader("Files", "")
         root.addWidget(self.header)
 
-        self.body = QWidget()
-        self.body_lay = vbox(self.body, (0, 0, 0, 0), T.S4)
-        root.addWidget(self.body, 1)
+        body = QWidget()
+        bl = hbox(body, (0, 0, 0, 0), T.S5)
+        self.browser = QWidget()
+        self.browser_lay = vbox(self.browser, (0, 0, 0, 0), T.S4)
+        bl.addWidget(self.browser, 1)
+        self.sep = Divider(vertical=True)
+        bl.addWidget(self.sep)
+        self.editor_pane = QWidget()
+        self.editor_lay = vbox(self.editor_pane, (0, 0, 0, 0), T.S4)
+        bl.addWidget(self.editor_pane, 2)
+        root.addWidget(body, 1)
         self.rebuild()
 
     # ---- window hooks -------------------------------------------------------
     def on_shown(self):
-        # Re-read the folder every visit: files change underneath us. An open
-        # editor is left alone so unsaved text is never thrown away.
-        if self.open_file is None:
-            self.rebuild()
+        # Re-read the folder every visit: files change underneath us. The
+        # editor is a separate pane, so unsaved text is never touched.
+        self._build_browser()
 
     def refresh(self):
-        if self.open_file is None:
-            self.rebuild()
+        self._build_browser()
 
     def ask_context(self) -> dict:
         """Dict, not a string: the daemon reads `screen` + `file`/`dir` from it
@@ -200,18 +246,22 @@ class FilesScreen(QWidget):
             path, open_file = token
         except (TypeError, ValueError):
             return
+        target = None if open_file is None else Path(open_file)
         self.path = Path(path)
-        self.dirty = False
+        if target == self.open_file:
+            # Only the folder moved: the editor (and its edits) stays.
+            self._build_browser()
+            self._sync_header()
+            self._layout()
+            return
+        got = self._read(target) if target is not None else None
+        if got is None:
+            target = None                  # vanished since; show its folder
+        self._stash_unsaved()
         self._proposal = None
-        if open_file is None:
-            self.open_file = None
-        else:
-            result = self.state.read_file(open_file)
-            if result.get("error"):
-                self.open_file = None      # vanished since; show its folder
-            else:
-                self.open_file = Path(open_file)
-                self.editor_text = result.get("content", "")
+        self.open_file = target
+        if got is not None:
+            self._take(target, got)
         self.rebuild()
 
     def open_path(self, p) -> None:
@@ -225,96 +275,171 @@ class FilesScreen(QWidget):
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
         narrow = self.width() < NARROW
+        split = self.width() >= SPLIT_MIN
         if narrow != self._narrow:
             self._narrow = narrow
+            self._apply_narrow()
+        if split != self._split:
+            self._split = split
+            if self.open_file is not None:
+                self._build_browser()     # list vs grid follows the layout
+            self._layout()
             self._apply_narrow()
 
     # ---- navigation ---------------------------------------------------------
     def _open(self, p: Path):
-        changed = self._go(p)
-        self.rebuild()
-        if changed:
+        if p.is_dir():
+            if self.path == p:
+                return
+            self.path = p
+            self._build_browser()
+            self._sync_header()
             self._emit_location()
+            return
+        if p == self.open_file:
+            return
+        if p.suffix.lower() not in TEXT_SUFFIXES:
+            self.win.show_toast(f"Lumen can only open text files, not {p.name}.")
+            return
+        got = self._read(p)
+        if got is None:
+            return               # nothing changed: the open file stays as it is
+        self._stash_unsaved()
+        self.open_file = p
+        self._take(p, got)
+        self._proposal = None
+        self.rebuild()
+        self._emit_location()
+
+    def _read(self, p: Path) -> tuple[str, bool] | None:
+        """(text, is_draft) for `p` — a draft left behind wins — or None,
+        with a toast saying why. Changes nothing, so a failed open can't
+        disturb the file that's already open."""
+        draft = self._drafts.get(p)
+        if draft is not None:
+            return draft, True
+        result = self.state.read_file(p)
+        if result.get("error"):
+            self.win.show_toast(f"Couldn't open {p.name}: {result['error']}")
+            return None
+        return result.get("content", ""), False
+
+    def _take(self, p: Path, got: tuple[str, bool]) -> None:
+        """Make `got` (from _read) the editor buffer for `p`."""
+        text, is_draft = got
+        self._drafts.pop(p, None)
+        self.editor_text = text
+        self._draft_restored = is_draft
+        self.dirty = False
+
+    def _stash_unsaved(self):
+        """Leaving an edited file without Close keeps the edits for its next
+        opening (L12) — back/forward or opening another file used to replace
+        them without a word."""
+        if self.dirty and self.editor is not None and self.open_file is not None:
+            self._drafts[self.open_file] = self.editor.toPlainText()
+            self.win.show_toast(f"Kept your unsaved changes to "
+                                f"{self.open_file.name}. They're back when you "
+                                "open it again.")
+        self.dirty = False
 
     def _emit_location(self):
         sig = getattr(self.state, "nav_location_changed", None)
         if sig is not None:
             sig.emit()
 
-    def _go(self, p: Path) -> bool:
-        """Move to `p` (a folder to browse or a text file to open). True if the
-        location actually changed."""
-        if p.is_dir():
-            if self.path == p and self.open_file is None:
-                return False
-            self.path = p
-            self.open_file = None
-            self.dirty = False
-            self._proposal = None
-            return True
-        if p.suffix.lower() in TEXT_SUFFIXES:
-            result = self.state.read_file(p)
-            if result.get("error"):
-                self.win.show_toast(f"Couldn't open {p.name}: {result['error']}")
-                return False
-            self.open_file = p
-            self.editor_text = result.get("content", "")
-            self.dirty = False
-            self._proposal = None
-            return True
-        self.win.show_toast(f"Lumen can only open text files, not {p.name}.")
-        return False
+    def _set_hidden(self, on: bool):
+        if on == self.show_hidden:
+            return
+        self.show_hidden = on
+        T.settings().setValue("files/show_hidden", bool(on))
+        self._build_browser()
+
+    def _set_view(self, mode: str):
+        if mode == self.view_mode:
+            return
+        self.view_mode = mode
+        T.settings().setValue("files/view", mode)
+        self._build_browser()
 
     # ---- build --------------------------------------------------------------
     def rebuild(self):
-        clear_layout(self.header.actions)
-        clear_layout(self.body_lay)
-        self.editor = None
-        self._tool_row = None
-        if self.open_file is None:
-            self._browser()
+        self._build_browser()
+        self._build_editor()
+        self._sync_header()
+        self._layout()
+
+    def _layout(self):
+        editing = self.open_file is not None
+        side = editing and self._split
+        self.browser.setVisible(not editing or side)
+        self.sep.setVisible(side)
+        self.editor_pane.setVisible(editing)
+        if side:
+            self.browser.setFixedWidth(SIDE_W)
         else:
-            self._editor()
-        self._apply_narrow()
+            self.browser.setMinimumWidth(0)
+            self.browser.setMaximumWidth(16777215)
+
+    def _sync_header(self):
+        if self.open_file is not None:
+            self.header.set_title(self.open_file.name)
+            self.header.set_subtitle(f"In {_pretty(self.open_file.parent)}")
+        else:
+            self.header.set_title("Files")
+            self.header.set_subtitle("Browse and edit text files on this "
+                                     "computer. Nothing here is uploaded.")
 
     def _apply_narrow(self):
+        """The editor toolbar stacks (status above the buttons) when the page
+        is narrow, or when the editor shares it with the folder list."""
         row = getattr(self, "_tool_row", None)
         if row is not None:
-            row.setDirection(QBoxLayout.Direction.TopToBottom if self._narrow
-                             else QBoxLayout.Direction.LeftToRight)
+            stack = self._narrow or (self.open_file is not None and self._split)
+            try:
+                row.setDirection(QBoxLayout.Direction.TopToBottom if stack
+                                 else QBoxLayout.Direction.LeftToRight)
+            except RuntimeError:
+                self._tool_row = None
 
     # ---- browser ------------------------------------------------------------
-    def _entries(self) -> list[dict]:
+    def _listing(self) -> tuple[list[dict], int]:
         """local_files.list_dir sorts folders first, case-insensitively, and
         reports errors as data rather than raising."""
-        result = self.state.list_dir(self.path)
+        result = self.state.list_dir(self.path, self.show_hidden)
         self._error = result.get("error")
-        return [{"name": e["name"], "dir": e["is_dir"], "size": e.get("size")}
-                for e in result.get("entries", [])]
+        entries = [{"name": e["name"], "dir": e["is_dir"], "size": e.get("size")}
+                   for e in result.get("entries", [])]
+        return entries, int(result.get("truncated") or 0)
 
-    def _browser(self):
-        self.header.set_title("Files")
-        self.header.set_subtitle("Browse and edit text files on this computer. "
-                                 "Nothing here is uploaded.")
-        at_root = self.path.parent == self.path
-        up = Button("Up one folder", "secondary", icon="arrow-up",
-                    on_click=lambda: self._open(self.path.parent))
-        up.setToolTip("Go to the parent folder")
-        up.setEnabled(not at_root)
-        self.header.add_action(up)
+    def _build_browser(self):
+        lay = self.browser_lay
+        clear_layout(lay)
+        side = self.open_file is not None and self._split
+        entries, more = self._listing()
 
-        entries = self._entries()
-
-        # Breadcrumbs + counts. The crumbs wrap (FlowLayout) when narrow.
+        # Up + breadcrumbs (they wrap when narrow) + counts.
         bar = QWidget()
-        bl = hbox(bar, (0, 0, 0, 0), T.S3)
+        bl = hbox(bar, (0, 0, 0, 0), T.S2)
+        at_root = self.path.parent == self.path
+        up = IconButton("arrow-up", "Up one folder", size=36,
+                        on_click=lambda: self._open(self.path.parent))
+        up.setEnabled(not at_root)
+        bl.addWidget(up, 0, Qt.AlignmentFlag.AlignTop)
         crumbs = QWidget()
         flow = FlowLayout(crumbs, hgap=T.S1, vgap=T.S1)
-        for i, (name, target, last) in enumerate(self._crumbs()):
-            if i:
-                flow.addWidget(Label("/", "muted"))
+        def centred(lab: Label) -> Label:
+            # Same height as the crumb buttons, so the row lines up.
+            lab.setMinimumHeight(T.BTN_H_SM)
+            lab.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            return lab
+
+        crumbs_ = self._crumbs()
+        for i, (name, target, last) in enumerate(crumbs_):
+            if i and crumbs_[i - 1][0] != "/":       # "/" is its own separator
+                flow.addWidget(centred(Label("/", "muted")))
             if last:
-                cur = Label(name, "body")
+                cur = centred(Label(name, "body"))
                 cur.setAccessibleName(f"Current folder: {name}")
                 flow.addWidget(cur)
             else:
@@ -323,41 +448,69 @@ class FilesScreen(QWidget):
                 b.setToolTip(f"Go to {_pretty(target)}")
                 flow.addWidget(b)
         bl.addWidget(crumbs, 1)
-        if not self._error:
+        if not self._error and not side:
             dirs = sum(1 for e in entries if e["dir"])
             files = len(entries) - dirs
-            count = Label(f"{dirs} folder{'' if dirs == 1 else 's'} · "
-                          f"{files} file{'' if files == 1 else 's'}", "meta")
-            bl.addWidget(count, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.body_lay.addWidget(bar)
+            bl.addWidget(Label(f"{dirs} folder{'' if dirs == 1 else 's'} · "
+                               f"{files} file{'' if files == 1 else 's'}",
+                               "meta"), 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(bar)
+
+        # View controls: hidden files, and list / grid (the side list is
+        # always a list).
+        ctl = hbox(s=T.S4)
+        hidden = SwitchRow("Show hidden files", checked=self.show_hidden)
+        hidden.setToolTip("Files and folders whose names start with a dot")
+        hidden.toggled.connect(self._set_hidden)
+        ctl.addWidget(hidden, 1)
+        if not side:
+            seg = SegmentedControl([("grid", "Grid"), ("list", "List")],
+                                   self.view_mode, accessible_name="View as")
+            seg.changed.connect(self._set_view)
+            ctl.addWidget(seg, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(ctl)
 
         if self._error:
-            self.body_lay.addWidget(EmptyState(
+            lay.addWidget(EmptyState(
                 "alert", "This folder can't be opened",
                 f"{self._error}. You may not have permission to read it.",
                 "Go to your home folder", lambda: self._open(Path.home())), 1)
             return
         if not entries:
-            self.body_lay.addWidget(EmptyState(
+            lay.addWidget(EmptyState(
                 "files", "This folder is empty",
-                "There are no files or folders in here yet.",
+                "There are no files or folders in here yet." if self.show_hidden
+                else "Nothing here, apart from any hidden files.",
                 "Up one folder", lambda: self._open(self.path.parent)), 1)
             return
 
-        cards = []
-        for e in entries:
-            target = self.path / e["name"]
-            openable = e["dir"] or target.suffix.lower() in TEXT_SUFFIXES
-            cards.append(_FileCard(e, target, openable,
-                                   lambda t=target: self._open(t)))
-        grid = _CardGrid(cards)
         sa = ScrollArea(m=(0, 0, 0, T.S2), s=0)
-        sa.lay.addWidget(grid)
+        if side or self.view_mode == "list":
+            for e in entries:
+                target = self.path / e["name"]
+                sa.lay.addWidget(_file_row(
+                    e, target, _openable(e, target),
+                    lambda t=target: self._open(t),
+                    selected=target == self.open_file))
+        else:
+            cards = []
+            for e in entries:
+                target = self.path / e["name"]
+                cards.append(_FileCard(e, target, _openable(e, target),
+                                       lambda t=target: self._open(t)))
+            sa.lay.addWidget(_CardGrid(cards))
+        if more:
+            # The listing stops at 500 so a node_modules can't hang the pane;
+            # say so rather than cutting off silently.
+            sa.lay.addSpacing(T.S3)
+            sa.lay.addWidget(Label(
+                f"{more} more not shown. This folder is too big to list in "
+                "full here.", "muted", wrap=True))
         sa.lay.addStretch(1)
-        self.body_lay.addWidget(sa, 1)
-        self.body_lay.addWidget(Label(
-            "Open a text file to edit it. Files stay on this computer.",
-            "muted"))
+        lay.addWidget(sa, 1)
+        if not side and self.open_file is None:
+            lay.addWidget(Label("Open a text file to edit it. Files stay on "
+                                "this computer.", "muted"))
 
     def _crumbs(self) -> list[tuple[str, Path, bool]]:
         parts = list(self.path.parts)
@@ -372,10 +525,20 @@ class FilesScreen(QWidget):
         return [(n, t, i == len(out) - 1) for i, (n, t) in enumerate(out)]
 
     # ---- editor -------------------------------------------------------------
-    def _editor(self):
+    def _build_editor(self):
+        lay = self.editor_lay
         f = self.open_file
-        self.header.set_title(f.name)
-        self.header.set_subtitle(f"In {_pretty(f.parent)}")
+        if (f is not None and self.editor is not None and self.dirty
+                and self._editor_file == f):
+            # Never rebuild unsaved edits away.
+            self.editor_text = self.editor.toPlainText()
+            self._draft_restored = True
+        clear_layout(lay)
+        self.editor = None
+        self._tool_row = None
+        self._editor_file = f
+        if f is None:
+            return
 
         # Toolbar: status on the left, actions on the right; stacks when narrow.
         tool = QWidget()
@@ -391,6 +554,10 @@ class FilesScreen(QWidget):
         left.addStretch(1)
         self._tool_row.addLayout(left, 1)
         right = hbox(s=T.S2)
+        ask = Button("Ask about this file", "ghost", icon="ask",
+                     on_click=self.win._focus_ask)
+        ask.setToolTip("Ask Lumen about this file in the Ask bar (Ctrl+L)")
+        right.addWidget(ask)
         self.suggest_btn = Button("Suggest an edit", "secondary", icon="edit",
                                   on_click=self._ask_edit)
         self.suggest_btn.setToolTip("Describe a change; Lumen proposes a "
@@ -403,7 +570,7 @@ class FilesScreen(QWidget):
         right.addWidget(self.save_btn)
         right.addWidget(Button("Close", "ghost", icon="x", on_click=self._close))
         self._tool_row.addLayout(right)
-        self.body_lay.addWidget(tool)
+        lay.addWidget(tool)
 
         # Instruction field, revealed by "Suggest an edit".
         self.instr_host = Panel(padding=T.S4, spacing=T.S3)
@@ -422,7 +589,7 @@ class FilesScreen(QWidget):
                               on_click=self._run_edit))
         self.instr_host.lay.addLayout(irow)
         self.instr_host.hide()
-        self.body_lay.addWidget(self.instr_host)
+        lay.addWidget(self.instr_host)
 
         # Same slot: with the model off, say so instead of offering a prompt
         # that could never be answered.
@@ -430,7 +597,7 @@ class FilesScreen(QWidget):
             self.state, "Editing and saving still work. Suggested edits need "
                         "the model.")
         self.edit_off.hide()
-        self.body_lay.addWidget(self.edit_off)
+        lay.addWidget(self.edit_off)
 
         # Proposal: apply or discard.
         self.prop_host = Panel(padding=T.S4, spacing=T.S3)
@@ -451,7 +618,7 @@ class FilesScreen(QWidget):
                               on_click=self._apply_proposal))
         self.prop_host.lay.addLayout(prow)
         self.prop_host.setVisible(self._proposal is not None)
-        self.body_lay.addWidget(self.prop_host)
+        lay.addWidget(self.prop_host)
 
         self.editor = QPlainTextEdit()
         self.editor.setAccessibleName(f"Contents of {f.name}")
@@ -459,8 +626,13 @@ class FilesScreen(QWidget):
             self.editor.setProperty("role", "code")
         self.editor.setPlainText(self.editor_text)
         self.editor.textChanged.connect(self._on_dirty)
-        self.body_lay.addWidget(self.editor, 1)
+        lay.addWidget(self.editor, 1)
         self.editor.setFocus()
+        self._apply_narrow()
+        if self._draft_restored:
+            self._draft_restored = False
+            self.dirty = False
+            self._on_dirty()           # the restored draft is still unsaved
 
     def _set_status(self, dirty: bool):
         if dirty:
@@ -484,6 +656,7 @@ class FilesScreen(QWidget):
             return
         self.dirty = False
         self.editor_text = self.editor.toPlainText()
+        self._drafts.pop(self.open_file, None)
         self._set_status(False)
         self.win.show_toast(f"Saved {self.open_file.name}")
 
@@ -493,6 +666,8 @@ class FilesScreen(QWidget):
         lost = None
         if self.dirty and self.editor is not None and self.open_file is not None:
             lost = (self.open_file, self.editor.toPlainText())
+        if self.open_file is not None:
+            self._drafts.pop(self.open_file, None)   # Undo carries the text
         self.open_file = None
         self.dirty = False
         self._proposal = None
@@ -509,9 +684,8 @@ class FilesScreen(QWidget):
         self.open_file = path
         self.editor_text = text
         self._proposal = None
+        self._draft_restored = True    # it is unsaved again
         self.rebuild()
-        self.dirty = False
-        self._on_dirty()           # it is unsaved again
         self._emit_location()
 
     # ---- suggested edit -------------------------------------------------------
@@ -537,13 +711,16 @@ class FilesScreen(QWidget):
         self.suggest_btn.set_busy(True, "Drafting…")
         target = self.open_file
 
-        def done(result):
+        def settle() -> bool:
             try:
                 self.edit_status.set_static("")
                 self.suggest_btn.set_busy(False)
             except RuntimeError:
-                return                   # screen went away mid-request
-            if self.open_file != target:
+                return False             # the editor was rebuilt meanwhile
+            return True
+
+        def done(result):
+            if not settle() or self.open_file != target:
                 return                   # a different file is open now
             result = result or {}
             if result.get("model_off"):
@@ -558,7 +735,8 @@ class FilesScreen(QWidget):
             self.prop_host.show()
 
         self.state.propose_edit(str(target), self.editor.toPlainText(),
-                                instruction, done)
+                                instruction, done,
+                                on_error=lambda _msg: settle())
 
     def _apply_proposal(self):
         if self._proposal is not None and self.editor is not None:

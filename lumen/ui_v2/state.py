@@ -13,6 +13,7 @@ This module is the only place that knows the daemon's row shapes; it is the seam
 the mock was built around.
 """
 import copy
+import html
 import re
 import time
 from datetime import date, datetime
@@ -80,7 +81,9 @@ def _norm_mail(r: dict) -> dict:
         time_s = date_s = ""
     return {"id": r["id"], "from": name, "from_addr": addr,
             "subj": r.get("subject") or "(no subject)",
-            "preview": r.get("snippet", ""), "time": time_s, "date": date_s,
+            # Gmail sends snippets HTML-escaped ("what&#39;s").
+            "preview": html.unescape(r.get("snippet") or ""),
+            "time": time_s, "date": date_s,
             "unread": not r.get("is_read", True), "body": r.get("body", ""),
             # list rows omit body_html (kept light); None = fetch on open
             "body_html": r.get("body_html"),
@@ -99,11 +102,14 @@ def _norm_event(e: dict, tz) -> dict:
 
     Time grids paint by `color` (real Google-calendar colors don't map to the
     mock's four categories), and `cal` (calendar name) is the day-view meta."""
-    color = e.get("color") or T.TEXT_DIM
+    # The event's own colour wins over its calendar's (set in Google or the
+    # edit dialog); `cal_color` keeps the calendar's for legends.
+    color = e.get("event_color") or e.get("color") or T.TEXT_DIM
     cal = e.get("calendar_name") or ""
     # id/calendar_id ride along for the delete affordance; sample events have
     # neither, which is what hides delete in sample mode.
-    ident = {"id": e.get("id"), "calendar_id": e.get("calendar_id")}
+    ident = {"id": e.get("id"), "calendar_id": e.get("calendar_id"),
+             "cal_color": e.get("color") or color}
     if e.get("all_day"):
         return {**ident, "date": e["start_at"][:10], "start": "", "start_min": 0,
                 "dur": 0, "title": e.get("title") or "Untitled", "cal": cal,
@@ -159,6 +165,8 @@ class AppState(QObject):
         self.active_conv_id: int | None = None
 
         self.mail_connected = True
+        self.mail_error: str | None = None   # newest list request failed (why)
+        self.todos_error: str | None = None  # last todos.list failed (why)
         self.mail_syncing = False
         self.mail_last_sync = None
         self._last_sync_req: float | None = None   # monotonic; sync debounce
@@ -237,15 +245,15 @@ class AppState(QObject):
         involved when the user hits Send."""
         self.compose_requested.emit(prefill or {})
 
-    def send_email(self, fields: dict, cb) -> None:
+    def send_email(self, fields: dict, cb, on_error=None) -> None:
         if self._data is not None:
-            self._data.request("emails.send", fields, cb)
+            self._data.request("emails.send", fields, cb, on_error=on_error)
         else:
             cb({"ok": True, "message": "Sent (sample mode — nothing left the app)."})
 
-    def revise_email(self, fields: dict, cb) -> None:
+    def revise_email(self, fields: dict, cb, on_error=None) -> None:
         if self._data is not None:
-            self._data.request("emails.revise", fields, cb)
+            self._data.request("emails.revise", fields, cb, on_error=on_error)
 
     def respond_compose(self, compose_id: int, fields: dict | None, cb=None) -> None:
         """Answer a chat-driven compose; fields=None cancels. Travels on the
@@ -491,11 +499,19 @@ class AppState(QObject):
     def _set_todos(self, rows: list[dict]) -> None:
         today = date.today()
         self.todos = [_norm_todo(r, today) for r in rows]
+        self.todos_error = None
+        self.todos_changed.emit()
+
+    def _todos_failed(self, msg: str) -> None:
+        """todos.list never answered: say so, so a loading skeleton can give
+        way to an error state instead of waiting forever."""
+        self.todos_error = msg
         self.todos_changed.emit()
 
     def refresh_todos(self) -> None:
         if self._data is not None:
-            self._data.request("todos.list", {}, self._set_todos)
+            self._data.request("todos.list", {}, self._set_todos,
+                               on_error=self._todos_failed)
 
     def add_todo(self, text: str):
         text = text.strip()
@@ -568,7 +584,7 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("todos.suggestions", {}, self._set_suggestions)
 
-    def scan_commitments(self, cb=None) -> None:
+    def scan_commitments(self, cb=None, on_error=None) -> None:
         """User-triggered scan of sent mail; cb(result) gets {scanned, found}."""
         if self._data is None:
             if cb:
@@ -579,7 +595,8 @@ class AppState(QObject):
             self._set_suggestions(result)
             if cb:
                 cb(result)
-        self._data.request("todos.scan_commitments", {}, handle)
+        self._data.request("todos.scan_commitments", {}, handle,
+                           on_error=on_error)
 
     def accept_suggestion(self, sid: int) -> None:
         if self._data is not None:
@@ -826,12 +843,26 @@ class AppState(QObject):
                 self._set_mails(result)
         return accept
 
+    def _list_request(self, type_: str, payload: dict) -> None:
+        """A mail list request whose reply — or failure — only counts if it's
+        still the newest. A failure keeps the mails already shown, records
+        why, and emits so a loading skeleton can give way."""
+        accept = self._list_epoch()
+        mine = self._mail_req
+
+        def fail(msg):
+            if mine == self._mail_req:
+                self.mail_error = msg
+                self.mails_changed.emit()
+        self._data.request(type_, payload, accept, on_error=fail)
+
     def _set_mails(self, result: dict) -> None:
         # emails.search responses carry only {"emails": [...]} — no status
         # keys — so absent keys must fall back to the PRIOR state, not a
         # reset default, or a search while disconnected would flip the
         # status to "connected"/"synced".
         self.mails = [_norm_mail(r) for r in result.get("emails", [])]
+        self.mail_error = None
         self.mail_connected = result.get("connected", self.mail_connected)
         self.mail_syncing = result.get("syncing", self.mail_syncing)
         self.mail_last_sync = result.get("last_sync", self.mail_last_sync)
@@ -866,16 +897,14 @@ class AppState(QObject):
 
     def refresh_mails(self) -> None:
         if self._data is not None:
-            self._data.request("emails.list", self._scope_payload(),
-                               self._list_epoch())
+            self._list_request("emails.list", self._scope_payload())
 
     def refresh_inbox(self) -> None:
         """Manual refresh: delta-sync against Gmail, then reload the current
         scope (a label view reloads as itself)."""
         if self._data is not None:
             self._last_sync_req = time.monotonic()
-            self._data.request("mail.refresh", self._scope_payload(),
-                               self._list_epoch())
+            self._list_request("mail.refresh", self._scope_payload())
 
     SYNC_DEBOUNCE_S = 60.0
 
@@ -898,7 +927,7 @@ class AppState(QObject):
         if not query:
             self.refresh_mails()
             return
-        self._data.request("emails.search", {"query": query}, self._list_epoch())
+        self._list_request("emails.search", {"query": query})
 
     def _mail_action_done(self, result: dict) -> None:
         msg = result.get("message", "")
@@ -930,9 +959,10 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("emails.auto_read", {"id": mid}, lambda _r: None)
 
-    def suggest_labels(self, cb=None) -> None:
+    def suggest_labels(self, cb=None, on_error=None) -> None:
         """One explicit press → classify unlabeled inbox mail; results stay
-        chips until tapped — nothing is written until accept."""
+        chips until tapped — nothing is written until accept. on_error(msg)
+        fires if the daemon errors or drops, so a busy UI can settle."""
         if self._data is None:
             if cb:
                 cb({})
@@ -949,7 +979,7 @@ class AppState(QObject):
             self.mails_changed.emit()
             if cb:
                 cb(result)
-        self._data.request("mail.suggest_labels", {}, handle)
+        self._data.request("mail.suggest_labels", {}, handle, on_error=on_error)
 
     def fetch_mail(self, mid: str, cb) -> None:
         """Pull one message's full row (with body_html) by id, for a reader that
@@ -1111,9 +1141,9 @@ class AppState(QObject):
     # is native to this process; reads are ungated by explicit user decision,
     # and a manual Save is direct manipulation like adding a todo). Only the
     # model-involved calls — asks and edit proposals — go to the daemon.
-    def list_dir(self, path) -> dict:
+    def list_dir(self, path, include_hidden: bool = True) -> dict:
         from lumen.daemon.connectors import local_files
-        return local_files.list_dir(path)
+        return local_files.list_dir(path, include_hidden)
 
     def read_file(self, path) -> dict:
         from lumen.daemon.connectors import local_files
@@ -1127,13 +1157,15 @@ class AppState(QObject):
             return {"error": e.strerror or str(e)}
         return {"ok": True}
 
-    def propose_edit(self, path: str, content: str, instruction: str, cb) -> None:
+    def propose_edit(self, path: str, content: str, instruction: str, cb,
+                     on_error=None) -> None:
         """✎ Edit: one local-model generation over the current editor buffer;
         cb({ok, content|message}). Nothing is written until the user applies."""
         if self._data is not None:
             self._data.request("files.propose_edit",
                                {"path": path, "content": content,
-                                "instruction": instruction}, cb)
+                                "instruction": instruction}, cb,
+                               on_error=on_error)
         else:
             cb({"ok": False, "message": "Sample mode — edits need the daemon."})
 
@@ -1165,7 +1197,7 @@ class AppState(QObject):
                                   "rating": rating, "notes": notes.strip()})
             self.books_changed.emit()
 
-    def recommend_books(self, on_done=None) -> None:
+    def recommend_books(self, on_done=None, on_error=None) -> None:
         """Generate fresh recommendations (LLM). No-op without a daemon."""
         if self._data is None:
             return
@@ -1174,7 +1206,7 @@ class AppState(QObject):
             self._set_recs(result)
             if on_done:
                 on_done()
-        self._data.request("books.recommend", {}, handle)
+        self._data.request("books.recommend", {}, handle, on_error=on_error)
 
     # ---- calendar ----
     def _calendar_handler(self, cb):
@@ -1189,11 +1221,19 @@ class AppState(QObject):
                 "error": result.get("error")})
         return handle
 
+    def _calendar_request(self, type_: str, frm: str, to: str, cb) -> None:
+        """A daemon error or a dropped connection answers cb in the same
+        shape, with `error` set, so callers keep what they had and a loading
+        skeleton gives way."""
+        def fail(msg):
+            cb({"events": [], "connected": True, "window": None, "error": msg})
+        self._data.request(type_, {"from": frm, "to": to},
+                           self._calendar_handler(cb), on_error=fail)
+
     def fetch_calendar(self, frm: str, to: str, cb) -> None:
         """cb(result) with result = {events(normalized), connected, window, error}."""
         if self._data is not None:
-            self._data.request("calendar.list", {"from": frm, "to": to},
-                               self._calendar_handler(cb))
+            self._calendar_request("calendar.list", frm, to, cb)
         else:
             evs = [e for e in _sample_events() if frm <= e["date"] <= to]
             cb({"events": evs, "connected": True, "window": None, "error": None})
@@ -1209,8 +1249,7 @@ class AppState(QObject):
             self.fetch_calendar(frm, to, cb)
             return
         self._last_cal_sync_req = time.monotonic()
-        self._data.request("calendar.refresh", {"from": frm, "to": to},
-                           self._calendar_handler(cb))
+        self._calendar_request("calendar.refresh", frm, to, cb)
 
     def sync_calendar(self, frm: str, to: str, cb) -> None:
         """Automatic refresh (Calendar or Today shown): a real Google sync,
@@ -1239,10 +1278,10 @@ class AppState(QObject):
                          ("Calendar", "Personal (primary)")],
                 "confirm_label": "Create event", "toast": "✓ Event added to calendar"})
 
-    def fetch_briefing(self, cb) -> None:
+    def fetch_briefing(self, cb, on_error=None) -> None:
         """cb({text}) — the collected morning briefing (Dashboard button)."""
         if self._data is not None:
-            self._data.request("briefing.today", {}, cb)
+            self._data.request("briefing.today", {}, cb, on_error=on_error)
         else:
             cb({"text": "Sample mode — the briefing needs the daemon running."})
 

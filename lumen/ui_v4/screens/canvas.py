@@ -48,8 +48,8 @@ from .. import theme as T
 from ..components import (
     Badge, Button, Card, ClickRow, Divider, ElideLabel, EmptyState, Eyebrow,
     Heading, IconButton, IconLabel, Label, Panel, ScreenHeader, ScrollArea,
-    SkeletonRow, Switch, SwitchRow, TagChip, TextField, clear_layout, hbox,
-    vbox,
+    SkeletonRow, Switch, SwitchRow, TagChip, TextField, clear_layout,
+    fire_on_next_tick, hbox, vbox,
 )
 
 log = logging.getLogger("lumen.ui_v4.canvas")
@@ -217,6 +217,16 @@ def _summary_line(res: dict) -> str:
     return "Synced: " + ", ".join(bits) + "."
 
 
+_STALE_KEY = "canvas/clear_browser_cookies"
+
+
+def mark_browser_session_stale() -> None:
+    """Disconnect happened while the sign-in browser wasn't built: clear its
+    persistent cookies the next time it is, or Connect silently signs back in
+    with the old session (plan L11). Settings calls this too."""
+    T.settings().setValue(_STALE_KEY, True)
+
+
 def _never_save() -> bool:
     return bool(QSettings(*_PREFS).value("canvas/never_save", False, type=bool))
 
@@ -331,6 +341,7 @@ class CanvasScreen(QWidget):
         self._save_card = None
         self._pending_creds = {"u": "", "p": ""}
         self._cred_timer: QTimer | None = None
+        self._cred_paused = False      # the poll was running when Canvas hid
         self._load_started: float | None = None
         self._load_pct = 0
         self._load_timer: QTimer | None = None
@@ -343,11 +354,6 @@ class CanvasScreen(QWidget):
         self._narrow = False
         self._assign_data = None
         self._ann_data = None
-        try:
-            from .settings import install_text_size
-            install_text_size()
-        except Exception:
-            pass
 
         outer = vbox(self, (0, 0, 0, 0), 0)
 
@@ -527,12 +533,15 @@ class CanvasScreen(QWidget):
         self._refresh_content()
 
     # ---- window hooks -----------------------------------------------------------
-    def on_shown(self):
+    def on_shown(self, connect=False):
         # Re-read the daemon's truth on every visit; pull if the mirror is stale.
-        # (No auto-login: the sign-in browser opens only from Connect.)
+        # (No auto-login: the sign-in browser opens only from a Connect click —
+        # here, or Settings → Accounts, which passes connect=True.)
         self._auto_sync_armed = True
         self._refresh_status()
-        if self._stack.currentIndex() == self._CONTENT_IDX:
+        if connect and self._stack.currentIndex() != self._BROWSER_IDX:
+            fire_on_next_tick(self._start_login)
+        elif self._stack.currentIndex() == self._CONTENT_IDX:
             self._refresh_content()
 
     def refresh(self):
@@ -1073,6 +1082,9 @@ class CanvasScreen(QWidget):
         self._profile = QWebEngineProfile("lumen-canvas", self)
         self._profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
+        if T.settings().value(_STALE_KEY, False, bool):
+            self._profile.cookieStore().deleteAllCookies()
+            T.settings().remove(_STALE_KEY)
         self._profile.cookieStore().cookieAdded.connect(self._on_cookie)
         self._profile.downloadRequested.connect(self._on_download)
         self._web = QWebEngineView(self)
@@ -1096,8 +1108,44 @@ class CanvasScreen(QWidget):
     def _open_in_browser(self, url: str, login: bool = False):
         self._login_mode = login
         self._ensure_web()
+        self._set_lifecycle("Active")
         self._web.setUrl(QUrl(url))
         self._stack.setCurrentIndex(self._BROWSER_IDX)
+
+    def _set_lifecycle(self, name: str) -> None:
+        """Active / Frozen (JS and timers stop, the page is kept) / Discarded
+        (the page is dropped; nothing runs). Power: a hidden page must not
+        keep running (M9)."""
+        if self._web is None:
+            return
+        page = self._web.page()
+        try:
+            states = type(page).LifecycleState
+            cur = page.lifecycleState()
+            if name == "Frozen" and cur != states.Active:
+                return              # already frozen or discarded: leave it
+            if cur != states[name]:
+                page.setLifecycleState(states[name])
+        except (AttributeError, KeyError, RuntimeError):
+            pass
+
+    def hideEvent(self, ev):
+        # Leaving Canvas (sidebar, shortcut, tray) while the browser is up:
+        # stop the once-a-second credential poll and freeze the page.
+        if self._cred_timer is not None:
+            self._cred_paused = True
+            self._stop_cred_poll()
+        if self._web is not None:
+            self._set_lifecycle("Frozen")
+        super().hideEvent(ev)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if self._web is not None and self._stack.currentIndex() == self._BROWSER_IDX:
+            self._set_lifecycle("Active")
+            if self._cred_paused:
+                self._start_cred_poll()
+        self._cred_paused = False
 
     def _start_login(self):
         self._pending_creds = {"u": "", "p": ""}
@@ -1127,6 +1175,9 @@ class CanvasScreen(QWidget):
         self._dismiss_save_card()
         self._login_mode = False
         self._stack.setCurrentIndex(self._CONTENT_IDX)
+        # Done with it: drop the page so nothing keeps running. The profile
+        # keeps the cookies, and the next Open loads a fresh page.
+        self._set_lifecycle("Discarded")
         self._refresh_status()
         self._refresh_content()
 
@@ -1197,6 +1248,7 @@ class CanvasScreen(QWidget):
             self._stop_cred_poll()
             if self._save_card is None:
                 self._stack.setCurrentIndex(self._CONTENT_IDX)
+                self._set_lifecycle("Discarded")     # signed in: drop the page
             self.win.show_toast("Canvas connected")
             self._auto_sync_armed = True
             self._refresh_status()
@@ -1356,6 +1408,10 @@ class CanvasScreen(QWidget):
             return
         u = self._pending_creds.get("u") or ""
         pw = self._pending_creds.get("p") or ""
+        if not u and not pw:
+            # Nothing was typed this time: the session came back from the
+            # stored cookies, so there's no login to offer to save (L11).
+            return
         existing = None
         try:
             existing = canvas_creds.load()
@@ -1409,6 +1465,7 @@ class CanvasScreen(QWidget):
                 self._stack.currentIndex() == self._BROWSER_IDX and \
                 self._cred_timer is None:
             self._stack.setCurrentIndex(self._CONTENT_IDX)
+            self._set_lifecycle("Discarded")
 
     def _save_login_from_card(self, unid: str, password: str):
         ok = False
@@ -1448,17 +1505,25 @@ class CanvasScreen(QWidget):
         self.win.confirm.open(payload, lambda ok, _p: ok and self._disconnect())
 
     def _disconnect(self):
-        self._cookies.clear()
-        self._last_sent = None
         self._reset_autofill()
         self._stop_cred_poll()
         self._dismiss_save_card()
-        if self._profile is not None:
-            self._profile.cookieStore().deleteAllCookies()
+        self.forget_browser_session()
         self._stack.setCurrentIndex(self._CONTENT_IDX)
+        self._set_lifecycle("Discarded")
         self.state.canvas_disconnect(self._apply_status)
         if not self.state.live:
             self._apply_status({"connected": False})
+
+    def forget_browser_session(self):
+        """Clear the sign-in browser's cookies, now if it's built, else the
+        next time it is (L11). Settings → Disconnect calls this too."""
+        self._cookies.clear()
+        self._last_sent = None
+        if self._profile is not None:
+            self._profile.cookieStore().deleteAllCookies()
+        else:
+            mark_browser_session_stale()
 
     def _forget(self):
         canvas_creds.forget()

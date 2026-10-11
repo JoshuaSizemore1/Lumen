@@ -6,9 +6,10 @@ Keeps everything the ui_v3 Mail screen did:
 - search (Enter runs it against the mirror; clearing it reloads the scope)
 - refresh = a real Gmail delta sync; showing the screen runs the debounced
   sync_inbox
-- list rows with unread dot, sender, time, subject, preview, label chips and
-  a delete button; clicking opens and marks read, Up/Down browse without
-  marking read (#50)
+- list rows with unread dot, sender, time, subject, preview and label
+  chips; clicking opens and marks read, Up/Down browse without marking read
+  (#50). No per-row delete (Josh, 2026-10-10): Delete lives in the reading
+  pane as the danger button, so a stray click can't start one
 - rows update in place and the list keeps your place across rebuilds (#1,
   #49)
 - reading pane: subject, sender, date, Reply / Archive / Delete, label chips
@@ -27,9 +28,10 @@ New in v4:
 - a banner when label suggestions are waiting for review
 - loading skeletons and "not connected" / empty-mailbox states
 - Delete key trashes the open message (still confirmed by the daemon)
-- below 900px the mailbox column hides and the list and message take turns
+- below 900px the mailboxes become a chip row above the list (review.md),
+  and the list and message take turns
 """
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QFont, QTextDocument
 from PyQt6.QtWidgets import (
     QFrame, QLabel, QMenu, QProgressBar, QSizePolicy, QWidget,
@@ -75,10 +77,12 @@ class MailRow(ClickRow):
     """One message in the list. Unread/selected/text update in place, so a
     click never rebuilds fifty rows (ui_v3 perf work)."""
 
-    def __init__(self, m: dict, selected: bool, on_open, on_delete):
+    def __init__(self, m: dict, selected: bool, on_open):
         super().__init__(on_open, selected)
         self.mail_id = m["id"]
-        self.setMinimumHeight(76)
+        # No setMinimumHeight: an explicit minimum replaces the layout's, and
+        # a row with label chips needs more than a fixed 76px — the list
+        # squashed those rows until their text overlapped.
         h = hbox(self, (T.S3, T.S3, T.S2, T.S3), T.S3)
         dot_col = vbox(m=(0, 7, 0, 0), s=0)
         self.dot = Dot("accent", 8)
@@ -95,9 +99,6 @@ class MailRow(ClickRow):
         top.addWidget(self.from_lab, 1)
         self.time_lab = Label(m.get("time", ""), "meta")
         top.addWidget(self.time_lab, 0, Qt.AlignmentFlag.AlignVCenter)
-        top.addWidget(IconButton("trash", "Move to Gmail Trash", size=28,
-                                 icon_size=T.ICON_SM, color="muted",
-                                 on_click=on_delete))
         col.addLayout(top)
         self.subj_lab = ElideLabel(m.get("subj", ""), "small")
         col.addWidget(self.subj_lab)
@@ -270,6 +271,7 @@ class MailScreen(QWidget):
         self._reading = False           # narrow mode: message instead of list
         self._nav_shown = True
         self._nav_sig = None
+        self._chip_sig = None
         self._pane_sig = None
         self._body_sig = None
         self._rows: dict[str, MailRow] = {}
@@ -338,11 +340,20 @@ class MailScreen(QWidget):
         self.search.textChanged.connect(self._search_edited)
         bar.addWidget(self.search, 1)
         lv.addLayout(bar)
+        # Narrow windows: the mailboxes as a chip row instead of a column.
+        self.chip_host = QWidget()
+        self.chip_flow = FlowLayout(self.chip_host, T.S2, T.S2)
+        self.chip_host.setContentsMargins(T.S3, 0, T.S3, T.S3)
+        self.chip_host.hide()
+        lv.addWidget(self.chip_host)
         self.review_host = QWidget()
         self.review_lay = vbox(self.review_host, (T.S3, 0, T.S3, T.S3), 0)
         lv.addWidget(self.review_host)
         self.list_scroll = ScrollArea(m=(T.S2, 0, T.S2, T.S4), s=0)
         self.list_lay = self.list_scroll.lay
+        # A clicked row has focus and ignores Up/Down, so they bubble up to
+        # the scroll area, which used them to scroll (#50 was dead, L13).
+        self.list_scroll.installEventFilter(self)
         lv.addWidget(self.list_scroll, 1)
         body.addWidget(self.list_col)
         self.list_sep = Divider(vertical=True)
@@ -363,7 +374,7 @@ class MailScreen(QWidget):
         self.rebuild()
 
     # ---- hooks --------------------------------------------------------------
-    def on_shown(self, mid=None, compose=False):
+    def on_shown(self, mid=None, compose=False, resumed=False):
         if self._dirty:
             self.rebuild()
         self.state.sync_inbox()
@@ -371,7 +382,9 @@ class MailScreen(QWidget):
             self.state.select_mail(mid)
             self._reading = True
             self._apply_layout()
-        elif self._narrow:
+        elif self._narrow and not resumed:
+            # Arriving from another screen shows the list; coming back from
+            # the tray keeps the message you were reading.
             self._reading = False
             self._apply_layout()
         if compose:
@@ -380,7 +393,9 @@ class MailScreen(QWidget):
     def refresh(self):
         self.state.refresh_inbox()
 
-    def ask_context(self) -> str:
+    def ask_context(self) -> dict:
+        """Dict, not a string: `message` names the open email, which the Ask
+        bar sends as `open_email` so "label this email" resolves (ui_v3 #11)."""
         st = self.state
         m = st.sel_mail()
         scope = _scope_name(st.mail_scope)
@@ -389,15 +404,18 @@ class MailScreen(QWidget):
             if len(body) > 6000:
                 body = body[:6000] + "…"
             labels = ", ".join(m.get("label_names") or []) or "none"
-            return (f"Inbox screen ({scope}), reading an email.\n"
-                    f"From: {m.get('from', '')} <{m.get('from_addr', '')}>\n"
-                    f"Date: {m.get('date', '')}\nSubject: {m.get('subj', '')}\n"
-                    f"Labels: {labels}\n\n{body}")
+            summary = (f"Inbox screen ({scope}), reading an email.\n"
+                       f"From: {m.get('from', '')} <{m.get('from_addr', '')}>\n"
+                       f"Date: {m.get('date', '')}\nSubject: {m.get('subj', '')}\n"
+                       f"Labels: {labels}\n\n{body}")
+            return {"screen": "mail", "summary": summary,
+                    "message": {"id": m["id"], "subject": m.get("subj"),
+                                "from": m.get("from")}}
         lines = [f"Inbox screen, {scope}: {st.unread_count()} unread."]
         lines += [f"- {x.get('from', '')}: {x.get('subj', '')}"
                   + (" (unread)" if x.get("unread") else "")
                   for x in st.mails[:15]]
-        return "\n".join(lines)
+        return {"screen": "mail", "summary": "\n".join(lines)}
 
     def nav_token(self):
         return (self.state.mail_scope, self.state.selected_mail)
@@ -417,9 +435,8 @@ class MailScreen(QWidget):
             self.busy.setGeometry(self.rect())
         narrow = self.width() < NARROW
         if narrow != self._narrow:
+            # _nav_shown is the wide layout's choice (#10); narrow uses chips.
             self._narrow = narrow
-            if narrow:
-                self._nav_shown = False
             self._apply_layout()
 
     # ---- layout -------------------------------------------------------------
@@ -430,20 +447,19 @@ class MailScreen(QWidget):
         self._apply_layout()
 
     def _apply_layout(self):
-        nav = self._nav_shown
+        narrow = self._narrow
+        nav = self._nav_shown and not narrow
         self.nav.setVisible(nav)
         self.nav_sep.setVisible(nav)
-        self.nav_toggle.setVisible(not nav)
-        if self._narrow:
+        self.nav_toggle.setVisible(not nav and not narrow)
+        self.chip_host.setVisible(narrow)
+        if narrow:
             reading = self._reading and self.state.sel_mail() is not None
             self.list_col.setMaximumWidth(16777215)
             self.list_col.setMinimumWidth(0)
             self.list_col.setVisible(not reading)
             self.list_sep.setVisible(False)
             self.pane.setVisible(reading)
-            if reading:
-                self.nav.setVisible(False)
-                self.nav_sep.setVisible(False)
         else:
             self.list_col.setFixedWidth(LIST_W)
             self.list_col.show()
@@ -491,7 +507,6 @@ class MailScreen(QWidget):
                 return
         self.state.set_mail_scope(scope)
         if self._narrow:
-            self._nav_shown = False
             self._reading = False
             self._apply_layout()
         self.state.nav_location_changed.emit()
@@ -524,6 +539,7 @@ class MailScreen(QWidget):
             bits.append("syncing")
         self.header.set_subtitle(", ".join(bits) + ".")
         self._build_nav()
+        self._build_chips()
         self._build_review()
 
         ids = [m["id"] for m in st.mails]
@@ -557,6 +573,27 @@ class MailScreen(QWidget):
             for name in st.mail_labels:
                 self.nav_lay.addWidget(self._nav_row(name, name, 0))
         self.nav_lay.addStretch(1)
+
+    def _build_chips(self):
+        st = self.state
+        unread = st.unread_count()
+        sig = (unread, tuple(st.mail_labels), st.mail_scope)
+        if sig == self._chip_sig:
+            return
+        self._chip_sig = sig
+        clear_layout(self.chip_flow)
+        for key, name, _icon in SCOPES:
+            text = f"{name}  {unread}" if key == "unread" and unread else name
+            chip = TagChip(text, on_click=lambda k=key: self._set_scope(k),
+                           active=st.mail_scope == key, dot=False)
+            chip.setAccessibleName(name + (f", {unread} unread"
+                                           if key == "unread" and unread else ""))
+            self.chip_flow.addWidget(chip)
+        for name in st.mail_labels:
+            self.chip_flow.addWidget(TagChip(
+                name, slot=T.tag_slot(name),
+                on_click=lambda n=name: self._set_scope(n),
+                active=st.mail_scope == name))
 
     def _nav_row(self, key: str, name: str, count: int, icon: str | None = None):
         on = self.state.mail_scope == key
@@ -627,15 +664,18 @@ class MailScreen(QWidget):
             return
         for m in mails:
             mid = m["id"]
-            row = MailRow(m, mid == sel,
-                          on_open=lambda i=mid: self._open(i),
-                          on_delete=lambda i=mid: self._delete(i))
+            row = MailRow(m, mid == sel, on_open=lambda i=mid: self._open(i))
             self._rows[mid] = row
             self.list_lay.addWidget(row)
         self.list_lay.addStretch(1)
 
     def _empty_list(self) -> QWidget:
         st = self.state
+        if st.mail_error:
+            return EmptyState(
+                "alert", "Couldn't load your mail",
+                "Lumen's background service didn't answer. It may not be "
+                "running.", "Try again", self.state.refresh_mails)
         if not st.mail_connected:
             return EmptyState(
                 "mail", "Gmail isn't connected",
@@ -687,6 +727,14 @@ class MailScreen(QWidget):
             QTimer.singleShot(0, lambda: self._restore_anchor(anchor, False))
 
     # ---- keyboard (#50) -----------------------------------------------------
+    def eventFilter(self, obj, ev):
+        if (obj is self.list_scroll and ev.type() == QEvent.Type.KeyPress
+                and ev.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up)
+                and not ev.modifiers()):
+            self._step(1 if ev.key() == Qt.Key.Key_Down else -1, focus=True)
+            return True             # at either end it's still not a scroll
+        return super().eventFilter(obj, ev)
+
     def keyPressEvent(self, ev):
         key = ev.key()
         if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
@@ -703,9 +751,10 @@ class MailScreen(QWidget):
             return
         super().keyPressEvent(ev)
 
-    def _step(self, delta: int) -> bool:
+    def _step(self, delta: int, focus: bool = False) -> bool:
         """Arrow keys browse without marking anything read: sweeping past a
-        message is not a decision to have read it."""
+        message is not a decision to have read it. focus moves keyboard focus
+        along with the selection (browsing from a focused row)."""
         ids = [m["id"] for m in self.state.mails]
         if not ids:
             return False
@@ -720,6 +769,8 @@ class MailScreen(QWidget):
         row = self._rows.get(ids[j])
         if row is not None:
             self.list_scroll.ensureWidgetVisible(row, 0, 40)
+            if focus:
+                row.setFocus(Qt.FocusReason.OtherFocusReason)
         return True
 
     # ---- reading pane -------------------------------------------------------
@@ -799,7 +850,8 @@ class MailScreen(QWidget):
 
         acts_host = QWidget()
         acts = FlowLayout(acts_host, T.S2, T.S2)
-        acts.addWidget(Button("Reply", "primary", icon="reply",
+        # One primary per view, and that's Compose (review.md).
+        acts.addWidget(Button("Reply", "secondary", icon="reply",
                               on_click=lambda: self._reply(m)))
         acts.addWidget(Button("Forward", "secondary", icon="forward",
                               on_click=lambda: self._forward(m)))
@@ -807,7 +859,7 @@ class MailScreen(QWidget):
                       on_click=lambda: self.state.archive_mail(m["id"]))
         arch.setToolTip("Take it out of the inbox. Lumen asks first.")
         acts.addWidget(arch)
-        dele = Button("Delete", "secondary", icon="trash",
+        dele = Button("Delete", "danger", icon="trash",
                       on_click=lambda: self._delete(m["id"]))
         dele.setToolTip("Move to Gmail Trash. Lumen asks first.")
         acts.addWidget(dele)
@@ -873,7 +925,15 @@ class MailScreen(QWidget):
         body = ("\n\n---------- Forwarded message ----------\n"
                 f"From: {sender}\nDate: {m.get('date', '')}\n"
                 f"Subject: {m.get('subj', '')}\n\n{_plain_body(m)}")
-        self.state.open_compose({"to": "", "subject": subj, "body": body})
+        payload = {"to": "", "subject": subj, "body": body}
+        attachments = [str(a) for a in (m.get("attachments") or [])]
+        if attachments:
+            # Compose can't attach files, so say so instead of dropping them
+            # without a word (L16).
+            payload["note"] = ("Attachments aren't forwarded: "
+                               + ", ".join(attachments)
+                               + ". Forward from Gmail to include them.")
+        self.state.open_compose(payload)
 
     def _label_menu(self, m: dict, anchor: QWidget):
         applied = set(m.get("label_names") or [])
@@ -902,7 +962,18 @@ class MailScreen(QWidget):
                         "Lumen is reading unlabeled mail on this computer. "
                         "Nothing changes until you accept a suggestion.")
         self.suggest_btn.set_busy(True, "Sorting…")
-        self.state.suggest_labels(cb=self._suggest_done)
+        self.state.suggest_labels(cb=self._suggest_done,
+                                  on_error=self._suggest_failed)
+
+    def _suggest_failed(self, _msg: str):
+        """The daemon errored or dropped: without this the scrim waited for a
+        reply that never comes and swallowed every click (H2). The message
+        itself reaches the user as the app's error toast."""
+        try:
+            self.suggest_btn.set_busy(False)
+        except RuntimeError:
+            return
+        self.busy.hide()
 
     def _suggest_done(self, result):
         try:

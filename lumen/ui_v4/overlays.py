@@ -268,6 +268,11 @@ class ConfirmOverlay(_Overlay):
         cb, self._callback = self._callback, None
         if cb:
             cb(approved, payload)
+        # Shown here, not by each caller: a screen's own confirm (Disconnect,
+        # Remove all) carries a toast too, and nothing else showed it (L7).
+        show = getattr(self.parentWidget(), "show_toast", None)
+        if approved and payload.get("toast") and show is not None:
+            show(payload["toast"])
         if self._queue and not self._active:
             nxt = self._queue.pop(0)
             QTimer.singleShot(0, lambda: self.open(*nxt))
@@ -295,6 +300,17 @@ class ComposeOverlay(_Overlay):
         v.addLayout(head)
 
         body = vbox(m=(T.S6, 0, T.S6, T.S4), s=T.S4)
+        # A caller's warning about this draft (e.g. attachments a forward
+        # can't carry).
+        self.note = Panel(padding=T.S3, spacing=0)
+        nrow = hbox(s=T.S2)
+        nrow.addWidget(IconLabel("paperclip", "warn", T.ICON_SM), 0,
+                       Qt.AlignmentFlag.AlignTop)
+        self.note_text = Label("", "small", wrap=True)
+        nrow.addWidget(self.note_text, 1)
+        self.note.lay.addLayout(nrow)
+        self.note.hide()
+        body.addWidget(self.note)
         self.to_field = TextField("To", "Separate addresses with commas",
                                   "name@example.com")
         self.subject_field = TextField("Subject")
@@ -331,8 +347,9 @@ class ComposeOverlay(_Overlay):
         foot, fl = _dialog_foot()
         fl.addWidget(Button("Discard", "ghost", on_click=self.close_it))
         fl.addStretch(1)
-        fl.addWidget(Kbd("Ctrl+Enter"))
-        self.send_btn = Button("Review & send", "primary", icon="send",
+        fl.addWidget(Kbd("Ctrl+Enter"), 0, Qt.AlignmentFlag.AlignVCenter)
+        # "&&": a lone & is a mnemonic marker and rendered "Review _send" (L1).
+        self.send_btn = Button("Review && send", "primary", icon="send",
                                on_click=self._send)
         fl.addWidget(self.send_btn)
         v.addWidget(foot)
@@ -351,6 +368,8 @@ class ComposeOverlay(_Overlay):
         if isinstance(to, list):
             to = ", ".join(to)
         self.heading.setText("Reply" if self._reply_to else "New email")
+        self.note_text.setText(payload.get("note") or "")
+        self.note.setVisible(bool(payload.get("note")))
         self.to_field.clear_error()
         self.to.setText(to)
         self.subject.setText(payload.get("subject", ""))
@@ -380,6 +399,9 @@ class ComposeOverlay(_Overlay):
             self._compose_id = None
 
     def _send(self):
+        """Send button and Ctrl+Enter: review first. A send is an outside
+        write, and the caption promises a confirm before it goes (Josh,
+        2026-10-10, plan L14)."""
         if not self.isVisible():
             return
         fields = self.fields()
@@ -387,12 +409,36 @@ class ComposeOverlay(_Overlay):
             self.to_field.set_error("Add at least one recipient.")
             self.to.setFocus()
             return
+        body = fields["body"].strip()
+        rows = [("To", ", ".join(fields["to"])),
+                ("Subject", fields["subject"] or "(no subject)")]
+        if body:
+            rows.append(("Message", body if len(body) <= 280
+                         else body[:279].rstrip() + "…"))
+        payload = {"icon": "send", "title": "Send this email?",
+                   "intro": "Lumen sends it from your Gmail now.",
+                   "rows": rows, "confirm_label": "Send", "danger": False}
+        confirm = getattr(self.parentWidget(), "confirm", None)
+        if confirm is None:
+            self._really_send(fields)
+            return
+        confirm.open(payload, lambda ok, _p: ok and self._really_send(fields))
+
+    def _really_send(self, fields: dict):
+        if not self.isVisible():
+            return
         self.close_overlay()
         if self._compose_id is not None:
             self.state.respond_compose(self._compose_id, fields)
             self._compose_id = None
             return
-        self.state.send_email(fields, self._sent)
+
+        def failed(_msg):
+            # The draft would otherwise be gone with the closed window.
+            self.state.toast_requested.emit("Couldn't send. Your draft is back.")
+            self.open({"to": fields["to"], "subject": fields["subject"],
+                       "body": fields["body"], "reply_to": fields.get("reply_to")})
+        self.state.send_email(fields, self._sent, on_error=failed)
 
     def _sent(self, result):
         r = result or {}
@@ -405,6 +451,7 @@ class ComposeOverlay(_Overlay):
             return
         self.ask.clear()
         self.hint.show()
+        self.hint.set_role("small")       # a previous failure left it red
         self.hint.start("Revising")
         self.revise_btn.set_busy(True, "Revising…")
 
@@ -422,9 +469,15 @@ class ComposeOverlay(_Overlay):
                 self.subject.setText(r["subject"])
             self.hint.set_static(r.get("note", "Updated the draft."), "small")
 
+        def failed(msg):
+            if sip.isdeleted(self):
+                return
+            self.revise_btn.set_busy(False)
+            self.hint.set_static(f"Revision failed: {msg}", "error")
+
         payload = dict(self.fields())
         payload["instruction"] = instruction
-        self.state.revise_email(payload, done)
+        self.state.revise_email(payload, done, on_error=failed)
 
 
 # ---- event ------------------------------------------------------------------
@@ -466,7 +519,7 @@ class EventOverlay(_Overlay):
         foot, fl = _dialog_foot()
         fl.addStretch(1)
         fl.addWidget(Button("Cancel", "secondary", on_click=self.close_overlay))
-        fl.addWidget(Button("Review & create", "primary", icon="calendar",
+        fl.addWidget(Button("Review && create", "primary", icon="calendar",
                             on_click=self._create))
         v.addWidget(foot)
         for f in (self.title, self.date, self.start, self.end, self.location):
@@ -589,6 +642,9 @@ class RuleDialog(_Overlay):
                 ("✓ " if r.get("ok") else "") + (r.get("message") or fallback))
             # A save may have backfill-labeled mail — reload rows and chips.
             self.state.refresh_mails()
+            sig = getattr(self.state, "rules_changed", None)
+            if sig is not None:
+                sig.emit()
         return done
 
     def _save(self):
@@ -875,8 +931,12 @@ class CommandPalette(_Overlay):
              "write mail send new message"),
             ("New calendar event", "calendar", "", lambda: w.open_event({}),
              "create meeting schedule"),
+            ("Morning briefing", "sun", "", lambda: w.switch_to("today", brief=True),
+             "today summary day overview"),
+            ("Ask about this page", "ask", "Ctrl+L", w._focus_ask,
+             "question ask bar"),
             ("Ask Lumen", "ask", "Ctrl+8", lambda: w.switch_to("ask", focus=True),
-             "chat question"),
+             "chat question conversation"),
             ("Switch theme", "contrast", "", w.cycle_theme,
              "dark light mode appearance"),
             ("Go back", "arrow-left", "Alt+←", w.go_back, "history previous"),
@@ -899,9 +959,18 @@ class CommandPalette(_Overlay):
                        if not q or q in e[0].lower() or q in e[4]]
         if q:
             question = text.strip()
-            self._shown.append((f"Ask Lumen: “{question}”", "ask", "",
-                                lambda qq=question: self.win.ask(
-                                    qq, self.win.current_ask_context()), ""))
+            bar = getattr(self.win, "askbar", None)
+            if bar is not None and bar.isVisible():
+                # On a page with an Ask bar, answer there, like the bar does.
+                self._shown.append((
+                    f"Ask about this page: “{question}”", "ask", "",
+                    lambda qq=question: bar.ask(
+                        qq, self.win.current_ask_context()), ""))
+            else:
+                self._shown.append((
+                    f"Ask Lumen: “{question}”", "ask", "",
+                    lambda qq=question: self.win.ask(
+                        qq, self.win.current_ask_context()), ""))
         self.list.clear()
         for title, icon, hint, _fn, _kw in self._shown:
             item = QListWidgetItem()

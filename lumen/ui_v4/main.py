@@ -8,27 +8,27 @@ import or construct shows an error state instead of taking the app down.
 import importlib
 import inspect
 import sys
+import time
 import traceback
 from datetime import date
 
-from PyQt6.QtCore import QEvent, QRectF, Qt
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QKeySequence, QPainter, QPen, QShortcut
-from PyQt6.QtWidgets import (
-    QApplication, QFrame, QLabel, QLineEdit, QStackedWidget, QWidget,
-)
+from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QStackedWidget, QWidget
 
 from ..ui_v3.nav_history import NavController, NavEntry
 from ..ui_v3.state import AppState
 from ..ui_v3.swipe_nav import BACK, SwipeNavigator
 from . import icons
 from . import theme as T
+from .askbar import AskBar
 from .components import (
-    Badge, Divider, Dot, ElideLabel, EmptyState, Eyebrow, IconButton, IconLabel,
+    Badge, Divider, Dot, ElideLabel, EmptyState, Eyebrow, IconLabel,
     Label, fire_on_next_tick, hbox, set_prop, vbox,
 )
 from .overlays import (
     CommandPalette, ComposeOverlay, ConfirmOverlay, EventOverlay, RuleDialog,
-    SuggestReviewOverlay, Toast,
+    SuggestReviewOverlay, Toast, _Overlay,
 )
 
 # (key, label, icon, shortcut) — stack order; Ctrl+1..8 in this order.
@@ -133,57 +133,6 @@ class NavItem(QFrame):
             super().keyPressEvent(ev)
 
 
-# ---- ask bar ----------------------------------------------------------------
-class AskBar(QFrame):
-    """Bottom of the content area. Hands the question — with the current
-    page's context — to the Ask screen's one conversation."""
-
-    def __init__(self, window):
-        super().__init__()
-        self.win = window
-        self.setObjectName("askbar")
-        h = hbox(self, (T.S6, T.S3, T.S6, T.S3), T.S3)
-        self.label = QLabel("Ask Lumen")
-        self.label.setObjectName("askLabel")
-        h.addWidget(self.label)
-        self.field = QFrame()
-        self.field.setObjectName("askField")
-        fh = hbox(self.field, (T.S3, 4, 4, 4), T.S2)
-        fh.addWidget(IconLabel("ask", "muted", T.ICON_SM))
-        self.input = QLineEdit()
-        self.input.setProperty("role", "bare")
-        self.input.setPlaceholderText("Ask about this page…")
-        self.input.setAccessibleName("Ask Lumen")
-        self.input.returnPressed.connect(self.submit)
-        self.input.installEventFilter(self)
-        self.label.setBuddy(self.input)
-        fh.addWidget(self.input, 1)
-        self.send = IconButton("arrow-up", "Ask", size=32, variant="primary",
-                               on_click=self.submit)
-        fh.addWidget(self.send)
-        h.addWidget(self.field, 1)
-
-    def eventFilter(self, obj, ev):
-        if obj is self.input and ev.type() in (QEvent.Type.FocusIn,
-                                              QEvent.Type.FocusOut):
-            set_prop(self.field, "focused", ev.type() == QEvent.Type.FocusIn)
-        return False
-
-    def focus(self):
-        self.input.setFocus()
-        self.input.selectAll()
-
-    def submit(self):
-        q = self.input.text().strip()
-        if not q:
-            return
-        self.input.clear()
-        self.win.ask(q, self.win.current_ask_context())
-
-    def set_collapsed(self, on: bool) -> None:
-        self.label.setVisible(not on)
-
-
 # ---- swipe indicator --------------------------------------------------------
 class _SwipeIndicator(QWidget):
     """Circle + arrow that drags in from an edge during a back/forward swipe.
@@ -233,6 +182,9 @@ class _SwipeIndicator(QWidget):
 class LumenWindow(QWidget):
     quit_on_close = False
     NAV_ENTRIES = NAV + (SETTINGS,)
+    # Coming back from the tray re-runs the current screen's on_shown, at most
+    # this often (focus flapping shouldn't hammer the daemon).
+    RESUME_REFRESH_S = 30.0
 
     def __init__(self, state: AppState | None = None, chat_client=None):
         super().__init__()
@@ -248,6 +200,8 @@ class LumenWindow(QWidget):
         self._collapsed = False
         self._current_key: str | None = None
         self._screen_cache: dict[str, QWidget] = {}
+        self._last_shown = 0.0            # monotonic time of the last on_shown
+        self._booting = True              # restoring last_screen at startup
 
         root = hbox(self, (0, 0, 0, 0), 0)
         self.sidebar = self._build_sidebar()
@@ -282,8 +236,6 @@ class LumenWindow(QWidget):
         self.suggest_review = SuggestReviewOverlay(self, self.state)
         self.command_palette = CommandPalette(self)
         self.toast = Toast(self)
-        self._modals = (self.confirm, self.compose, self.event, self.rules,
-                        self.suggest_review, self.command_palette)
 
         # ---- state wiring -------------------------------------------------
         s = self.state
@@ -326,6 +278,7 @@ class LumenWindow(QWidget):
             self.restoreGeometry(geo)
         start = self._settings.value("last_screen", "today", str)
         self.switch_to(start if start in SCREENS else "today")
+        self._booting = False
 
     # ---- public API ---------------------------------------------------------
     @property
@@ -344,6 +297,9 @@ class LumenWindow(QWidget):
             # A lazy build can leave the stack already on idx (no signal).
             self._sync_chrome(idx)
         self._call_shown(screen, kw)
+        # After on_shown has applied kw (view=, mid=…), so history records the
+        # view actually on screen, not the one before it (L2).
+        self._record_location()
 
     def show_toast(self, msg: str, undo=None) -> None:
         self._toast_inset()
@@ -360,6 +316,12 @@ class LumenWindow(QWidget):
             self.show_toast("Ask Lumen isn't available right now.")
             return
         self._safe("ask.start", start, question, context)
+
+    def chat_busy(self) -> bool:
+        """The Ask bar and the Ask screen share one chat connection, so only
+        one turn streams at a time."""
+        ask = self._screen_cache.get("ask")
+        return self.askbar.busy or bool(getattr(ask, "_busy", False))
 
     def current_ask_context(self):
         """The visible screen's ask_context(), or None."""
@@ -486,16 +448,20 @@ class LumenWindow(QWidget):
     def _sync_model(self):
         st = self.state
         mode = getattr(st, "model_mode", "local")
+        # Plain words, as the Ask header says it (review.md); the raw model
+        # tag is in the tooltip for anyone who wants it.
         if not st.model_enabled or mode == "off":
-            text, color = "Model off", "muted"
+            text, color, tip = "Model off", "muted", "The model is off"
         elif mode == "claude":
             sub = getattr(st, "model_claude_model", "") or ""
-            text, color = f"Claude · {sub.capitalize()}" if sub else "Claude", "info"
+            text = f"Claude · {sub.capitalize()}" if sub else "Claude"
+            color, tip = "info", f"Answers come from {text}"
         else:
-            text, color = f"Local · {T.MODEL_NAME}", "success"
+            text, color = "On this computer", "success"
+            tip = f"Answers come from {T.MODEL_NAME}, on this computer"
         self.model_dot.set_color(color)
         self.model_label.setText(text)
-        self.status_line.setToolTip(f"Model: {text}")
+        self.status_line.setToolTip(tip)
 
     def _sync_theme_item(self):
         pref = T.manager().pref
@@ -564,6 +530,7 @@ class LumenWindow(QWidget):
         fn = getattr(screen, "on_shown", None)
         if fn is None:
             return
+        self._last_shown = time.monotonic()
         if kw:
             try:
                 params = inspect.signature(fn).parameters
@@ -588,14 +555,15 @@ class LumenWindow(QWidget):
             return
         key = SCREENS[index]
         self._current_key = key
-        self._record_location()
         for k, it in self.nav_items.items():
             it.set_selected(k == key)
         self.askbar.setVisible(key not in NO_ASKBAR)
         self._toast_inset()
         self._sync_date()
         self._settings.setValue("last_screen", key)
-        if key == "ask":
+        # Warm only for a switch the user made: reopening on Ask at login
+        # must not load the model with nobody asking (power rule, M5).
+        if key == "ask" and not self._booting:
             self.state.warm_model()
 
     def _toast_inset(self):
@@ -605,7 +573,9 @@ class LumenWindow(QWidget):
             self.toast.reposition()
 
     def _modal_open(self) -> bool:
-        return any(m.isVisible() for m in self._modals)
+        """Any overlay up, the window's own or a screen's (todo detail, event
+        editor, new label): shortcuts must not act behind it (L4)."""
+        return any(o.isVisible() for o in self.findChildren(_Overlay))
 
     def _shortcut_nav(self, key: str):
         if not self._modal_open():
@@ -670,8 +640,7 @@ class LumenWindow(QWidget):
         if confirm_id is not None:     # daemon confirm-over-IPC: always answer
             self.state.respond_confirm(confirm_id, approved,
                                        check=payload.get("check_state"))
-        if approved and payload.get("toast"):
-            self.show_toast(payload["toast"])
+        # (An approved payload's "toast" is shown by the overlay itself.)
 
     def _open_compose(self, payload: dict):
         self._present()
@@ -703,6 +672,18 @@ class LumenWindow(QWidget):
     # ---- geometry -----------------------------------------------------------
     def _save_geometry(self):
         self._settings.setValue("geometry", self.saveGeometry())
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # Back from the tray, or un-minimized: screens refresh only in
+        # on_shown, which otherwise runs only on a switch (M1).
+        if (self._current_key is None or self._booting
+                or time.monotonic() - self._last_shown < self.RESUME_REFRESH_S):
+            return
+        self._sync_date()
+        screen = self._screen_cache.get(self._current_key)
+        if screen is not None:
+            self._call_shown(screen, {"resumed": True})
 
     def closeEvent(self, ev):
         self._save_geometry()

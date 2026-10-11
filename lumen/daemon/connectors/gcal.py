@@ -9,6 +9,7 @@ import sqlite3
 from datetime import date, datetime, time, timedelta
 
 from lumen.daemon.connectors import google_auth
+from lumen.daemon.connectors.gcal_colors import GCAL_COLOR_HEX
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +25,9 @@ def _status(exc) -> int | None:
     except (TypeError, ValueError):
         return None
 
-COLUMNS = ("id", "calendar_id", "calendar_name", "color", "title", "start_at",
-           "end_at", "all_day", "location", "description", "attendees", "status")
+COLUMNS = ("id", "calendar_id", "calendar_name", "color", "event_color",
+           "title", "start_at", "end_at", "all_day", "location", "description",
+           "attendees", "status")
 
 
 class EventStore:
@@ -193,6 +195,9 @@ class CalendarSync:
             "calendar_id": cal["id"],
             "calendar_name": cal.get("summary"),
             "color": cal.get("backgroundColor"),
+            # The event's own colour, when it has one (set in Google or in
+            # Lumen's edit dialog); None = it shows in its calendar's colour.
+            "event_color": GCAL_COLOR_HEX.get(str(item.get("colorId") or "")),
             "title": item.get("summary"),
             "start_at": start.get("dateTime") or start.get("date"),
             "end_at": end.get("dateTime") or end.get("date"),

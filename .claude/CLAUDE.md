@@ -56,6 +56,7 @@ Read the relevant skill in `.claude/skills/` before touching that subsystem:
 - `file-workbench.md` — Files tab: browse/edit local files, ask-with-context, assisted edits
 - `writing-style.md` — derive-once/apply-often approach to writing in your own style
 - `project-scope.md` — full scope: what Lumen is and is not, in/out of scope, discussed-but-not-committed ideas
+- `ui-spec.md` — ui_v4 screen behaviour, Josh's design decisions, and the UI invariants its tests guard
 
 See also `.claude/skills/development-plan.md` for build order and success criteria per phase.
 

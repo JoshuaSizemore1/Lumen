@@ -40,10 +40,15 @@ class DaemonClient(QObject):
     def send(self, type_: str, payload: dict) -> None:
         self._send_line({"id": next(self._ids), "type": type_, "payload": payload})
 
-    def request(self, type_: str, payload: dict, on_result) -> None:
-        """One-shot: on_result(result) fires when the daemon answers this id."""
+    def request(self, type_: str, payload: dict, on_result,
+                on_error=None) -> None:
+        """One-shot: on_result(result) fires when the daemon answers this id.
+        on_error(message), if given, fires instead when the daemon answers
+        with an error or the connection drops, so a caller waiting on the
+        reply (a busy scrim, a loading skeleton) can always settle. The
+        `error` signal still fires either way."""
         req_id = next(self._ids)
-        self._callbacks[req_id] = on_result
+        self._callbacks[req_id] = (on_result, on_error)
         self._send_line({"id": req_id, "type": type_, "payload": payload})
 
     def _send_line(self, obj: dict) -> None:
@@ -54,6 +59,14 @@ class DaemonClient(QObject):
             self._pending.append(line)
             if self._sock.state() == QLocalSocket.LocalSocketState.UnconnectedState:
                 self._sock.connectToServer(self._path)
+
+    def flush(self, timeout_ms: int = 500) -> None:
+        """Push queued bytes out now — for the moment before the app quits,
+        when the event loop won't run again to write them."""
+        if self._sock.state() == QLocalSocket.LocalSocketState.ConnectedState:
+            self._sock.flush()
+            if self._sock.bytesToWrite():
+                self._sock.waitForBytesWritten(timeout_ms)
 
     def sleep_model(self) -> None:
         self.send("sleep", {})
@@ -72,9 +85,13 @@ class DaemonClient(QObject):
     def _on_error(self, _err) -> None:
         self._pending.clear()  # a send that failed is dead — never burst stale messages later
         self._buf = b""        # a partial line from a daemon that died mid-stream is dead too
+        waiting = list(self._callbacks.values())
         self._callbacks.clear()  # nothing in flight will ever answer
         self._sock.abort()     # back to UnconnectedState so the next send() reconnects
         self.error.emit(OFFLINE_MSG)
+        for _on_result, on_error in waiting:
+            if on_error is not None:
+                on_error(OFFLINE_MSG)
 
     def _flush_pending(self) -> None:
         for line in self._pending:
@@ -93,11 +110,16 @@ class DaemonClient(QObject):
             except json.JSONDecodeError:
                 continue
             if "error" in msg:
-                self._callbacks.pop(msg.get("id"), None)
+                _on_result, on_error = self._callbacks.pop(msg.get("id"),
+                                                           (None, None))
                 self.error.emit(msg["error"])
+                if on_error is not None:
+                    on_error(msg["error"])
             elif "result" in msg:
-                if cb := self._callbacks.pop(msg.get("id"), None):
-                    cb(msg["result"])
+                on_result, _on_error = self._callbacks.pop(msg.get("id"),
+                                                           (None, None))
+                if on_result is not None:
+                    on_result(msg["result"])
             elif msg.get("done"):
                 self.done.emit()
             elif "confirm_request" in msg:

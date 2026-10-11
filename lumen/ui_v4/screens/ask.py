@@ -1,5 +1,8 @@
-"""Ask Lumen: the one conversation. Replaces ui_v3's Chat screen, and is where
-the Ask bar's questions land (`window.ask` -> `start(question, context)`).
+"""Ask Lumen: the saved conversations. Replaces ui_v3's Chat screen. The Ask
+bar answers inline on its page instead (lumen/ui_v4/askbar.py, Josh's call
+2026-10-10); its "Continue in Ask Lumen" seeds a conversation and opens it
+here. `window.ask` -> `start(question, context)` (the command palette) still
+sends a question into the active conversation from here.
 
 Streams exactly like ui_v3 chat.py: `window.chat_client.send("chat", {...})`,
 with chunk / done / error / tool_used / cold_start / model_off / conversation /
@@ -11,10 +14,10 @@ Conversation list: `state.list_conversations`, `get_conversation`,
 There is no rename: ui_v3 has none and the daemon has no rename route.
 
 Differences from ui_v3 chat, all additive:
-  - A question from the Ask bar carries the page it came from (the context
-    goes to the daemon as `context`, and the thread shows "Asked from X").
-    Ask-bar questions keep ui_v3's `capture_ok`, so a note-shaped one becomes
-    a todo; the `captured` event is shown instead of an empty reply.
+  - A question sent via `start()` carries the page it came from (the context
+    goes to the daemon as `context`, and the thread shows "Asked from X"). It
+    keeps ui_v3's `capture_ok`, so a note-shaped one becomes a todo; the
+    `captured` event is shown instead of an empty reply.
   - The composer is multi-line: Enter sends, Shift+Enter adds a line.
   - Below ~760px the conversation list folds behind a "Conversations" button.
 """
@@ -23,6 +26,7 @@ from PyQt6.QtGui import QTextOption
 from PyQt6.QtWidgets import QFrame, QPlainTextEdit, QSizePolicy, QWidget
 
 from .. import theme as T
+from ..askbar import SCREEN_NAMES, chat_payload, context_dict
 from ..components import (
     NO_REPLY_STATUS, NO_REPLY_TEXT, Badge, Button, ClaudeUnavailableNotice,
     ClickRow, Divider, ElideLabel, EmptyState, Eyebrow, IconButton, IconLabel,
@@ -31,26 +35,13 @@ from ..components import (
 )
 
 WAKE_THRESHOLD_MS = 1500
+# The empty state's suggested prompts (review.md: "offers three").
+SUGGESTED = ("What's on my calendar today?",
+             "Summarize my unread email",
+             "Recommend a book like the last ones I read")
 LIST_W = 272
 NARROW = 760           # screen width below which the list folds away
 BUBBLE_MAX_W = 680
-_SCREEN_NAMES = {"today": "Today", "mail": "Inbox", "calendar": "Calendar",
-                 "todos": "Todos", "books": "Books", "files": "Files",
-                 "canvas": "Canvas", "settings": "Settings"}
-
-
-def _context_dict(context, from_key: str | None) -> dict:
-    """The daemon reads `context` as a dict ({screen, file/dir, ...}). Screens
-    may hand back a dict (ui_v3 style) or a plain-text summary."""
-    if isinstance(context, dict):
-        ctx = dict(context)
-        if from_key and not ctx.get("screen"):
-            ctx["screen"] = from_key
-        return ctx
-    ctx = {"screen": from_key} if from_key else {}
-    if isinstance(context, str) and context.strip():
-        ctx["summary"] = context.strip()[:8000]
-    return ctx
 
 
 def _when(stamp) -> str:
@@ -166,6 +157,7 @@ class AskScreen(QWidget):
         self._title = ""
         self._pending: _Bubble | None = None
         self._holder: QWidget | None = None
+        self._draft_ctx: tuple[str, dict] | None = None   # (question, page ctx)
         self._narrow = False
         self._list_open = False
         # The page a question came from. While this screen is being built the
@@ -282,11 +274,13 @@ class AskScreen(QWidget):
         question = (question or "").strip()
         if not question:
             return
-        ctx = _context_dict(context, self._from_key)
-        if self._busy:
-            # One turn at a time on the chat connection; don't drop it.
+        ctx = context_dict(context, self._from_key)
+        if self.win.chat_busy():
+            # One turn at a time on the chat connection; don't drop it, and
+            # keep the page it came from with the draft.
             self.input.setPlainText(question)
             self.input.setFocus()
+            self._draft_ctx = (question, ctx)
             self.win.show_toast("Lumen is still answering. Your question is "
                                 "ready to send when it's done.")
             return
@@ -467,12 +461,7 @@ class AskScreen(QWidget):
                 self.thread_lay.addWidget(ModelOffNotice(
                     self.state, "Lumen still has your mail, calendar and "
                                 "todos. Only the answering needs the model."))
-            self.thread_lay.addWidget(EmptyState(
-                "ask", "Start a conversation",
-                "Ask about your day, an email, a file, or anything else. "
-                "Everything you ask here stays in one conversation until you "
-                "start a new one.",
-                "Write a question", self.input.setFocus), 1)
+            self.thread_lay.addWidget(self._empty(), 1)
             return
         for m in self._messages:
             self.thread_lay.addWidget(self._row(
@@ -480,6 +469,31 @@ class AskScreen(QWidget):
                         m.get("text") or m.get("content", "")),
                 m.get("role") == "user"))
         self.thread_lay.addStretch(1)
+
+    def _empty(self) -> QWidget:
+        """What Lumen can see, and three prompts to start from."""
+        box = EmptyState(
+            "ask", "Start a conversation",
+            "Lumen can see your mail, calendar, todos, books and files on this "
+            "computer. Everything you ask here stays in one conversation until "
+            "you start a new one.")
+        lay = box.layout()
+        tries = QWidget()
+        tv = vbox(tries, (0, T.S2, 0, 0), T.S2)
+        tv.addWidget(Eyebrow("Try"), 0, Qt.AlignmentFlag.AlignHCenter)
+        for prompt in SUGGESTED:
+            tv.addWidget(Button(prompt, "secondary", size="sm",
+                                on_click=lambda q=prompt: self._suggest(q)),
+                         0, Qt.AlignmentFlag.AlignHCenter)
+        lay.insertWidget(lay.count() - 1, tries, 0,
+                         Qt.AlignmentFlag.AlignHCenter)
+        return box
+
+    def _suggest(self, prompt: str):
+        if self._busy or self.win.chat_busy():
+            self.win.show_toast("Wait for Lumen to finish answering first.")
+            return
+        self._send_text(prompt, None, from_bar=False)
 
     @staticmethod
     def _row(bubble: QWidget, right: bool) -> QWidget:
@@ -507,8 +521,8 @@ class AskScreen(QWidget):
         self._messages.append({"role": "user", "text": msg})
         note = ""
         screen = (ctx or {}).get("screen")
-        if screen and screen in _SCREEN_NAMES:
-            note = f"Asked from {_SCREEN_NAMES[screen]}"
+        if screen and screen in SCREEN_NAMES:
+            note = f"Asked from {SCREEN_NAMES[screen]}"
             f = (ctx or {}).get("file")
             if screen == "files" and f:
                 note += f" · {f.rsplit('/', 1)[-1]}"
@@ -525,7 +539,15 @@ class AskScreen(QWidget):
         msg = self.input.toPlainText().strip()
         if not msg or self._busy:
             return
-        self._send_text(msg, None, from_bar=False)
+        if self.win.chat_busy():
+            self.win.show_toast("Lumen is still answering your Ask bar "
+                                "question. Send this when it's done.")
+            return
+        draft, self._draft_ctx = self._draft_ctx, None
+        if draft is not None and draft[0] == msg:
+            self._send_text(msg, draft[1], from_bar=True)
+        else:
+            self._send_text(msg, None, from_bar=False)
 
     def _send_text(self, msg: str, ctx: dict | None, from_bar: bool):
         # Answered locally when the switch is off: no daemon round trip needed,
@@ -564,17 +586,7 @@ class AskScreen(QWidget):
         bub.status.start("Thinking")
         self._wake.start()
 
-        payload = {"message": msg}
-        if ctx:
-            payload["context"] = ctx
-            if from_bar:
-                payload["capture_ok"] = True
-            # Name the open email so "label this email" resolves (ui_v3 #11).
-            m = ctx.get("message") if isinstance(ctx.get("message"), dict) else None
-            if ctx.get("screen") == "mail" and m and m.get("id"):
-                payload["open_email"] = {"id": m["id"],
-                                         "subject": m.get("subject"),
-                                         "from": m.get("from")}
+        payload = chat_payload(msg, ctx, capture_ok=bool(ctx) and from_bar)
         if self.state.active_conv_id is not None:
             payload["conversation_id"] = self.state.active_conv_id
         self.chat.send("chat", payload)
@@ -645,7 +657,8 @@ class AskScreen(QWidget):
             else:
                 bub.set_status("")
             bub.set_foot(self._via if self._via else
-                         f"Answered on this computer · {T.MODEL_NAME}")
+                         "Answered on this computer")
+            bub.foot.setToolTip("" if self._via else f"Model: {T.MODEL_NAME}")
         self._messages.append({"role": "assistant", "text": self._acc})
         self._pending = None
         self._holder = None

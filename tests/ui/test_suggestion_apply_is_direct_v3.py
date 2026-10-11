@@ -33,7 +33,7 @@ class RecordingClient(QObject):
         super().__init__()
         self.requests: list[tuple] = []
 
-    def request(self, type_, payload, cb):
+    def request(self, type_, payload, cb, on_error=None):
         self.requests.append((type_, payload))
         # Only the label writes get an answer; anything else the shell asks for
         # on construction is left unanswered rather than fed a wrong shape.

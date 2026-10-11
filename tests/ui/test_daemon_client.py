@@ -135,6 +135,31 @@ def test_offline_request_clears_callbacks(qtbot, tmp_path):
     assert client._callbacks == {}
 
 
+def test_request_error_calls_on_error(qtbot, tmp_path):
+    """A caller waiting on a reply (busy scrim, skeleton) must hear about a
+    daemon error, not wait forever (ui_v4 plan H2/M2)."""
+    path = str(tmp_path / "d.sock")
+    server = QLocalServer()
+    assert server.listen(path)
+    _serve_one_shot(server, lambda req: {"error": "suggest failed"})
+
+    client = DaemonClient(path)
+    results, errors = [], []
+    client.request("mail.suggest_labels", {}, results.append,
+                   on_error=errors.append)
+    qtbot.waitUntil(lambda: errors != [], timeout=2000)
+    assert errors == ["suggest failed"] and results == []
+    server.close()
+
+
+def test_offline_request_calls_on_error(qtbot, tmp_path):
+    client = DaemonClient(str(tmp_path / "missing.sock"))
+    errors = []
+    with qtbot.waitSignal(client.error, timeout=2000):
+        client.request("todos.list", {}, lambda r: None, on_error=errors.append)
+    assert len(errors) == 1 and "daemon offline" in errors[0]
+
+
 def test_tool_used_line_emits_signal(qtbot):
     client = DaemonClient("/nonexistent.sock")
     seen = []

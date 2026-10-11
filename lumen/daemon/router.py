@@ -16,6 +16,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from lumen.daemon.connectors import free_slots, local_files, mail_rules
+from lumen.daemon.connectors.gcal_colors import (  # noqa: F401  (re-exported)
+    GCAL_COLOR_HEX, GCAL_COLOR_NAMES,
+)
 from lumen.daemon import local_tools
 from lumen.daemon.connectors.capture import classify
 from lumen.daemon.connectors.connection_state import ConnectionState
@@ -365,18 +368,6 @@ LABEL_PROFILE_ROWS = 3
 # description does — it is counting term frequencies, not writing a sentence.
 LABEL_KEYWORD_ROWS = 60
 
-# Google Calendar's fixed event-colour palette (colorId → display name), used
-# in the edit dialog's colour picker and the update confirm dialog (#12).
-GCAL_COLOR_NAMES = {
-    "1": "Lavender", "2": "Sage", "3": "Grape", "4": "Flamingo", "5": "Banana",
-    "6": "Tangerine", "7": "Peacock", "8": "Graphite", "9": "Blueberry",
-    "10": "Basil", "11": "Tomato"}
-# The hex Google renders each colorId as — so the picker's swatches match the
-# calendar, and the UI can preview a chosen colour before the sync round-trips.
-GCAL_COLOR_HEX = {
-    "1": "#7986cb", "2": "#33b679", "3": "#8e24aa", "4": "#e67c73",
-    "5": "#f6bf26", "6": "#f4511e", "7": "#039be5", "8": "#616161",
-    "9": "#3f51b5", "10": "#0b8043", "11": "#d50000"}
 
 # Confirm-gated mail writes (title, intro, confirm label, GmailSync verb,
 # success message). Delete is Gmail's Trash, not a permanent wipe — the

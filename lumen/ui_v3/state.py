@@ -36,6 +36,9 @@ class AppState(_AppState):
     # Settings, and this asks that screen to flash the model switch so the user
     # lands on the control, not just the page.
     model_switch_highlight_requested = pyqtSignal()
+    # A mail rule was saved or deleted from the rule dialog, so a rule list
+    # that's on screen (Settings) re-reads it (ui_v4 plan L9).
+    rules_changed = pyqtSignal()
 
     def open_memory_file(self) -> None:
         """Open memory.md in Lumen's own Files screen (#15).

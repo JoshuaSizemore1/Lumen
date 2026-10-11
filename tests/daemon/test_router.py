@@ -2275,8 +2275,11 @@ PROMISE_JSON = ('[{"text": "send the report", "due": "2026-07-17", '
 
 
 def promise_mail():
+    # Relative, not a fixed date: the scan only looks back FIRST_RUN_DAYS, so a
+    # hard-coded sent date ages out of the window and the test starts failing.
+    sent = datetime.now(timezone.utc) - _td(days=2)
     return {"id": "s1", "subject": "Re: report", "body": PROMISE_BODY,
-            "received_at": "2026-07-12T09:00:00+00:00"}
+            "received_at": sent.replace(microsecond=0).isoformat()}
 
 
 async def test_scan_commitments_one_shot_finds_and_lists(tmp_path):

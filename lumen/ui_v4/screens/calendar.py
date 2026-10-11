@@ -19,9 +19,10 @@ New in v4:
 - the grid grows past 07:00-21:00 when an event falls outside that range
 - the day view's agenda drops below the grid when the screen is narrow
 
-Event colours come from the theme's categorical tag slots (hashed from the
-calendar name) rather than Google's own hex values. Only theme.py may hold
-colour literals.
+Event colours are Google's own, as ui_v3 painted them: the event's colour if
+it has one, else its calendar's (both arrive as data). Sample events, which
+carry none, fall back to the theme's categorical slots, hashed from the
+calendar name.
 """
 import re
 from datetime import date, datetime, timedelta
@@ -40,13 +41,7 @@ from ..components import (
 )
 from ..overlays import _dialog_foot, _dialog_head, _Overlay
 
-try:
-    from ...daemon.router import GCAL_COLOR_NAMES
-except Exception:                                    # pragma: no cover
-    GCAL_COLOR_NAMES = {
-        "1": "Lavender", "2": "Sage", "3": "Grape", "4": "Flamingo",
-        "5": "Banana", "6": "Tangerine", "7": "Peacock", "8": "Graphite",
-        "9": "Blueberry", "10": "Basil", "11": "Tomato"}
+from ...daemon.connectors.gcal_colors import GCAL_COLOR_NAMES
 
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 WD_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
@@ -61,6 +56,7 @@ HOUR_H = 48
 PAD_T = 10                 # room above the first hour line for its label
 NARROW_W = 900
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+_END_HHMM = re.compile(r"^(([01]?\d|2[0-3]):[0-5]\d|24:00)$")   # midnight ends
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -69,14 +65,38 @@ def monday_of(d: date) -> date:
 
 
 def event_color(ev: dict) -> str:
-    """A categorical tag colour for the event, stable per calendar."""
-    key = ev.get("cal") or ev.get("color") or "event"
-    return T.tag_color(key)
+    """Google's colour for the event (its own, else its calendar's), or a
+    categorical slot stable per calendar when there's none (L15)."""
+    c = ev.get("color")
+    if isinstance(c, str) and c.startswith("#") and QColor(c).isValid():
+        return c
+    return T.tag_color(ev.get("cal") or "event")
+
+
+def calendar_color(ev: dict) -> str:
+    """The event's calendar's colour, for the legend."""
+    c = ev.get("cal_color")
+    if isinstance(c, str) and c.startswith("#") and QColor(c).isValid():
+        return c
+    return event_color(ev)
 
 
 def hhmm(minutes: int) -> str:
     minutes = max(0, min(24 * 60, int(minutes)))
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _end_hhmm(ev: dict) -> str:
+    """The end time as the edit dialog shows it: "24:00" for midnight, and
+    the clock time for an event that runs past it (the dialog reads an end
+    at or before the start as the next day)."""
+    end = ev.get("start_min", 0) + ev.get("dur", 30)
+    return "24:00" if end == 24 * 60 else hhmm(end % (24 * 60))
+
+
+def _minutes(value: str) -> int:
+    h, _, m = value.partition(":")
+    return int(h) * 60 + int(m)
 
 
 def time_range(ev: dict) -> str:
@@ -99,8 +119,11 @@ def day_hours(events: list[dict], lo: int = GRID_START_H,
     return lo, hi
 
 
-def _tz_offset() -> str:
-    off = datetime.now().astimezone().strftime("%z")
+def _tz_offset(day: date, h: int = 12, m: int = 0) -> str:
+    """The local UTC offset (+HH:MM) on that day at that time — not today's:
+    an edit to an event across a DST change would otherwise move it an hour."""
+    off = datetime.combine(day, datetime.min.time().replace(
+        hour=h, minute=m)).astimezone().strftime("%z")
     return f"{off[:3]}:{off[3:]}" if off else "+00:00"
 
 
@@ -356,7 +379,8 @@ class MonthCell(_Painted):
                           Qt.AlignmentFlag.AlignVCenter)
             if not ev.get("all_day"):
                 row.addWidget(Label(ev.get("start", ""), "meta"))
-            row.addWidget(ElideLabel(ev.get("title", ""), "small"), 1)
+            row.addWidget(ElideLabel(ev.get("title", ""),
+                                     "small" if in_month else "muted"), 1)
             v.addLayout(row)
         more = n - min(n, self.MAX_SHOWN)
         if more > 0:
@@ -391,13 +415,9 @@ class MonthCell(_Painted):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect())
-        if self.underMouse():
-            ground = "surface_warm"
-        elif self._in_month:
-            ground = "surface"
-        else:
-            ground = "bg"
-        p.fillRect(r, t.color(ground))
+        # Days outside the month are muted text on the same ground, not a
+        # tint (review.md).
+        p.fillRect(r, t.color("surface_warm" if self.underMouse() else "surface"))
         p.setPen(QPen(t.color("border_soft"), 1))
         p.drawLine(r.topRight(), r.bottomRight())
         p.drawLine(r.bottomLeft(), r.bottomRight())
@@ -458,6 +478,7 @@ class EventEditOverlay(_Overlay):
         self.state = state
         self._on_done = on_done
         self.ev: dict = {}
+        self._timed = False
         v = vbox(self.card, (0, 0, 0, 0), 0)
         head, self.heading = _dialog_head(
             "Edit event", "Google Calendar. You confirm before it changes.",
@@ -496,20 +517,29 @@ class EventEditOverlay(_Overlay):
         for f in (self.title_f, self.start_f, self.end_f):
             f.clear_error()
         self.title_f.set_text(ev.get("title", ""))
-        timed = not ev.get("all_day")
+        # A timed event a day or longer can't be expressed as two clock times
+        # on one date; editing them would cut it short. Title, place and
+        # colour still edit; times are left alone.
+        timed = not ev.get("all_day") and ev.get("dur", 30) < 24 * 60
+        self._timed = timed
         self.times.setVisible(timed)
         if timed:
-            s = ev.get("start_min", 0)
-            self.start_f.set_text(hhmm(s))
-            self.end_f.set_text(hhmm(s + ev.get("dur", 30)))
+            self.start_f.set_text(hhmm(ev.get("start_min", 0)))
+            self.end_f.set_text(_end_hhmm(ev))
         self.loc_f.set_text("")
         self.color.setCurrentIndex(0)
         self.pop()
         self.title_f.input.setFocus()
 
-    def _iso(self, value: str) -> str:
+    def _iso(self, value: str, next_day: bool = False) -> str:
+        day = date.fromisoformat(self.ev["date"])
+        if value == "24:00":
+            value, next_day = "00:00", True
+        if next_day:
+            day += timedelta(days=1)
         h, _, m = value.partition(":")
-        return f"{self.ev['date']}T{int(h):02d}:{m}:00{_tz_offset()}"
+        return (f"{day.isoformat()}T{int(h):02d}:{m}:00"
+                f"{_tz_offset(day, int(h), int(m))}")
 
     def _save(self):
         if not self.isVisible():
@@ -523,22 +553,24 @@ class EventEditOverlay(_Overlay):
             return
         if title != ev.get("title"):
             changes["title"] = title
-        if not ev.get("all_day"):
+        if self._timed:
             s, e = self.start_f.text().strip(), self.end_f.text().strip()
             if not _HHMM.match(s):
                 self.start_f.set_error("Use 24-hour time, like 09:30.")
                 self.start_f.input.setFocus()
                 return
-            if e and not _HHMM.match(e):
+            if e and not _END_HHMM.match(e):
                 self.end_f.set_error("Use 24-hour time, like 10:30.")
                 self.end_f.input.setFocus()
                 return
             e = e or s
             orig_s = hhmm(ev.get("start_min", 0))
-            orig_e = hhmm(ev.get("start_min", 0) + ev.get("dur", 30))
-            if (s, e) != (orig_s, orig_e):
+            if (s, e) != (orig_s, _end_hhmm(ev)):
                 changes["start"] = self._iso(s)
-                changes["end"] = self._iso(e)
+                # An end at or before the start runs past midnight (L5).
+                changes["end"] = self._iso(
+                    e, next_day=e != "24:00" and e != s
+                    and _minutes(e) <= _minutes(s))
         loc = self.loc_f.text().strip()
         if loc:
             changes["location"] = loc
@@ -569,6 +601,7 @@ class CalendarScreen(QWidget):
         self._events: list[dict] = []
         self._connected = True
         self._loaded = False
+        self._load_error = False      # the last load failed and nothing is shown
         self._req = 0
         self._narrow = False
         self._editor: EventEditOverlay | None = None
@@ -718,10 +751,13 @@ class CalendarScreen(QWidget):
         self._loaded = True
         if result.get("error"):
             if not self._events:
+                self._load_error = True
                 self.rebuild()
-            self.win.show_toast("Couldn't reach Google Calendar. Showing what "
-                                "Lumen already had.")
+            else:
+                self.win.show_toast("Couldn't refresh the calendar. Showing "
+                                    "what Lumen already had.")
             return
+        self._load_error = False
         self._events = result.get("events", [])
         self._connected = result.get("connected", True)
         self.rebuild()
@@ -869,7 +905,7 @@ class CalendarScreen(QWidget):
         cals: dict[str, str] = {}
         for e in self._in_range():
             if e.get("cal") and e["cal"] not in cals:
-                cals[e["cal"]] = event_color(e)
+                cals[e["cal"]] = calendar_color(e)
         for name, color in list(cals.items())[:6]:
             item = QWidget()
             h = hbox(item, (0, 0, 0, 0), 6)
@@ -892,6 +928,12 @@ class CalendarScreen(QWidget):
                 v.addWidget(SkeletonRow(2, height=64))
             v.addStretch(1)
             self.body_lay.addWidget(box)
+            return
+        if self._load_error:
+            self.body_lay.addWidget(EmptyState(
+                "alert", "Couldn't load your calendar",
+                "Lumen couldn't reach Google Calendar, or its background "
+                "service isn't running.", "Try again", self.force_refresh))
             return
         if not self._connected:
             self.body_lay.addWidget(EmptyState(

@@ -22,11 +22,14 @@ class FakeClient(QObject):
     def __init__(self):
         super().__init__()
         self.requests: list[tuple] = []
+        self.errors: list[tuple] = []          # (type, payload, on_error)
         self.sent: list[tuple] = []
         self.confirm_responses: list[tuple] = []
 
-    def request(self, type_, payload, cb):
+    def request(self, type_, payload, cb, on_error=None):
         self.requests.append((type_, payload, cb))
+        if on_error is not None:
+            self.errors.append((type_, payload, on_error))
 
     def send(self, type_, payload):
         self.sent.append((type_, payload))
@@ -250,6 +253,25 @@ def test_calendar_day_agenda_delete_goes_through_daemon(qtbot):
     assert any(t == "calendar.list" for t, _p, _cb in data.requests)   # re-read
 
 
+def test_calendar_failed_refresh_keeps_the_events(qtbot):
+    """A daemon error now answers the calendar callback (with `error` set);
+    it must not wipe the events already on screen."""
+    from lumen.ui_v2.screens.calendar import CalendarScreen
+    data = FakeClient()
+    st = AppState(data=data)
+    sc = CalendarScreen(st)
+    qtbot.addWidget(sc)
+    sc._set_view(2)
+    cb = [cb for t, _p, cb in data.requests if t == "calendar.list"][-1]
+    cb({"events": [daemon_event_row()], "connected": True})
+    assert len(sc._events) == 1
+    st.fetch_calendar("2026-01-01", "2026-12-31", sc._on_events)
+    fail = [e for t, _p, e in data.errors if t == "calendar.list"][-1]
+    fail("daemon offline")
+    assert len(sc._events) == 1
+    assert sc.note.text() == "daemon offline"
+
+
 def test_calendar_sample_events_show_no_delete(qtbot):
     from lumen.ui_v2.screens.calendar import CalendarScreen
     from lumen.ui_v2.widgets import ClickLabel
@@ -301,6 +323,15 @@ def test_norm_mail_carries_label_names():
                     "label_names": ["Bills"]})
     assert m["label_names"] == ["Bills"]
     assert _norm_mail({"id": "y", "sender": "B", "received_at": ""})["label_names"] == []
+
+
+def test_norm_mail_unescapes_gmail_snippet():
+    # Gmail's API returns snippets HTML-escaped; the list showed "what&#39;s".
+    m = _norm_mail({"id": "x", "sender": "A", "received_at": "",
+                    "snippet": "what&#39;s up &amp; how&quot;s it going"})
+    assert m["preview"] == 'what\'s up & how"s it going'
+    assert _norm_mail({"id": "y", "sender": "B", "received_at": "",
+                       "snippet": None})["preview"] == ""
 
 
 def test_sample_mode_scope_and_labels(qtbot):

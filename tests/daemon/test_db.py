@@ -110,3 +110,24 @@ def test_connect_adds_body_html_to_legacy_emails_table(tmp_path):
     row = conn.execute("SELECT body_html FROM emails WHERE id = 'm1'").fetchone()
     assert row["body_html"] is None            # NULL = never fetched
     conn.close()
+
+
+def test_connect_adds_event_color_to_legacy_events_table(tmp_path):
+    # Events cached before each event's own colour was kept (ui_v4 plan L15).
+    import sqlite3
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "CREATE TABLE events (id TEXT NOT NULL, calendar_id TEXT NOT NULL,"
+        " calendar_name TEXT, color TEXT, title TEXT, start_at TEXT NOT NULL,"
+        " end_at TEXT, all_day INTEGER NOT NULL DEFAULT 0, location TEXT,"
+        " description TEXT, attendees TEXT NOT NULL DEFAULT '[]', status TEXT,"
+        " PRIMARY KEY (calendar_id, id))")
+    raw.execute("INSERT INTO events (id, calendar_id, start_at) "
+                "VALUES ('e1', 'c', '2026-10-10')")
+    raw.commit()
+    raw.close()
+    conn = db.connect(path)
+    row = conn.execute("SELECT event_color FROM events").fetchone()
+    assert row["event_color"] is None
+    conn.close()

@@ -58,5 +58,6 @@ def build_settings_snapshot(cfg) -> dict:
         "paths": {
             "db": _tilde(cfg.db_path),
             "memory": _tilde(cfg.memory_path),
+            "config": _tilde(cfg.config_path),
         },
     }

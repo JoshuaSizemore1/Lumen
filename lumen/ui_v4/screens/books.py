@@ -54,11 +54,6 @@ class BooksScreen(QWidget):
         self._query = ""
         self._narrow = False
         self._loaded = (not self.state.live) or bool(self.state.books)
-        try:
-            from .settings import install_text_size
-            install_text_size()
-        except Exception:
-            pass
 
         outer = vbox(self, (0, 0, 0, 0), 0)
         self.scroll = ScrollArea(m=(T.S8, T.S6, T.S8, T.S8), s=T.S6)
@@ -274,8 +269,6 @@ class BooksScreen(QWidget):
         lay = self.rec_card.lay
         clear_layout(lay)
         recs = self.state.recs
-        self._busy = False
-        self._recs_timer.stop()
 
         top = hbox(s=T.S2)
         top.addWidget(Eyebrow("Suggested next"), 1)
@@ -314,6 +307,12 @@ class BooksScreen(QWidget):
         else:
             self.rec_btn = None
         lay.addLayout(foot)
+        if self._busy:
+            # Any recs_changed (a books.recs re-read on revisit) rebuilds this
+            # card mid-run; only the run's own reply ends it (L10).
+            self.rec_status.start("Finding books")
+            if self.rec_btn is not None:
+                self.rec_btn.set_busy(True, "Working…")
 
     def _source_badge(self) -> Badge:
         """Where suggestions come from: a dot and a word, like the sidebar."""
@@ -352,12 +351,18 @@ class BooksScreen(QWidget):
         if self.rec_btn is not None:
             self.rec_btn.set_busy(True, "Working…")
         self._recs_timer.start()
-        self.state.recommend_books()
+        self.state.recommend_books(on_done=self._recs_done,
+                                   on_error=lambda _msg: self._recs_done())
         if not self.state.live:
             # Sample mode has no model: settle instead of spinning forever.
-            QTimer.singleShot(0, self._build_recs)
+            QTimer.singleShot(0, self._recs_done)
+
+    def _recs_done(self):
+        self._busy = False
+        self._recs_timer.stop()
+        self._build_recs()
 
     def _recs_timed_out(self):
         if self._busy:
-            self._build_recs()
+            self._recs_done()
             self.win.show_toast("Suggestions took too long. Try again in a moment.")

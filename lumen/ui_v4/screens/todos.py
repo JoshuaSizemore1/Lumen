@@ -5,9 +5,10 @@ Keeps everything the ui_v3 Todos screen did:
 - tick to complete, cross to delete, click a row to open its detail card
   (task, notes, due date, tags; Save goes through state.update_todo)
 - group by due date (Today / Upcoming / No date) or by tag, done items last
-- tag filter from the rail or from a chip on a row; tags that differ only in
-  case count as one tag (#48)
-- "show completed" switch and a progress count
+- tag filter from the chips above the list or from a chip on a row; tags
+  that differ only in case count as one tag (#48)
+- "show completed" switch (above the list, with the tag chips — review.md)
+  and a progress count in the rail
 - if an edit moves a todo out of the current tag filter, the filter clears
   and a toast says so, instead of the row silently vanishing (#48)
 - repaints live on state.todos_changed
@@ -17,18 +18,20 @@ New in v4:
   run out before it reaches the store, so Undo never has to recreate anything.
 - due badges (Overdue / Due today / Due Fri) and a search box
 - on_shown(new=True) focuses quick add (command palette "New todo")
-- the rail moves above the list when the screen is narrow
+- the rail (progress, group by) moves above the list when the screen is
+  narrow
 """
+import time
 from datetime import date, timedelta
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QBoxLayout, QCheckBox, QLineEdit, QProgressBar, QWidget,
+    QApplication, QBoxLayout, QCheckBox, QLineEdit, QProgressBar, QWidget,
 )
 
 from .. import theme as T
 from ..components import (
-    Badge, Button, Card, ClickRow, Divider, Dot, EmptyState, Eyebrow,
+    Badge, Button, Card, ClickRow, Divider, Dot, EmptyState, Eyebrow, FlowLayout,
     IconButton, Label, ScreenHeader, ScrollArea, SearchField, SegmentedControl,
     SkeletonRow, SwitchRow, TagChip, TextArea, TextField, clear_layout,
     fire_on_next_tick, hbox, vbox,
@@ -258,6 +261,7 @@ class TodosScreen(QWidget):
         self.show_done = True
         self._query = ""
         self._pending_del: dict = {}          # tid -> QTimer
+        self._edited: tuple | None = None     # (tid, monotonic) awaiting #48
         self._loaded = (not self.state.live) or bool(self.state.todos)
         self._dirty = False
         self._narrow = False
@@ -291,6 +295,17 @@ class TodosScreen(QWidget):
         self.clear_filter.hide()
         bar.addWidget(self.clear_filter)
         lv.addLayout(bar)
+        # The tag filter and Show completed sit directly above the list they
+        # control (review.md), not in the rail.
+        self.filters_host = QWidget()
+        fv = vbox(self.filters_host, (0, 0, 0, 0), T.S2)
+        self.tag_host = QWidget()
+        self.tag_flow = FlowLayout(self.tag_host, T.S2, T.S2)
+        fv.addWidget(self.tag_host)
+        self.done_switch = SwitchRow("Show completed", checked=self.show_done)
+        self.done_switch.toggled.connect(self._toggle_done_filter)
+        fv.addWidget(self.done_switch)
+        lv.addWidget(self.filters_host)
         self.list_host = QWidget()
         self.list_lay = vbox(self.list_host, (0, 0, 0, 0), 0)
         lv.addWidget(self.list_host)
@@ -303,6 +318,7 @@ class TodosScreen(QWidget):
         self.row.addWidget(self.rail, 0, Qt.AlignmentFlag.AlignTop)
 
         self.state.todos_changed.connect(self._on_todos)
+        QApplication.instance().aboutToQuit.connect(self._flush_deletes)
         self.rebuild()
 
     # ---- hooks --------------------------------------------------------------
@@ -359,6 +375,7 @@ class TodosScreen(QWidget):
     # ---- data ---------------------------------------------------------------
     def _on_todos(self):
         self._loaded = True
+        self._check_edited()
         if self.isVisible():
             self.rebuild()
         else:
@@ -384,24 +401,40 @@ class TodosScreen(QWidget):
             out = [t for t in out if not t["done"]]
         return [t for t in out if self._matches(t)]
 
+    EDIT_WATCH_S = 5.0
+
     def note_edited(self, tid) -> None:
         """An edit that moves a todo out of the tag filter would make it
         vanish, which reads as "editing deleted it" (#48). Clear the filter
-        and say so."""
+        and say so. update_todo is async, so right after Save the store
+        still lists the old tags: watch the next answers, not just now (the
+        old early return made this notice dead, M8)."""
         if self.tag_filter == "all":
             return
-        if any(t["id"] == tid for t in self._visible()):
-            return
-        # The store answers after the save; check again once it has.
-        QTimer.singleShot(400, lambda: self._recheck_edited(tid))
+        self._edited = (tid, time.monotonic())
+        if self._check_edited():
+            self.rebuild()
 
-    def _recheck_edited(self, tid):
-        if self.tag_filter == "all" or any(t["id"] == tid for t in self._visible()):
-            return
+    def _check_edited(self) -> bool:
+        """True when it cleared the tag filter."""
+        if self._edited is None:
+            return False
+        tid, at = self._edited
+        if (self.tag_filter == "all"
+                or time.monotonic() - at > self.EDIT_WATCH_S):
+            self._edited = None
+            return False
+        todo = next((t for t in self.state.todos if t["id"] == tid), None)
+        if todo is None:
+            self._edited = None          # deleted, not moved
+            return False
+        if self.tag_filter.casefold() in fold_tags(todo):
+            return False                 # still tagged (or not answered yet)
         was = self.tag_filter
+        self._edited = None
         self.tag_filter = "all"
-        self.rebuild()
         self.win.show_toast(f"Moved out of #{was}. Showing all todos.")
+        return True
 
     # ---- actions ------------------------------------------------------------
     def _add(self):
@@ -443,6 +476,17 @@ class TodosScreen(QWidget):
             timer.deleteLater()
             self.state.delete_todo(tid)
 
+    def _flush_deletes(self):
+        """Quitting inside the Undo window must still delete (L6)."""
+        for tid in list(self._pending_del):
+            timer = self._pending_del.get(tid)
+            if timer is not None:
+                timer.stop()
+            self._commit_delete(tid)
+        flush = getattr(getattr(self.state, "_data", None), "flush", None)
+        if flush is not None:
+            flush()
+
     def _undo_delete(self, tid):
         timer = self._pending_del.pop(tid, None)
         if timer is not None:
@@ -464,6 +508,8 @@ class TodosScreen(QWidget):
         self.rebuild()
 
     def _toggle_done_filter(self, on: bool):
+        if on == self.show_done:
+            return
         self.show_done = on
         self.rebuild()
 
@@ -478,6 +524,7 @@ class TodosScreen(QWidget):
         self.search.blockSignals(True)
         self.search.setText("")
         self.search.blockSignals(False)
+        self.done_switch.setChecked(True)
         self.rebuild()
 
     # ---- quick add ----------------------------------------------------------
@@ -523,6 +570,7 @@ class TodosScreen(QWidget):
         if on_tag:
             self.clear_filter.setText(f"Clear #{self.tag_filter}")
             self.clear_filter.setToolTip("Show todos with any tag")
+        self._build_filters()
         self._build_list()
         self._build_rail()
 
@@ -556,6 +604,12 @@ class TodosScreen(QWidget):
                 v.addWidget(SkeletonRow(1, height=T.ROW_H + 8))
             return
         todos = self._live_todos()
+        if not todos and self.state.todos_error:
+            v.addWidget(EmptyState(
+                "alert", "Couldn't load your todos",
+                "Lumen's background service didn't answer. It may not be "
+                "running.", "Try again", self.state.refresh_todos))
+            return
         if not todos:
             v.addWidget(EmptyState(
                 "todos", "No todos yet",
@@ -618,42 +672,34 @@ class TodosScreen(QWidget):
         lay.addWidget(bar)
 
         lay.addSpacing(T.S3)
-        lay.addWidget(Eyebrow("Tags"))
-        counts: dict[str, int] = {}
-        for t in todos:
-            for tag in (t.get("tags") or []):
-                key = next((k for k in counts if k.casefold() == tag.casefold()),
-                           tag)
-                counts[key] = counts.get(key, 0) + 1
-        lay.addWidget(self._tag_row("all", "All todos", total))
-        for tag, n in sorted(counts.items(), key=lambda kv: kv[0].casefold()):
-            lay.addWidget(self._tag_row(tag, f"#{tag}", n))
-        if not counts:
-            lay.addWidget(Label("No tags yet. Add #tag to a todo.", "muted",
-                                wrap=True))
-
-        lay.addSpacing(T.S3)
         lay.addWidget(Eyebrow("Group by"))
         seg = SegmentedControl([("date", "Due date"), ("tag", "Tag")],
                                self.group_by, "Group todos by")
         seg.changed.connect(self._set_group)
         lay.addWidget(seg, 0, Qt.AlignmentFlag.AlignLeft)
 
-        lay.addSpacing(T.S2)
-        sw = SwitchRow("Show completed", checked=self.show_done)
-        sw.toggled.connect(self._toggle_done_filter)
-        lay.addWidget(sw)
-
-    def _tag_row(self, tag: str, text: str, count: int) -> QWidget:
-        on = self.tag_filter.casefold() == tag.casefold()
-        row = ClickRow(lambda t=tag: self._set_tag(t), selected=on,
-                       accessible_name=f"Show {text}, {count}")
-        h = hbox(row, (T.S2, 6, T.S2, 6), T.S3)
-        if tag == "all":
-            h.addWidget(Dot("muted", 8), 0, Qt.AlignmentFlag.AlignVCenter)
-        else:
-            h.addWidget(Dot(lambda k=tag: T.tag_color(k), 8), 0,
-                        Qt.AlignmentFlag.AlignVCenter)
-        h.addWidget(Label(text, "small"), 1)
-        h.addWidget(Label(str(count), "meta"))
-        return row
+    def _build_filters(self):
+        """Tag chips (All + one per tag, with counts) and Show completed."""
+        clear_layout(self.tag_flow)
+        todos = self._live_todos()
+        self.filters_host.setVisible(self._loaded and bool(todos))
+        counts: dict[str, int] = {}
+        for t in todos:
+            for tag in (t.get("tags") or []):
+                key = next((k for k in counts if k.casefold() == tag.casefold()),
+                           tag)
+                counts[key] = counts.get(key, 0) + 1
+        self.tag_host.setVisible(bool(counts))
+        cur = self.tag_filter.casefold()
+        chip = TagChip(f"All  {len(todos)}", on_click=lambda: self._set_tag("all"),
+                       active=cur == "all", dot=False)
+        chip.setAccessibleName(f"Show all todos, {len(todos)}")
+        self.tag_flow.addWidget(chip)
+        for tag, n in sorted(counts.items(), key=lambda kv: kv[0].casefold()):
+            chip = TagChip(f"#{tag}  {n}", slot=T.tag_slot(tag),
+                           on_click=lambda t=tag: self._set_tag(t),
+                           active=cur == tag.casefold())
+            chip.setAccessibleName(f"Show #{tag}, {n}")
+            self.tag_flow.addWidget(chip)
+        if self.done_switch.isChecked() != self.show_done:
+            self.done_switch.switch.set_checked_quiet(self.show_done)

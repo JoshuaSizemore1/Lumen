@@ -26,16 +26,19 @@ def size_label(n: int) -> str:
     return f"{n / 1024 ** 3:.1f} GB"
 
 
-def list_dir(path) -> dict:
+def list_dir(path, include_hidden: bool = True) -> dict:
     """{path, parent, entries: [{name, is_dir, size}], truncated, error}.
-    Folders first, then files, case-insensitive; dotfiles included (this
-    user browses .claude/ trees). Errors come back as data, never raise."""
+    Folders first, then files, case-insensitive; dotfiles included unless
+    include_hidden=False (filtered before the cap, so they can't crowd out
+    the rest). Errors come back as data, never raise."""
     p = Path(path).expanduser()
     try:
         children = list(p.iterdir())
     except OSError as e:
         return {"path": str(p), "parent": str(p.parent) if p != p.parent else None,
                 "entries": [], "truncated": 0, "error": e.strerror or str(e)}
+    if not include_hidden:
+        children = [c for c in children if not c.name.startswith(".")]
     entries = []
     for c in children:
         is_dir = c.is_dir()

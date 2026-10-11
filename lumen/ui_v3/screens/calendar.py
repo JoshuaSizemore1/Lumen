@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QButtonGroup, QDialog, QFrame, QLineEdit, QWidget
 
-from ...daemon.router import GCAL_COLOR_HEX, GCAL_COLOR_NAMES
+from ...daemon.connectors.gcal_colors import GCAL_COLOR_HEX, GCAL_COLOR_NAMES
 from .. import theme as T
 from ..calendar_grids import (
     MON3, MONTHS, WD_FULL, WEEKDAYS, DayColumn, MonthGrid, TimeGutter,
@@ -18,9 +18,13 @@ from ..widgets import (
 )
 
 
-def _tz_offset() -> str:
-    """Local UTC offset as +HH:MM, for stamping edited times into ISO."""
-    off = datetime.now().astimezone().strftime("%z")   # e.g. -0600
+def _tz_offset(day: date | None = None, h: int = 12, m: int = 0) -> str:
+    """Local UTC offset as +HH:MM on that day at that time, for stamping
+    edited times into ISO. Not today's: across a DST change that would move
+    the event an hour."""
+    when = datetime.combine(day or date.today(),
+                            datetime.min.time().replace(hour=h, minute=m))
+    off = when.astimezone().strftime("%z")   # e.g. -0600
     return f"{off[:3]}:{off[3:]}" if off else "+00:00"
 
 
@@ -97,7 +101,14 @@ class EventEditDialog(QDialog):
 
     def _iso(self, hhmm: str) -> str:
         hhmm = (hhmm or "").strip()
-        return f"{self.ev['date']}T{hhmm}:00{_tz_offset()}" if hhmm else ""
+        if not hhmm:
+            return ""
+        h, _, m = hhmm.partition(":")
+        try:
+            off = _tz_offset(date.fromisoformat(self.ev["date"]), int(h), int(m))
+        except ValueError:
+            off = _tz_offset()
+        return f"{self.ev['date']}T{hhmm}:00{off}"
 
     def _save(self):
         changes = {"all_day": bool(self.ev.get("all_day"))}

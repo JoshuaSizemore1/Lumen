@@ -196,6 +196,8 @@ class DashboardScreen(QWidget):
         self.state.fetch_calendar(today, today, self._set_calendar)
 
     def _set_calendar(self, result: dict):
+        if result.get("error"):
+            return          # a failed refresh keeps what's already shown
         evs = [e for e in result.get("events", []) if not e.get("all_day")]
         now = datetime.now()
         now_min = now.hour * 60 + now.minute
