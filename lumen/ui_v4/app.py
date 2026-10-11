@@ -6,7 +6,7 @@ plain `app.exec()` event loop (AppState's IPC is Qt-driven; no asyncio loop in
 the UI process). Differences: its own single-instance socket, and no separate
 launcher overlay — "toggle-launcher" (Super+L) brings the window up with the
 Ask bar focused instead, and hides it when Lumen is already in front.
-Launch with: lumen-ui-v4, or python -m lumen.ui_v4
+Launch with: lumen (with the daemon), lumen-ui, or python -m lumen.ui_v4
 """
 import os
 import sys

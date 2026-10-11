@@ -96,7 +96,7 @@ def test_main_hands_off_to_an_instance_that_is_still_starting(monkeypatch):
     monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: None)
     monkeypatch.setattr(launch, "spawn_daemon",
                         lambda: events.append("spawn"))
-    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("ui"))
+    monkeypatch.setattr("lumen.ui_v4.app.main", lambda: events.append("ui"))
 
     launch.main()
 
@@ -130,7 +130,7 @@ def test_handoff_takes_over_when_the_starting_instance_dies(monkeypatch):
                         lambda p=None: grabs.pop(0))
     monkeypatch.setattr(launch.instance_lock, "release", lambda h: None)
     monkeypatch.setattr(launch, "daemon_alive", lambda p: True)
-    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("ui"))
+    monkeypatch.setattr("lumen.ui_v4.app.main", lambda: events.append("ui"))
 
     launch.main()
 
@@ -140,7 +140,7 @@ def test_handoff_takes_over_when_the_starting_instance_dies(monkeypatch):
 def test_handoff_gives_up_instead_of_hanging(monkeypatch):
     monkeypatch.setattr("lumen.ui_v2.single_instance.try_send", lambda n, c: False)
     monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: None)
-    monkeypatch.setattr("lumen.ui_v3.app.main",
+    monkeypatch.setattr("lumen.ui_v4.app.main",
                         lambda: (_ for _ in ()).throw(AssertionError("no rival UI")))
 
     launch.main(handoff_timeout=0.3)          # returns rather than blocking
@@ -152,7 +152,7 @@ def test_primary_releases_the_lock_on_exit(monkeypatch):
     monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: "lock")
     monkeypatch.setattr(launch.instance_lock, "release", released.append)
     monkeypatch.setattr(launch, "daemon_alive", lambda p: True)
-    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: None)
+    monkeypatch.setattr("lumen.ui_v4.app.main", lambda: None)
 
     launch.main()
 
@@ -164,14 +164,41 @@ def test_primary_releases_the_lock_on_exit(monkeypatch):
 def test_quit_asks_the_running_instance_first(monkeypatch, capsys):
     sent = []
     monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
-                        lambda n, c: sent.append(c) or True)
+                        lambda n, c: sent.append((n, c)) or True)
     monkeypatch.setattr(launch.instance_lock, "lumen_pids", lambda: [])
     monkeypatch.setattr(sys, "argv", ["lumen", "--quit"])
 
     launch.main()
 
-    assert sent == ["quit"]
+    assert sent == [("lumen-ui-v4", "quit"), ("lumen-ui-v3", "quit")]
     assert "quit" in capsys.readouterr().out.lower()
+
+
+def test_quit_reaches_an_old_v3_window(monkeypatch, capsys):
+    """v4 is the default now; a ui_v3 started by hand still answers `--quit`."""
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
+                        lambda n, c: n == "lumen-ui-v3")
+    monkeypatch.setattr(launch.instance_lock, "lumen_pids", lambda: [])
+    monkeypatch.setattr(sys, "argv", ["lumen", "--quit"])
+
+    launch.main()
+
+    assert "asked" in capsys.readouterr().out.lower()
+
+
+def test_launcher_runs_ui_v4(monkeypatch):
+    events = []
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
+                        lambda n, c: events.append(n) and False)
+    monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: "lock")
+    monkeypatch.setattr(launch.instance_lock, "release", lambda h: None)
+    monkeypatch.setattr(launch, "daemon_alive", lambda p: True)
+    monkeypatch.setattr("lumen.ui_v4.app.main", lambda: events.append("v4"))
+    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("v3"))
+
+    launch.main()
+
+    assert events == ["lumen-ui-v4", "v4"]
 
 
 def test_quit_sweeps_processes_no_one_can_talk_to(monkeypatch, capsys):
@@ -213,7 +240,7 @@ def test_main_starts_ui_then_stops_spawned_daemon(monkeypatch):
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: True)
     monkeypatch.setattr(launch, "stop_daemon",
                         lambda pr: events.append(("stop", pr is proc)))
-    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("ui"))
+    monkeypatch.setattr("lumen.ui_v4.app.main", lambda: events.append("ui"))
     monkeypatch.delenv("LUMEN_UNIFIED", raising=False)
     launch.main()
     assert events == ["spawn", "ui", ("stop", True)]
@@ -228,7 +255,7 @@ def test_main_stops_daemon_even_when_ui_exits_nonzero(monkeypatch):
     monkeypatch.setattr(launch, "spawn_daemon", lambda: proc)
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: True)
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: stops.append(pr))
-    monkeypatch.setattr("lumen.ui_v3.app.main",
+    monkeypatch.setattr("lumen.ui_v4.app.main",
                         lambda: (_ for _ in ()).throw(SystemExit(3)))
     with pytest.raises(SystemExit):
         launch.main()
@@ -241,7 +268,7 @@ def test_main_leaves_external_daemon_alone(monkeypatch):
     monkeypatch.setattr(launch, "daemon_alive", lambda p: True)
     monkeypatch.setattr(launch, "spawn_daemon", lambda: events.append("spawn"))
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: events.append("stop"))
-    monkeypatch.setattr("lumen.ui_v3.app.main", lambda: events.append("ui"))
+    monkeypatch.setattr("lumen.ui_v4.app.main", lambda: events.append("ui"))
     launch.main()
     assert events == ["ui"]
 
@@ -254,7 +281,7 @@ def test_main_aborts_when_daemon_never_comes_up(monkeypatch):
     monkeypatch.setattr(launch, "spawn_daemon", lambda: proc)
     monkeypatch.setattr(launch, "wait_for_socket", lambda p, pr: False)
     monkeypatch.setattr(launch, "stop_daemon", lambda pr: stops.append(pr))
-    monkeypatch.setattr("lumen.ui_v3.app.main",
+    monkeypatch.setattr("lumen.ui_v4.app.main",
                         lambda: (_ for _ in ()).throw(AssertionError("UI must not start")))
     with pytest.raises(SystemExit, match="did not come up"):
         launch.main()

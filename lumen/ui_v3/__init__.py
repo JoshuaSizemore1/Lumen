@@ -1,8 +1,8 @@
 """Relay-styled Lumen UI, converted from Relay.dc.html.
 
-The primary Lumen UI as of 2026-07-20 — `lumen`, `lumen-ui`, and
-`python -m lumen.ui_v3` all launch it. The previous tabbed shell is archived
-as a fallback under `lumen-ui-v2`. Shares ui_v2's AppState (the daemon seam),
+The primary Lumen UI from 2026-07-20 until 2026-10-10, when ui_v4 took over
+`lumen` and `lumen-ui`. Still runnable as `lumen-ui-v3` or
+`python -m lumen.ui_v3`. The older tabbed shell is archived as `lumen-ui-v2`. Shares ui_v2's AppState (the daemon seam),
 mail_html, daemon_client, single_instance, and tray — see state.py for the
 migration note.
 """

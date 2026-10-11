@@ -6,20 +6,22 @@ Instrument Sans body text (both bundled in `fonts/`). It talks to the same
 daemon through the same `AppState` as ui_v3, so every feature and every
 write-confirmation flow is unchanged. Only the look and the layout are new.
 
-**ui_v3 is still the default.** `lumen`, `lumen-ui` and `lumen-ui-v3` all
-launch ui_v3. You can run v4 alongside it: each version uses its own
-single-instance socket.
+**This is the default UI** (since 2026-10-10). `lumen`, `lumen-ui` and
+`lumen-ui-v4` all launch it. The previous UI is still runnable as
+`lumen-ui-v3`; each version uses its own single-instance socket, so they can
+run side by side.
 
 ## Launch
 
 ```sh
-uv run lumen-ui-v4
-# or
+uv run lumen          # starts the daemon too; closing the window quits both
+uv run lumen-ui       # against a daemon you run yourself; close hides to the tray
 uv run python -m lumen.ui_v4
 ```
 
-Passing `--toggle-launcher` (or sending that command to a running v4) opens
-the window with the Ask bar focused. v4 has no separate launcher overlay.
+Passing `--toggle-launcher` (Super+L runs `lumen --toggle-launcher`) brings
+the window up with the Ask bar focused; pressing it again while Lumen is in
+front hides it to the tray. v4 has no separate launcher overlay.
 
 ## Layout
 
@@ -32,8 +34,9 @@ Settings.
 - *Daily*: **Inbox** (shows an unread badge), **Calendar**, **Todos** (shows
   the open count)
 - *Library*: **Books**, **Files**, **Canvas**
-- **Ask Lumen**: the one conversation. A question typed into the Ask bar
-  moves here, along with the page you asked from.
+- **Ask Lumen**: the conversation screen. A question typed into the Ask
+  bar is answered in a panel just above the bar, with the page you asked
+  from as context; **Continue in Ask Lumen** carries it over here.
 - Footer: **Settings**, the theme toggle, the model status (a dot and a
   word) and today's date.
 
@@ -57,8 +60,12 @@ v4 follows your system's light/dark setting by default. The theme item in the
 sidebar footer steps through **system → light → dark → system**. Your choice
 is saved in `QSettings("lumen", "ui_v4")` under `theme`. Screens repaint
 straight away when the theme changes, including when the OS setting changes
-while you're in system mode. Set `LUMEN_REDUCED_MOTION=1` to turn off
-animation.
+while you're in system mode.
+
+**Settings → Appearance** sets the text size (v4's first run carries over
+ui_v3's choice once) and reduced motion. Animation is also off when your
+desktop asks for it (GTK, KDE, Hyprland or GNOME settings), and
+`LUMEN_REDUCED_MOTION=1` forces it off.
 
 ## Code map
 

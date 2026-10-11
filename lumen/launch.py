@@ -96,8 +96,11 @@ def quit_running() -> None:
     taken over answers nothing, and used to be unkillable short of hunting it
     down in `ps`."""
     from lumen.ui_v2.single_instance import try_send
-    from lumen.ui_v3 import SOCKET_NAME
-    asked = try_send(SOCKET_NAME, "quit")
+    from lumen.ui_v3 import SOCKET_NAME as V3_SOCKET
+    from lumen.ui_v4 import SOCKET_NAME
+    # Ask both (a list, not a short-circuit): a ui_v3 window started via
+    # `lumen-ui-v3` must still quit.
+    asked = any([try_send(name, "quit") for name in (SOCKET_NAME, V3_SOCKET)])
     if asked:
         print("lumen: asked the running instance to quit")
         deadline = time.monotonic() + STOP_TIMEOUT_S
@@ -113,7 +116,7 @@ def quit_running() -> None:
 
 def main(handoff_timeout: float = HANDOFF_TIMEOUT_S) -> None:
     from lumen.ui_v2.single_instance import try_send   # shared IPC plumbing
-    from lumen.ui_v3 import SOCKET_NAME                 # cheap: no UI stack imported
+    from lumen.ui_v4 import SOCKET_NAME                 # cheap: no UI stack imported
     if {"--quit", "--kill", "--stop"} & set(sys.argv):
         quit_running()
         return
@@ -155,7 +158,7 @@ def main(handoff_timeout: float = HANDOFF_TIMEOUT_S) -> None:
                     f"lumen: the daemon did not come up — see {daemon_log_path()}")
 
         os.environ["LUMEN_UNIFIED"] = "1"   # closing the window quits the app
-        from lumen.ui_v3.app import main as ui_main
+        from lumen.ui_v4.app import main as ui_main
         try:
             ui_main()   # blocks until quit; exits via SystemExit with the UI's code
         finally:

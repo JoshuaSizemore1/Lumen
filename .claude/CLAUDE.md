@@ -17,13 +17,15 @@ lumen/
     llm/          # Ollama client, model routing, idle/keep-alive config
     connectors/   # gmail.py, gcal.py, todos.py — thin sync + query interfaces
     router.py     # tool-call vs direct-answer decision, dispatch
-  ui_v3/           # primary UI (Relay-styled) — `lumen`, `lumen-ui`, `python -m lumen.ui_v3`
-    app.py         # PyQt6 entry: tray, single-instance guard, hotkey launcher overlay
-    screens/       # chat, dashboard, calendar, todos, books, mail, settings
-    state.py       # thin wrapper over ui_v2's AppState — the daemon seam ui_v3 reuses
-  ui_v2/           # archived previous shell — still runnable via `lumen-ui-v2`; also the
-                   # home of the daemon-seam modules ui_v3 reuses (state, daemon_client,
-                   # single_instance, tray, mail_html) until they're moved into ui_v3
+  ui_v4/           # primary UI ("Field Notes") — `lumen`, `lumen-ui`, `python -m lumen.ui_v4`
+    app.py         # PyQt6 entry: tray, single-instance guard; Super+L raises/hides the window
+    main.py        # LumenWindow: sidebar, lazily built screens, inline Ask bar, history
+    screens/       # today, mail, calendar, todos, books, files, canvas, ask, settings
+  ui_v3/           # previous UI (Relay-styled) — still runnable via `lumen-ui-v3`
+    state.py       # thin wrapper over ui_v2's AppState — the daemon seam v3 and v4 reuse
+  ui_v2/           # archived older shell — still runnable via `lumen-ui-v2`; also the
+                   # home of the daemon-seam modules v3/v4 reuse (state, daemon_client,
+                   # single_instance, tray, mail_html) until they're moved
     daemon_client.py  # IPC client (moved here 2026-07-17 when the dead ui/ tree was removed)
   design/          # Claude Design output — HTML/React mockups, reference only
   config.toml

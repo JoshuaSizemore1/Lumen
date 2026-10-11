@@ -6,8 +6,10 @@ they will drift.
 
 ## Status (end of 2026-10-10 session)
 
-Steps 1–4 of "Suggested order of work" are done, uncommitted. Josh answered
-section 5 (recorded there). Full suite: 1915 passed, 19 skipped.
+All six steps of "Suggested order of work" are done, uncommitted. Josh
+answered section 5 (recorded there), did his live visual pass and approved
+it, and v4 is now the default (section 6). Full suite: 1917 passed, 19
+skipped.
 
 - **Done:** section 4's two shared one-liners; every H, M and L item in
   section 2; every section 3 design item except the under-600px rail (dropped,
@@ -29,9 +31,15 @@ section 5 (recorded there). Full suite: 1915 passed, 19 skipped.
   the Canvas page stayed Active after a successful sign-in; the archived v2
   calendar wiped its events on an error reply.
 - **Tests:** `tests/ui/*_v4.py` (14 files, shared helper `v4_support.py`).
-- **Left:** step 5 (Josh's live visual pass, including Canvas sign-in and
-  the Super+L toggle on Hyprland), then step 6 (switch-over — Josh said yes,
-  after his pass). Nothing is committed yet.
+- **Switch-over (section 6), done 2026-10-10:** `lumen` and `lumen-ui` run
+  ui_v4; `lumen --quit` asks both the v4 and v3 sockets; `lumen-ui-v3` keeps
+  v3 runnable; entry points regenerated with `uv sync`; docs updated. Super+L
+  hides the window to the tray (it doesn't quit, unlike v3's launcher-only
+  state); closing the window under `lumen` still quits the app and its daemon.
+  No settings migration was needed beyond the text size: v3 never saved
+  window geometry.
+- **Left:** per-feature commits (when Josh asks). Section 6 item 6 (moving
+  the seam modules out of ui_v2/ui_v3, then retiring v3) stays optional.
 
 ## Summary
 

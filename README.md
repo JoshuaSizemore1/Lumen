@@ -87,7 +87,7 @@ background_pause_at = 0.80   # background AI pauses above this share of the 5h/7
 - **LLM**: Ollama (or llama.cpp `llama-server`), with idle-unload enforced — the model is never left resident in RAM while idle. Optionally the `claude` CLI (Claude mode). Every call goes through one `LLMBackend`, so features don't care which backend answers.
 - **Storage**: SQLite (todos, cache, chat history, the mail and Canvas mirrors)
 - **Integrations**: Email/Calendar/Search/Canvas connect via MCP servers, not hand-rolled API wrappers
-- **Frontend**: PyQt6 — tray icon plus a hotkey-invoked quick-launcher (command-palette style). Visual design is sourced from Claude Design mockups (reference only, not shipped code). Canvas login and browsing use an embedded QtWebEngine view.
+- **Frontend**: PyQt6 — tray icon, a hotkey (Super+L) that raises the window with the Ask bar focused, and a Ctrl+K command palette. Visual design is sourced from Claude Design mockups (reference only, not shipped code). Canvas login and browsing use an embedded QtWebEngine view.
 
 ## Directory structure
 
@@ -122,10 +122,10 @@ lumen/
       canvas_reconcile.py              # assignments -> local todos
       canvas_calendar.py                # opt-in Canvas -> Google Calendar due dates
   mcp_servers/            # local MCP servers: mail, gcal, canvas (read-only), openlibrary
-  ui_v3/                  # primary UI: tray, quick-launcher, Ask bar, one screen per tab
-    screens/               # today, calendar, mail, todos, books, chat, files, canvas, settings
-    canvas_login.py         # embedded Canvas login + autofill helpers
-  ui_v4/                  # "Field Notes" redesign, opt-in via `lumen-ui-v4`
+  ui_v4/                  # primary UI ("Field Notes"): tray, Ask bar, one screen per destination
+    screens/               # today, mail, calendar, todos, books, files, canvas, ask, settings
+  ui_v3/                  # previous UI (Relay-styled), still runnable via `lumen-ui-v3`;
+                          # also hosts AppState and the Canvas login helpers v4 reuses
   ui_v2/                  # archived previous shell (`lumen-ui-v2`); still hosts the shared AppState
   launch.py               # `lumen`: starts the daemon + UI together, `--quit` stops everything
   design/                # future Claude Design output, reference only
@@ -144,7 +144,8 @@ lumen                     # starts the daemon (if needed) + the UI together
 
 Closing the main window (or tray → Quit) shuts the daemon down too — nothing keeps
 running in the background. Lumen is also in the app menu as **Lumen**.
-`lumen --toggle-launcher` summons the quick-launcher overlay (hotkey binding).
+`lumen --toggle-launcher` (the hotkey binding) brings the window up with the Ask
+bar focused, and hides it again if Lumen is already in front.
 A daemon you started yourself (`uv run lumen-daemon`, systemd) is left alone on exit;
 the launcher only stops the daemon it started.
 
@@ -155,14 +156,14 @@ If a daemon is ever left running with no window, `lumen-daemon --stop` stops jus
 the daemon(s), and `lumen --quit` (also `--kill` / `--stop`) stops everything. The
 same controls are in **Settings → [background]**.
 
-To try the redesigned UI, run `uv run lumen-ui-v4`. It runs alongside the default
-UI and talks to the same daemon (see `lumen/ui_v4/README.md`).
+The UI is ui_v4, "Field Notes" (see `lumen/ui_v4/README.md`). The previous UI is
+still runnable with `uv run lumen-ui-v3`; it talks to the same daemon.
 
 ## Status
 
 All planned phases are built and live-verified (LLM runtime → todos → MCP → book catalog → calendar → email menu/compose → writing style → daily features → memory → UI polish → power/thermal validation → inbox rules/labels). See `.claude/skills/development-plan.md` for the phase log.
 
-Since then: the Canvas integration and the optional Claude mode, both described above. Still open: the live check of Canvas login autofill on the real CAS + Duo form, and the ui_v4 visual review. The open issue list is in `todo-fixes`.
+Since then: the Canvas integration and the optional Claude mode, both described above. Still open: the live check of Canvas login autofill on the real CAS + Duo form. The open issue list is in `todo-fixes`.
 
 ## Design references
 

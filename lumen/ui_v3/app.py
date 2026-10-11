@@ -2,9 +2,8 @@
 the daemon, with the Super+L launcher overlay.
 
 Mirrors ui_v2/app.py — same daemon clients, same single-instance socket, same
-tray. This is now the primary UI; the previous shell remains runnable as
-`lumen-ui-v2`.
-Launch with: python -m lumen.ui_v3
+tray. The primary UI until ui_v4 replaced it on 2026-10-10.
+Launch with: lumen-ui-v3, or python -m lumen.ui_v3
 """
 import os
 import sys

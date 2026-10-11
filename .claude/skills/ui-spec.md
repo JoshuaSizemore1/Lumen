@@ -1,8 +1,7 @@
 # Skill: UI spec (ui_v4, "Field Notes")
 
-The desktop UI being finished is `lumen/ui_v4/` (opt-in as `lumen-ui-v4`;
-`lumen` still opens ui_v3 until Josh signs off on v4 — see
-`.claude/ui_v4-fixes-and-integration-plan.md` §6). Read this before changing
+The desktop UI is `lumen/ui_v4/`: the default since 2026-10-10 (`lumen`,
+`lumen-ui`, `lumen-ui-v4`); ui_v3 stays runnable as `lumen-ui-v3`. Read this before changing
 any v4 screen, and update it when you add or change behaviour.
 
 ## Sources of truth
