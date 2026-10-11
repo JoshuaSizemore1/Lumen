@@ -175,7 +175,7 @@ triage lesson). Still one button press → one model load → unload.
 ## Feature backlog — pulled from Lumen's in-app todos (2026-07-16)
 
 Each entry cites its source todo id (the originals are still in the app's
-todo list). Bug-sized items went to `todo-fixes` instead. Items 6–7 push
+todo list). Bug-sized items went to `todo-fixes` (now `archived-fixes.md`) instead. Items 6–7 push
 Lumen toward a local file workbench — worth a deliberate scope check against
 `project-scope.md` before committing to them.
 
@@ -185,7 +185,7 @@ does. Remove Launcher as a tab — the quick launcher stays, but purely as the
 global-hotkey palette. Chat becomes the first tab, styled like Claude's site:
 a prominent **New chat** button, a list of past chats to reopen, and a clean
 empty-state prompt box for a fresh chat.
-**Depends on:** the chat-session fixes (`todo-fixes` entries 5–6) — new-chat
+**Depends on:** the chat-session fixes (`archived-fixes.md` entries 5–6) — new-chat
 UX is meaningless until sessions actually isolate context.
 
 **Built 2026-07-17.** Launcher removed as a tab (`main.py`); the palette lives
@@ -200,7 +200,7 @@ confirmation (path + content preview) via the existing write-gate. Default
 writes go to a configurable notes directory (e.g. `~/Documents/Lumen`);
 anything outside it needs a stronger confirmation. New router intent + prompt
 asset in `daemon/llm/`. Also resolves the markdown→calendar misroute
-(`todo-fixes` entry 3).
+(`archived-fixes.md` entry 3).
 
 **Built 2026-07-17.** Prompt asset `daemon/llm/file_write.py` (sentinel-line
 output — `FILENAME:` / optional `PATH:` / `---` / raw body — not JSON, since a

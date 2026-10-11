@@ -1,4 +1,9 @@
-# Todo Fixes for Lumen
+# Todo Fixes for Lumen (archived)
+
+**Archived 2026-10-11.** This was `todo-fixes` until then. The active list is
+`todo-fixes.md`, which picks up the numbering at #72. "todo-fixes #1"–"#71" in
+code comments, tests and skills refer to entries in this file. The two entries
+still open here, #44 and #71, were carried over to `todo-fixes.md`.
 
 Bug/repair backlog, pulled from Lumen's in-app todo list on 2026-07-16.
 Each entry cites its source todo id — the originals are still in the app's

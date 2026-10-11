@@ -163,7 +163,7 @@ still runnable with `uv run lumen-ui-v3`; it talks to the same daemon.
 
 All planned phases are built and live-verified (LLM runtime → todos → MCP → book catalog → calendar → email menu/compose → writing style → daily features → memory → UI polish → power/thermal validation → inbox rules/labels). See `.claude/skills/development-plan.md` for the phase log.
 
-Since then: the Canvas integration and the optional Claude mode, both described above. Still open: the live check of Canvas login autofill on the real CAS + Duo form. The open issue list is in `todo-fixes`.
+Since then: the Canvas integration and the optional Claude mode, both described above. Still open: the live check of Canvas login autofill on the real CAS + Duo form. The open issue list is in `todo-fixes.md`.
 
 ## Design references
 
