@@ -167,6 +167,19 @@ _WIDTH_CSS = re.compile(r"\b(min-width|width)\s*:\s*(\d+)\s*px", re.IGNORECASE)
 _COLOR_CSS = re.compile(r"\bcolor\s*:\s*(#[0-9a-f]{3,8}|rgba?\([^)]*\))",
                         re.IGNORECASE)
 _BGCOLOR = re.compile(r"\bbgcolor\s*=\s*(?:\"[^\"]*\"|'[^']*'|\S+)", re.IGNORECASE)
+_TABLE_TAG = re.compile(r"<(table|td|th)\b[^>]*>", re.IGNORECASE)
+_HAS_WIDTH_ATTR = re.compile(r"\swidth\s*=", re.IGNORECASE)
+_STYLE_ATTR = re.compile(r"""\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
+_CSS_WIDTH_DECL = re.compile(r"(?<![-\w])width\s*:\s*(\d+(?:\.\d+)?)\s*(px|%)",
+                             re.IGNORECASE)
+_HIDDEN_TAG = re.compile(
+    r"""<(\w+)\b[^>]*\bstyle\s*=\s*(?:"[^"]*\bdisplay\s*:\s*none[^"]*"|"""
+    r"""'[^']*\bdisplay\s*:\s*none[^']*')[^>]*>""", re.IGNORECASE)
+_VOID_TAGS = {"img", "br", "hr", "input", "area", "col", "wbr", "source", "embed"}
+_ROWLESS_OPEN = re.compile(r"(<(?:table|tbody|thead|tfoot)\b[^>]*>\s*)(?=<t[dh]\b)",
+                           re.IGNORECASE)
+_ROWLESS_CLOSE = re.compile(r"(</t[dh]>\s*)(?=</(?:table|tbody|thead|tfoot)>)",
+                            re.IGNORECASE)
 
 # Tidy-up after declarations are dropped: `style="; "` and `style=""` left
 # behind are harmless but make the output unreadable when debugging a message.
@@ -176,8 +189,9 @@ _DANGLING = re.compile(r"""(style\s*=\s*")[\s;]+(?=")""", re.IGNORECASE)
 _EMPTY_STYLE = re.compile(r"""\s*style\s*=\s*"[\s;]*"|\s*style\s*=\s*'[\s;]*'""",
                           re.IGNORECASE)
 
-CONTENT_WIDTH = 620          # the pane's usable width; QTextBrowser has no
-                             # max-width, so oversized boxes simply overflow
+CONTENT_WIDTH = 620          # default usable pane width; QTextBrowser has no
+                             # max-width, so oversized boxes simply overflow.
+                             # A view that knows its real width passes it.
 
 
 def _luminance(color: str) -> float | None:
@@ -206,33 +220,67 @@ def _luminance(color: str) -> float | None:
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
 
 
-def _clamp_widths(html: str) -> str:
+def _drop_widths(html: str, max_width: int = CONTENT_WIDTH) -> str:
     """Pixel widths wider than the pane are dropped rather than scaled: the
     horizontal scrollbar is off, so anything oversized is just cut off."""
     def attr(m):
         val = next(g for g in m.groups() if g)
-        return "" if int(val) > CONTENT_WIDTH else m.group(0)
+        return "" if int(val) > max_width else m.group(0)
 
     def css(m):
-        return "" if int(m.group(2)) > CONTENT_WIDTH else m.group(0)
+        return "" if int(m.group(2)) > max_width else m.group(0)
 
     return _WIDTH_CSS.sub(css, _WIDTH_ATTR.sub(attr, html))
 
 
-def _constrain_images(html: str) -> str:
+def _clamp_tables(html: str, max_width: int = CONTENT_WIDTH) -> str:
+    """The structured layout clamps an oversized table to the pane instead:
+    dropping its width would leave the widths inside it with no sized box to
+    share, which squeezes them (#30)."""
+    def clamp(wm):
+        val = next(g for g in wm.groups() if g)
+        return f'width="{max_width}"' if int(val) > max_width else wm.group(0)
+    return re.sub(r"<table\b[^>]*>", lambda m: _WIDTH_ATTR.sub(clamp, m.group(0)),
+                  html, flags=re.IGNORECASE)
+
+
+def _fit_widths(html: str, max_width: int = CONTENT_WIDTH) -> str:
+    """Scale every pixel width on tables and cells by ONE factor, so the
+    widest fixed box fits the pane and the layout keeps its proportions: a
+    480px column and the 482px cells inside it shrink together. Clamping
+    each to the pane separately left columns that no longer added up, and
+    Qt squeezed the content (#30). Widths past twice the default pane are
+    outliers (a stray 1200px banner): they don't set the factor, and the
+    clamp/drop that follows deals with them alone."""
+    limit = 2 * CONTENT_WIDTH
+    tags = [m.group(0) for m in _TABLE_TAG.finditer(html)]
+    widths = [int(next(g for g in w.groups() if g))
+              for t in tags for w in _WIDTH_ATTR.finditer(t)]
+    widest = max((w for w in widths if w <= limit), default=0)
+    if widest <= max_width:
+        return html
+    factor = max_width / widest
+
+    def scale(wm):
+        val = int(next(g for g in wm.groups() if g))
+        return wm.group(0) if val > limit else f'width="{round(val * factor)}"'
+    return _TABLE_TAG.sub(lambda m: _WIDTH_ATTR.sub(scale, m.group(0)), html)
+
+
+def _constrain_images(html: str, max_width: int = CONTENT_WIDTH) -> str:
     """Clamp an oversized image's own width to the pane instead of letting
-    `_clamp_widths` drop it (todo-fixes #3). Dropping a table's width lets it
+    `_drop_widths` drop it (todo-fixes #3). Dropping a table's width lets it
     reflow to fit, but dropping an <img>'s width makes it render at its full
     intrinsic size — often 1000px+ — and overflow the pane, which is a big part
     of why HTML mail "still looks weird". Clamping keeps the picture visible and
     inside the card."""
     def clamp_attr(wm):
         val = next(g for g in wm.groups() if g)
-        return (f'width="{CONTENT_WIDTH}"' if int(val) > CONTENT_WIDTH
+        return (f'width="{max_width}"' if int(val) > max_width
                 else wm.group(0))
 
     def clamp_css(cm):
-        return (f"{cm.group(1)}:{CONTENT_WIDTH}px" if int(cm.group(2)) > CONTENT_WIDTH
+        return (f"{cm.group(1)}:{max_width}px" if int(cm.group(2)) > max_width
                 else cm.group(0))
 
     def repl(m):
@@ -240,6 +288,59 @@ def _constrain_images(html: str) -> str:
         return _WIDTH_CSS.sub(clamp_css, _WIDTH_ATTR.sub(clamp_attr, tag))
 
     return _IMG.sub(repl, html or "")
+
+
+def _css_widths_to_attrs(html: str) -> str:
+    """Qt's rich text sizes a table or cell from its width ATTRIBUTE only and
+    ignores a CSS `width:` there. Mail built on CSS widths (todo-fixes #30: a
+    Stripe receipt) lost every column size and collapsed into a strip a few
+    letters wide. Copy the last CSS width onto the attribute when there is
+    none. Only the structured layout does this: on most mail it changes
+    nothing or makes it worse, which is why `fit_html` measures both."""
+    def repl(m):
+        tag = m.group(0)
+        style = _STYLE_ATTR.search(tag)
+        if _HAS_WIDTH_ATTR.search(tag) or not style:
+            return tag
+        decls = _CSS_WIDTH_DECL.findall(style.group(1) or style.group(2) or "")
+        if not decls:
+            return tag
+        num, unit = decls[-1]
+        val = f"{round(float(num))}{'%' if unit == '%' else ''}"
+        cut = 1 + len(m.group(1))
+        return f'{tag[:cut]} width="{val}"{tag[cut:]}'
+    return _TABLE_TAG.sub(repl, html)
+
+
+def _add_missing_rows(html: str) -> str:
+    """Cells written straight into a table with no <tr> get an implied row in
+    a browser. Qt instead treats them as more cells of the ENCLOSING table's
+    row, so a stray links table became extra columns that squeezed the
+    content beside it to a few letters wide (#30). Supply the row."""
+    return _ROWLESS_CLOSE.sub(r"\1</tr>", _ROWLESS_OPEN.sub(r"\1<tr>", html))
+
+
+def _drop_hidden(html: str) -> str:
+    """Qt ignores `display:none`, so text a sender hid (the preheader that
+    feeds the inbox preview) printed at the top of the message. Remove each
+    hidden element with its content; one whose end tag can't be found loses
+    only its start tag, so a malformed message never loses the rest."""
+    out, pos = [], 0
+    while (m := _HIDDEN_TAG.search(html, pos)):
+        out.append(html[pos:m.start()])
+        name = m.group(1).lower()
+        pos = m.end()
+        if name in _VOID_TAGS or m.group(0).endswith("/>"):
+            continue
+        depth = 1
+        for t in re.compile(rf"<(/?){name}\b[^>]*>", re.IGNORECASE).finditer(
+                html, m.end()):
+            depth += -1 if t.group(1) else 1
+            if depth == 0:
+                pos = t.end()
+                break
+    out.append(html[pos:])
+    return "".join(out)
 
 
 def _fix_invisible_text(html: str) -> str:
@@ -252,19 +353,74 @@ def _fix_invisible_text(html: str) -> str:
     return _COLOR_CSS.sub(repl, html)
 
 
-def prepare_html(html: str) -> str:
+def prepare_html(html: str, max_width: int = CONTENT_WIDTH, *,
+                 structured: bool = False) -> str:
     """Normalize a sender's HTML into something QTextBrowser renders decently:
-    scripts and <style> blocks removed (it cannot apply most of them anyway,
-    and half-applied CSS is what makes mail look broken), dark backgrounds
-    dropped, unreadable text colours dropped, oversized fixed widths dropped,
-    and a sane base font wrapped around the result."""
+    scripts, <style> blocks and hidden elements removed (it cannot apply most
+    of that CSS anyway, and half-applied CSS is what makes mail look broken),
+    rowless table cells given their row, dark backgrounds and unreadable text
+    colours dropped, anything wider than `max_width` dropped, and a sane base
+    font wrapped around the result.
+
+    `structured` keeps the sender's column layout instead: CSS widths become
+    attributes Qt honours, and the whole layout is scaled to fit (#30). That
+    rescues mail built on CSS widths and hurts other mail, so a view that can
+    measure picks between the two with `fit_html`."""
     out = _VOID_HEAD.sub("", _SCRIPT.sub("", html or ""))
+    out = _add_missing_rows(_drop_hidden(out))
+    if structured:
+        out = _css_widths_to_attrs(out)
     out = _BGCOLOR.sub("", out)
     # Clamp image widths BEFORE the general width drop, so an oversized <img>
     # is resized to fit rather than stripped of its width and left to overflow.
-    out = _constrain_images(out)
-    out = _fix_invisible_text(_clamp_widths(out))
+    out = _constrain_images(out, max_width)
+    if structured:
+        out = _clamp_tables(_fit_widths(out, max_width), max_width)
+    out = _fix_invisible_text(_drop_widths(out, max_width))
     out = _EMPTY_STYLE.sub("", _DANGLING.sub(r"\1", out))
     return (
         f'<div style="color:{CARD_FG}; font-size:13px; line-height:145%;">'
         f"{out}</div>")
+
+
+FIT_MAX_BYTES = 150_000      # markup past this costs too much to lay out twice
+_DATA_SRC = re.compile(r"""\bsrc\s*=\s*(["'])data:.*?\1""", re.IGNORECASE | re.DOTALL)
+
+
+def fit_html(html: str, width: int, font=None) -> str:
+    """Prepare `html` for a pane `width` px wide, choosing by measurement.
+
+    The conservative and the structured preparation are both laid out at
+    `width`; the one that fits wins, and between two that fit, the shorter
+    (a squeezed layout is a tall one). A structured layout that overflows
+    gets one more try at the width it measured. Measured over Josh's 344
+    HTML messages at the ~376px pane a 1280px window gives: overflowing mail
+    went from 63 to 17 and no message came out wider or 1.5x taller than
+    before; a typical message costs ~15ms. Needs a QGuiApplication."""
+    from PyQt6.QtGui import QTextDocument
+
+    def measure(markup):
+        # Inlined images don't change which layout fits (their widths are
+        # in attributes); decoding them for every candidate would.
+        doc = QTextDocument()
+        if font is not None:
+            doc.setDefaultFont(font)
+        doc.setHtml(_DATA_SRC.sub('src=""', markup))
+        doc.setTextWidth(width)
+        return doc.idealWidth() > width + 2, doc.idealWidth(), doc.size().height()
+
+    plain = prepare_html(html, width)
+    # Measured without inlined images: with "always load images" on, those
+    # alone put an ordinary receipt past the limit.
+    if len(_DATA_SRC.sub("", html or "")) > FIT_MAX_BYTES:
+        return plain
+    rich = prepare_html(html, width, structured=True)
+    if rich == plain:
+        return plain
+    cands = [(measure(plain), plain), (measure(rich), rich)]
+    (over, ideal, _), _ = cands[1]
+    if over:
+        retry = prepare_html(html, max(120, int(width * width / ideal) - 8),
+                             structured=True)
+        cands.append((measure(retry), retry))
+    return min(cands, key=lambda c: (c[0][0], c[0][1] if c[0][0] else c[0][2]))[1]

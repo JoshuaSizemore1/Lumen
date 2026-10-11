@@ -169,7 +169,8 @@ def parse_mail_query(query: str, *, now_local: datetime) -> dict:
             timezone.utc).isoformat(timespec="seconds")
 
     f: dict = {"terms": [], "sender": None, "recipients": None, "subject": None,
-               "after": None, "before": None, "scope": None, "unread": None}
+               "after": None, "before": None, "scope": None, "unread": None,
+               "starred": None}
     leftover, pos = [], 0
     for m in _QUERY_OP.finditer(query or ""):
         leftover.append((query or "")[pos:m.start()])
@@ -205,9 +206,14 @@ def parse_mail_query(query: str, *, now_local: datetime) -> dict:
         elif field == "older" and (n := _parse_ndays(val)) is not None:
             f["before"] = rel(n)
         elif field == "scope":
-            f["scope"] = {"sent": "sent", "inbox": "inbox"}.get(val.lower(), f["scope"])
+            f["scope"] = {"sent": "sent", "inbox": "inbox",
+                          "starred": "starred"}.get(val.lower(), f["scope"])
         elif field == "flag":
             f["unread"] = {"unread": True, "read": False}.get(val.lower(), f["unread"])
+            if val.lower() == "starred":
+                f["starred"] = True
+            elif val.lower() == "unstarred":
+                f["starred"] = False
         # label: is accepted (so it doesn't pollute FTS) but not filtered on
     leftover.append((query or "")[pos:])
     text = _BOOL_JUNK.sub(" ", " ".join(leftover)).replace('"', " ") \
@@ -258,6 +264,7 @@ class EmailStore:
             "inbox": (f"WHERE {in_inbox}", ()),
             "unread": (f"WHERE is_read = 0 AND {in_inbox}", ()),
             "sent": ("WHERE (',' || labels || ',') LIKE '%,SENT,%'", ()),
+            "starred": ("WHERE (',' || labels || ',') LIKE '%,STARRED,%'", ()),
             "label": ("WHERE (',' || labels || ',') LIKE ?", (f"%,{label_id},%",)),
             "all": ("", ()),
         }[filter]
@@ -290,10 +297,16 @@ class EmailStore:
             where.append("(',' || e.labels || ',') LIKE '%,SENT,%'")
         elif p["scope"] == "inbox":
             where.append("(',' || e.labels || ',') LIKE '%,INBOX,%'")
+        elif p["scope"] == "starred":
+            where.append("(',' || e.labels || ',') LIKE '%,STARRED,%'")
         if p["unread"] is True:
             where.append("e.is_read = 0")
         elif p["unread"] is False:
             where.append("e.is_read = 1")
+        if p.get("starred") is True:
+            where.append("(',' || e.labels || ',') LIKE '%,STARRED,%'")
+        elif p.get("starred") is False:
+            where.append("(',' || e.labels || ',') NOT LIKE '%,STARRED,%'")
         cols = ", ".join(f"e.{c}" for c in _COLS if c != "body_html")
         if p["terms"]:
             # FTS filters the candidate set; ORDER BY recency, not bm25 — an
@@ -809,6 +822,19 @@ class GmailSync:
             self._store.update_labels(mid, add=[], remove=["UNREAD"])
         else:
             self._store.update_labels(mid, add=["UNREAD"], remove=[])
+        return True
+
+    async def star(self, mid: str, starred: bool) -> bool:
+        """Star or unstar a message via the STARRED system label — ungated like
+        mark_read (a direct, reversible user click). Never touches INBOX."""
+        body = ({"addLabelIds": ["STARRED"]} if starred
+                else {"removeLabelIds": ["STARRED"]})
+        if not await self._modify(mid, body):
+            return False
+        if starred:
+            self._store.update_labels(mid, add=["STARRED"], remove=[])
+        else:
+            self._store.update_labels(mid, add=[], remove=["STARRED"])
         return True
 
     async def send(self, to: list[str], cc: list[str], bcc: list[str],

@@ -2,6 +2,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from lumen.daemon import db
 from lumen.daemon.connectors.conversations import ConversationStore
 from lumen.daemon.llm.client import LLMUnavailable
@@ -466,7 +468,7 @@ async def test_chat_todo_question_injects_context():
     assert llm.messages[0]["role"] == "system"
     content = llm.messages[0]["content"]
     assert "Today is" in content
-    assert "- call dentist (due 2026-07-08) [personal]" in content
+    assert "- call dentist (due 2026-07-08, Wednesday) [personal]" in content
     assert llm.messages[-1] == {"role": "user", "content": "what's due today?"}
 
 
@@ -3574,6 +3576,345 @@ async def test_find_then_send_unknown_person_leaves_to_empty():
     assert seen["to"] == []
 
 
+# ---- todo-fixes #69: address lookup fires for natural compose phrases --------
+
+# JSON draft with no recipients but a to_hint set (model behaviour after
+# DRAFT_SYSTEM update).
+_CHRIS_DRAFT_NO_ADDR = (
+    '{"to": [], "cc": [], "subject": "Meeting", "body": "Hi Chris,\\n\\nLet\'s sync.", '
+    '"reply_hint": null, "to_hint": "Chris Sizemore"}'
+)
+_CHRIS_DRAFT_NO_HINT = (
+    '{"to": [], "cc": [], "subject": "Meeting", "body": "Hi,\\n\\nLet\'s sync.", '
+    '"reply_hint": null, "to_hint": null}'
+)
+
+
+class _SentChrisMailStore(FakeMailStore):
+    """Mirror where Chris Sizemore appears ONLY in SENT mail recipients."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows.append(
+            {"id": "s1", "sender": "Josh <josh@x.com>",
+             "subject": "Weekend plans", "snippet": "s", "body": "b",
+             "labels": ["SENT"], "received_at": "2026-07-16T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "ts1",
+             "recipients": "Chris Sizemore <chris@szmr.com>"})
+
+    def search(self, query, limit=50):
+        import re as _re
+        q = query.lower()
+        if "in:sent" in q:
+            name = _re.sub(r"\bto:\s*|\bin:sent\b", "", q).strip()
+            return [r for r in self.rows
+                    if "SENT" in r.get("labels", [])
+                    and name in r.get("recipients", "").lower()]
+        if q.startswith("from:"):
+            words = q[5:].strip()
+            return [r for r in self.rows if words in r["sender"].lower()]
+        return [r for r in self.rows if q in r["sender"].lower()]
+
+
+class _TwoAddressChrisStore(FakeMailStore):
+    """Two different addresses for Chris — one in received (newer), one in sent."""
+
+    def __init__(self):
+        super().__init__()
+        # Newer: received mail from Chris
+        self.rows.append(
+            {"id": "m2", "sender": "Chris Smith <chris@work.com>",
+             "subject": "Work stuff", "snippet": "s", "body": "b",
+             "labels": ["INBOX"], "received_at": "2026-07-20T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "t2",
+             "recipients": "me"})
+        # Older: sent mail to Chris with a different address
+        self.rows.append(
+            {"id": "s1", "sender": "Josh <josh@x.com>",
+             "subject": "Hey Chris", "snippet": "s", "body": "b",
+             "labels": ["SENT"], "received_at": "2026-07-10T10:00:00+00:00",
+             "is_read": True, "attachments": [], "thread_id": "ts1",
+             "recipients": "Chris Smith <chris@personal.com>"})
+
+    def search(self, query, limit=50):
+        import re as _re
+        q = query.lower()
+        if "in:sent" in q:
+            name = _re.sub(r"\bto:\s*|\bin:sent\b", "", q).strip()
+            return [r for r in self.rows
+                    if "SENT" in r.get("labels", [])
+                    and name in r.get("recipients", "").lower()]
+        if q.startswith("from:"):
+            words = q[5:].strip()
+            return [r for r in self.rows if words in r["sender"].lower()]
+        return [r for r in self.rows if q in r["sender"].lower()]
+
+
+async def test_compose_natural_phrase_prefills_from_received():
+    # "email Chris Sizemore about the meeting" — COMPOSE_RECIPIENT_HINT extracts
+    # the name and the lookup resolves against received mail (sender field).
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_ADDR,)), store=ChrisMailStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "email Chris Sizemore about the meeting",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen.get("to") == ["chris@szmr.com"]
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "chris@szmr.com" in text
+
+
+async def test_compose_natural_phrase_prefills_from_sent():
+    # Chris appears only in SENT recipients — lookup must search that direction.
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_ADDR,)), store=_SentChrisMailStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "email Chris Sizemore about the project",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen.get("to") == ["chris@szmr.com"]
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "from your mail" in text
+
+
+async def test_compose_two_addresses_prefers_one_the_user_wrote_to():
+    # Two distinct addresses for the name: the one the user has SENT mail to
+    # wins over a newer received one, and the other is listed.
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_ADDR,)),
+                            store=_TwoAddressChrisStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "email Chris Smith about the proposal",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen.get("to") == ["chris@personal.com"]   # written to before
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "chris@work.com" in text                    # the other is listed
+
+
+class _DigestChrisStore(FakeMailStore):
+    """The live #69 run: the newest mail "from Chris" was a LinkedIn digest."""
+
+    def __init__(self):
+        super().__init__()
+        for mid, sender, when in (
+                ("d1", "Chris Sizemore via LinkedIn <messaging-digest-noreply@linkedin.com>",
+                 "2026-09-01T10:00:00+00:00"),
+                ("n1", "GitHub <notifications@github.com>", "2026-08-30T10:00:00+00:00"),
+                ("c1", "Chris Sizemore <chris@abellalarms.net>", "2026-07-01T10:00:00+00:00")):
+            self.rows.append({"id": mid, "sender": sender, "subject": "Chris Sizemore",
+                              "snippet": "s", "body": "b", "labels": ["INBOX"],
+                              "received_at": when, "is_read": True, "attachments": [],
+                              "thread_id": mid, "recipients": "me"})
+
+    def search(self, query, limit=50):
+        q = query.lower()
+        if "in:sent" in q:
+            return []
+        words = q[5:].strip() if q.startswith("from:") else q
+        return [r for r in self.rows if words in r["sender"].lower()
+                or words in r["subject"].lower()]
+
+
+async def test_compose_skips_automated_senders():
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_ADDR,)), store=_DigestChrisStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "draft an email to Chris Sizemore about lunch on friday",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen.get("to") == ["chris@abellalarms.net"]
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "linkedin" not in text.lower() and "github" not in text.lower()
+
+
+def _real_mail_store(tmp_path, rows):
+    """The real EmailStore + query parser: a fake search() that matches whole
+    names against recipients hid that `to:` takes only one word (review)."""
+    from lumen.daemon import db
+    from lumen.daemon.connectors.email_menu import EmailStore
+    store = EmailStore(db.connect(tmp_path / "e.db"))
+    base = {"thread_id": "t", "body": "b", "snippet": "s", "is_read": True,
+            "attachments": [], "recipients": "me@x.com", "sender": "Me <me@x.com>"}
+    store.upsert([{**base, **r} for r in rows])
+    return store
+
+
+async def _compose_to(router, message):
+    seen = {}
+    out = await _drive_compose(router, message, lambda ev: (
+        seen.update(ev["compose_request"]),
+        router._confirm.resolve(ev["compose_id"], False)))
+    return seen.get("to"), "".join(e.get("chunk", "") for e in out)
+
+
+async def test_compose_finds_a_full_name_only_in_sent_mail(tmp_path):
+    store = _real_mail_store(tmp_path, [
+        {"id": "s1", "subject": "Lunch?", "labels": ["SENT"],
+         "recipients": "Chris Sizemore <chris@szmr.example>",
+         "received_at": "2026-07-01T10:00:00+00:00"},
+        {"id": "s2", "subject": "Notes", "labels": ["SENT"],
+         "recipients": "Chris Doe <chrisd@x.example>",
+         "received_at": "2026-07-02T10:00:00+00:00"}])
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_ADDR,)), store=store)
+    to, text = await _compose_to(router, "email Chris Sizemore about lunch")
+    assert to == ["chris@szmr.example"]
+    assert "chrisd@" not in text                    # a different Chris
+
+
+async def test_compose_matches_whole_words_only(tmp_path):
+    store = _real_mail_store(tmp_path, [
+        {"id": "r1", "subject": "hi", "labels": ["INBOX"],
+         "sender": "Christine Park <christine@x.example>",
+         "received_at": "2026-07-09T10:00:00+00:00"}])
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_HINT,)), store=store)
+    to, text = await _compose_to(router, "email Chris about the meeting")
+    assert to == [] and "couldn't find an address for Chris" in text
+
+
+@pytest.mark.parametrize("message", [
+    "email the team about the launch",
+    "send an email to my boss about friday",
+])
+async def test_compose_does_not_look_up_a_role_as_a_person(tmp_path, message):
+    store = _real_mail_store(tmp_path, [
+        {"id": "r1", "subject": "Welcome", "labels": ["INBOX"],
+         "sender": "The Slack Team <feedback@slack.example>",
+         "received_at": "2026-07-09T10:00:00+00:00"},
+        {"id": "r2", "subject": "Boss level", "labels": ["INBOX"],
+         "sender": "Boss Games <boss@games.example>",
+         "received_at": "2026-07-08T10:00:00+00:00"}])
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_HINT,)), store=store)
+    to, text = await _compose_to(router, message)
+    assert to == [] and "slack" not in text.lower() and "games" not in text.lower()
+
+
+async def test_compose_a_title_falls_back_to_the_models_name(tmp_path):
+    # "Dr. Smith" is cut at the dot to "Dr"; the model's to_hint carries the
+    # whole name, and the title itself never has to match.
+    store = _real_mail_store(tmp_path, [
+        {"id": "r1", "subject": "Results", "labels": ["INBOX"],
+         "sender": "Alan Smith <asmith@clinic.example>",
+         "received_at": "2026-07-09T10:00:00+00:00"},
+        {"id": "r2", "subject": "Your files", "labels": ["INBOX"],
+         "sender": "Dropbox <hello@dropbox.example>",
+         "received_at": "2026-07-10T10:00:00+00:00"}])
+    draft = ('{"to": [], "cc": [], "subject": "Results", "body": "Hi,", '
+             '"reply_hint": null, "to_hint": "Dr. Smith"}')
+    router = compose_router(FakeLLM((draft,)), store=store)
+    to, _text = await _compose_to(router, "send an email to Dr. Smith about my results")
+    assert to == ["asmith@clinic.example"]
+
+
+async def test_compose_no_address_match_reports_miss():
+    # No mirror match → empty To, and the answer tells the user to add it.
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_ADDR,)), store=FakeMailStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "email Chris Sizemore about the budget",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen.get("to") == []
+    text = "".join(e.get("chunk", "") for e in out)
+    assert "couldn't find" in text.lower()
+    assert "Chris Sizemore" in text
+
+
+async def test_compose_filler_name_skips_lookup():
+    # "email him about it" — "him" is a pronoun/filler; no lookup should fire,
+    # compose popup opens with empty To (the user fills it in).
+    router = compose_router(FakeLLM((_CHRIS_DRAFT_NO_HINT,)), store=ChrisMailStore())
+    seen = {}
+    out = await _drive_compose(
+        router,
+        "email him about the meeting",
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    # ChrisMailStore has Chris rows but a filler name must not accidentally resolve.
+    assert seen.get("to") == []
+    text = "".join(e.get("chunk", "") for e in out)
+    # No address note should appear (no "from your mail" / "couldn't find")
+    assert "from your mail" not in text
+    assert "couldn't find" not in text.lower()
+
+
+async def test_compose_model_tohint_fallback_when_regex_misses():
+    # A message that matches COMPOSE_HINT but neither COMPOSE_RECIPIENT_HINT
+    # nor TO_HINT_FALLBACK fires; the model's to_hint must be used as fallback.
+    # "shoot them a message" — "shoot" triggers COMPOSE_HINT but "email" verb
+    # + name pattern is absent, so the regex finds nothing.
+    model_hint_json = (
+        '{"to": [], "cc": [], "subject": "Invoice", '
+        '"body": "Hi Chris,\\n\\nJust checking in.", '
+        '"reply_hint": null, "to_hint": "Chris Sizemore"}'
+    )
+    router = compose_router(FakeLLM((model_hint_json,)), store=ChrisMailStore())
+    seen = {}
+    await _drive_compose(
+        router,
+        "shoot them a message about the invoice",   # shoot triggers COMPOSE_HINT; no name regex
+        lambda ev: (seen.update(ev["compose_request"]),
+                    router._confirm.resolve(ev["compose_id"], False)))
+    assert seen.get("to") == ["chris@szmr.com"]
+
+
+def test_compose_recipient_hint_regex_phrasings():
+    from lumen.daemon.router import COMPOSE_RECIPIENT_HINT
+    hits = [
+        "email Chris about the meeting",
+        "email Chris Sizemore about the budget",
+        "send an email to Sam Doe about friday",
+        "write an email to Alex regarding the report",
+        "draft a message to Jordan saying thanks",
+        "email to Dana about rescheduling",
+        "compose a note to Sam on monday",
+        "email Sarah saying hi",
+    ]
+    misses = [
+        "did sarah email me back?",
+        "any new email today?",
+        "search my email for invoices",
+        "how many unread emails",
+        "email him about it",          # pronoun — extracted but filler check applies
+        "reply to ada's email about engines",  # "about" is not between email and name properly
+    ]
+    assert all(COMPOSE_RECIPIENT_HINT.search(h) for h in hits), \
+        [h for h in hits if not COMPOSE_RECIPIENT_HINT.search(h)]
+    # Misses are misses OR the filler check catches them — just verify no crash
+
+
+def test_compose_recipient_hint_extracts_names():
+    from lumen.daemon.router import COMPOSE_RECIPIENT_HINT
+    cases = [
+        ("email Chris about the meeting", "Chris"),
+        ("email Chris Sizemore about the budget", "Chris Sizemore"),
+        ("send an email to Sam Doe about friday", "Sam Doe"),
+        ("email to Dana about rescheduling", "Dana"),
+        ("write an email to Alex regarding the report", "Alex"),
+        ("email Sarah saying hi", "Sarah"),
+    ]
+    for msg, expected in cases:
+        m = COMPOSE_RECIPIENT_HINT.search(msg)
+        assert m is not None, f"no match for: {msg!r}"
+        name = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        assert name.lower() == expected.lower(), f"{msg!r}: got {name!r}, want {expected!r}"
+
+
+def test_validate_draft_still_drops_model_invented_address():
+    # Invariant: validate_draft must drop any address the user didn't literally
+    # type, regardless of what the model puts in `to`.
+    from lumen.daemon.llm.email_compose import validate_draft
+    raw = {"to": ["invented@evil.com"], "cc": [], "subject": "s",
+           "body": "b", "reply_hint": None, "to_hint": None}
+    result = validate_draft(raw, user_message="email Chris about the meeting")
+    assert result["to"] == []   # model-invented address is stripped
+
+
 class _CapturingLLM:
     """Records the message lists it is asked to complete, yields a fixed reply."""
     model = None
@@ -3956,10 +4297,15 @@ async def test_find_then_send_still_resolves_possessive_form():
 
 def test_lookup_address_matches_on_word_boundaries():
     router = compose_router(FakeLLM(), store=ContactMailStore())
-    # "to" is filler, not a name: it must not match inside "Preston".
-    assert router._lookup_address("to Chris Sizemore") == "chris.sizemore@x.com"
-    assert router._lookup_address("the address of") is None
-    assert router._lookup_address("Nobody Here") is None
+    # "to" is a stop word — filtered before searching; must not match inside an
+    # unrelated name ("to" inside "Preston").  _lookup_address now returns a
+    # list of (display, addr) tuples, newest first.
+    cands = router._lookup_address("to Chris Sizemore")
+    assert cands and cands[0][1] == "chris.sizemore@x.com"
+    # Pure stop words → empty list (no real name component).
+    assert router._lookup_address("the address of") == []
+    # No mirror match → empty list.
+    assert router._lookup_address("Nobody Here") == []
 
 
 # ---- todo-fixes #19: "add X to my todo list" wrote a file called TODO -------

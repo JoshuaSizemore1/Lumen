@@ -6,6 +6,7 @@ replaces Chromium — tests never start QtWebEngine."""
 import enum
 
 import pytest
+from PyQt6.QtWidgets import QPushButton
 
 import lumen.ui_v4.screens.canvas as canvas_mod
 import lumen.ui_v4.theme as T
@@ -94,6 +95,59 @@ def test_replayed_session_does_not_offer_to_save(canvas, qtbot, monkeypatch):
     monkeypatch.setattr(canvas_mod.canvas_creds, "load", no_keyring)
     scr._pending_creds = {"u": "", "p": ""}
     scr._maybe_save_login()
+    assert scr._save_card is None
+
+
+@pytest.fixture
+def saved_login(monkeypatch):
+    box = {"creds": ("u1234567", "s3cret"), "saves": []}
+    monkeypatch.setattr(canvas_mod, "_never_save", lambda: False)
+    monkeypatch.setattr(canvas_mod.canvas_creds, "load", lambda: box["creds"])
+    monkeypatch.setattr(canvas_mod.canvas_creds, "has_saved",
+                        lambda default=False: box["creds"] is not None)
+
+    def save(unid, password):
+        box["saves"].append((unid, password))
+        box["creds"] = (unid, password)
+        return True
+    monkeypatch.setattr(canvas_mod.canvas_creds, "save", save)
+    return box
+
+
+@pytest.mark.parametrize("captured", [
+    {"u": "u1234567", "p": ""},     # #67: the poll missed the password
+    {"u": "U1234567", "p": ""},     # uNIDs ignore case
+    {"u": "u1234567", "p": "s3cret"},
+    {"u": "", "p": "s3cret"},
+])
+def test_a_saved_login_is_not_asked_about_on_every_browse(canvas, saved_login,
+                                                          captured):
+    win, scr = canvas
+    scr._pending_creds = captured
+    scr._maybe_save_login()
+    assert scr._save_card is None
+
+
+def test_a_new_password_still_offers_an_update(canvas, saved_login):
+    win, scr = canvas
+    scr._pending_creds = {"u": "u1234567", "p": "changed"}
+    scr._maybe_save_login()
+    assert scr._save_card is not None
+    assert scr._save_card.values() == ("u1234567", "changed")
+
+
+def test_settings_can_change_the_saved_login_on_purpose(canvas, saved_login):
+    win, scr = canvas
+    scr._open_manage()
+    scr._edit_saved_login()
+    card = scr._save_card
+    assert card is not None
+    assert card.values() == ("u1234567", "")        # never prefills the password
+    texts = [b.text() for b in card.findChildren(QPushButton)]
+    assert not any("Never" in t for t in texts)     # asked for it: no "Never"
+    card.password.set_text("new-one")
+    card._save()
+    assert saved_login["saves"] == [("u1234567", "new-one")]
     assert scr._save_card is None
 
 

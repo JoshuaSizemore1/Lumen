@@ -150,6 +150,19 @@ def test_an_unchanged_login_is_not_asked_about_again(qtbot, keyring):
     assert _card(screen) is None
 
 
+@pytest.mark.parametrize("captured", [
+    {"u": "u1234567", "p": ""},     # #67: the poll missed the password
+    {"u": "U1234567 ", "p": ""},    # uNIDs ignore case
+    {"u": "", "p": ""},             # a session replayed from cookies
+])
+def test_a_saved_login_is_not_asked_about_on_every_browse(qtbot, keyring, captured):
+    keyring["creds"] = ("u1234567", "same")
+    screen = _screen(qtbot)
+    screen._pending_creds = captured
+    screen._maybe_save_login()
+    assert _card(screen) is None
+
+
 # ---- not now / never -------------------------------------------------------
 def test_not_now_dismisses_without_remembering_the_refusal(qtbot, keyring):
     screen = _screen(qtbot)

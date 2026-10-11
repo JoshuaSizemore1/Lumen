@@ -43,13 +43,33 @@ any v4 screen, and update it when you add or change behaviour.
   there, once.
 - Page context is built once (`askbar.context_dict` / `chat_payload`). A
   screen's `ask_context()` may return a str (summary) or a dict; Inbox's dict
-  carries `message` so `open_email` is sent ("label this email").
+  carries `message` so `open_email` is sent ("label this email"). The daemon
+  puts it in the prompt as "what this page is showing" (router
+  `_page_context`, capped at 2,500 chars, #68), so an `ask_context()` should
+  say what the user can see, dates included — it is what the answer uses.
 - Ask screen empty state: what Lumen can see + three suggested prompts.
 
 ## Screen notes
 - **Inbox:** rows size to their content (no fixed min height). Up/Down browse
   from a focused row without marking read. Below 900px the mailboxes are a
   chip row. Forward warns that attachments aren't carried.
+  - **Starred mailbox (#40):** `SCOPES` order is Inbox, Unread, Starred, Sent.
+    Each MailRow has a star IconButton at its right edge (outline/`fg2` = unstarred;
+    `star-fill`/`warn` = starred). Clicking the star must NOT open the message or
+    mark it read — the star button is a QPushButton child that absorbs the click
+    before it reaches ClickRow's mousePressEvent. `can_update_to` / `update_from`
+    handle `is_starred` in-place. Reading pane action row has a Star/Starred ghost
+    button. Pressing `s` on the screen toggles the star on the focused/open message
+    (Gmail convention). In the Starred scope, unstarring removes the row from the
+    list immediately (optimistic). Empty Starred state: "No starred mail" / "Star a
+    message to keep it here." — icon `star`. The `warn` token (amber/ochre) is the
+    star's filled colour; screens never set inline colours, only token names.
+  - **HTML bodies (#30):** `MailBody` builds `HtmlBody(mail=raw, width=…)`,
+    which runs `mail_html.fit_html` at its real width and again whenever the
+    pane crosses a 40px step. Never hand it `prepare_html` output for mail: the
+    reading pane is ~376px at a 1280px window, not the 620 `prepare_html`
+    assumes, and only the measured choice keeps CSS-built mail (receipts)
+    from collapsing without breaking other mail.
 - **Todos:** tag chips + Show completed sit directly above the list; the rail
   has progress and group-by. A tag chip click never opens the edit card. The
   "Moved out of #tag" notice judges an edit against the filter it was saved
@@ -65,6 +85,11 @@ any v4 screen, and update it when you add or change behaviour.
   calendar's); the legend uses calendar colours. Out-of-month days are muted
   text on the same ground. The edit dialog accepts 24:00 and reads an end at
   or before the start as the next day.
+- **Canvas:** once a login is saved, the "Save this login?" card appears only
+  when a password was actually captured and differs from the stored one (a
+  missed capture or uNID case never re-asks, #67). Canvas settings' Change /
+  Save a login button opens the card on purpose (uNID prefilled, password
+  empty, no "Never").
 - **Settings:** all three answer modes are explained; Canvas Connect starts
   the sign-in from Accounts; Advanced shows only keys the daemon reports.
 - **Model naming:** plain words ("On this computer", "Claude · Haiku"); the

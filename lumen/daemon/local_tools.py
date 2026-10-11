@@ -143,6 +143,29 @@ MAIL_TOOLS = [
                 "label": {"type": "string", "description":
                           "The label name to remove, e.g. 'Work'."}},
             "required": ["email_id", "label"]}}},
+    # todo-fixes #40: star/unstar. STARRED is a Gmail system label, not a user
+    # label — label_email("STARRED") fails silently because label_id() only
+    # looks up user labels. A dedicated tool blocks Lumen's recurring
+    # "nearest capable tool" pattern from firing here.
+    {"type": "function", "function": {
+        "name": "star_email",
+        "description": (
+            "Star or unstar an email. Use this whenever the user asks to star "
+            "an email, unstar it, mark it as important with a star, or remove "
+            "the star. Also use it when they ask to 'show my starred emails' "
+            "after starring one. NEVER call label_email with 'STARRED' — it "
+            "won't work; use star_email instead. Access is already set up — "
+            "this acts on the user's own mail, so never decline for lack of "
+            "permission or account access."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "email_id": {"type": "string", "description":
+                             "The email's id — from the open-email context or "
+                             "from a search_email result."},
+                "starred": {"type": "boolean", "description":
+                            "true to add the star, false to remove it."}},
+            "required": ["email_id", "starred"]}}},
 ]
 
 MAIL_TOOL_NAMES = frozenset(t["function"]["name"] for t in MAIL_TOOLS)

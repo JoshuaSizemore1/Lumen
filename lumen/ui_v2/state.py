@@ -79,6 +79,7 @@ def _norm_mail(r: dict) -> dict:
         date_s = dt.strftime("%a, %b %d")
     except ValueError:
         time_s = date_s = ""
+    labels = r.get("labels", [])
     return {"id": r["id"], "from": name, "from_addr": addr,
             "subj": r.get("subject") or "(no subject)",
             # Gmail sends snippets HTML-escaped ("what&#39;s").
@@ -87,8 +88,9 @@ def _norm_mail(r: dict) -> dict:
             "unread": not r.get("is_read", True), "body": r.get("body", ""),
             # list rows omit body_html (kept light); None = fetch on open
             "body_html": r.get("body_html"),
-            "labels": r.get("labels", []), "label_names": r.get("label_names", []),
-            "attachments": r.get("attachments", [])}
+            "labels": labels, "label_names": r.get("label_names", []),
+            "attachments": r.get("attachments", []),
+            "is_starred": "STARRED" in labels}
 
 
 def _norm_rec(rec: dict) -> dict:
@@ -867,7 +869,7 @@ class AppState(QObject):
         self.mail_syncing = result.get("syncing", self.mail_syncing)
         self.mail_last_sync = result.get("last_sync", self.mail_last_sync)
         self.mail_labels = result.get("labels", self.mail_labels)
-        if (self.mail_scope not in ("inbox", "unread", "sent")
+        if (self.mail_scope not in ("inbox", "unread", "starred", "sent")
                 and self.mail_scope not in self.mail_labels):
             self.mail_scope = "inbox"   # scope label vanished upstream
         counts = result.get("counts")
@@ -891,7 +893,7 @@ class AppState(QObject):
             self.mails_changed.emit()   # sample mode: chips reflect selection only
 
     def _scope_payload(self) -> dict:
-        if self.mail_scope in ("inbox", "unread", "sent"):
+        if self.mail_scope in ("inbox", "unread", "sent", "starred"):
             return {"filter": self.mail_scope}
         return {"filter": "label", "label": self.mail_scope}
 
@@ -948,6 +950,39 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("emails.mark_read", {"id": mid, "read": read},
                                self._mail_action_done)
+
+    def star_mail(self, mid: str, starred: bool) -> None:
+        """Star or unstar a message. Optimistic local flip, then the mirror
+        settles it: a failed write toasts why and the reload puts the star
+        back (and a row an unstar took out of the Starred scope).
+        In the Starred scope an unstar removes the row from the list."""
+        def _flip(s: bool) -> None:
+            m = next((x for x in self.mails if x["id"] == mid), None)
+            if m is None:
+                return
+            m["is_starred"] = s
+            lab = list(m.get("labels") or [])
+            if s and "STARRED" not in lab:
+                lab.append("STARRED")
+                m["labels"] = lab
+            elif not s and "STARRED" in lab:
+                m["labels"] = [l for l in lab if l != "STARRED"]
+            # Unstarring in the Starred scope removes the row immediately.
+            if not s and self.mail_scope == "starred":
+                self.mails = [x for x in self.mails if x["id"] != mid]
+            self.mails_changed.emit()
+
+        _flip(starred)
+        if self._data is not None:
+            def _settle(result) -> None:
+                if not (isinstance(result, dict) and result.get("ok")):
+                    self.toast_requested.emit(
+                        (result or {}).get("message")
+                        or "Couldn't reach Gmail — nothing was changed.")
+                self.refresh_mails()
+            self._data.request("emails.star", {"id": mid, "starred": starred},
+                               _settle, on_error=lambda msg: _settle(
+                                   {"ok": False, "message": msg}))
 
     def auto_read(self, mid: str) -> None:
         """Open-as-read receipt: silent, ungated, flips the row locally so

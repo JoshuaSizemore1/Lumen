@@ -50,7 +50,7 @@ NAV_W = 208
 LIST_W = 368
 NARROW = 900            # content width below which list and message take turns
 SCOPES = (("inbox", "Inbox", "inbox"), ("unread", "Unread", "mail"),
-          ("sent", "Sent", "send"))
+          ("starred", "Starred", "star"), ("sent", "Sent", "send"))
 
 
 def _set_weight(lbl: QLabel, bold: bool) -> None:
@@ -77,7 +77,7 @@ class MailRow(ClickRow):
     """One message in the list. Unread/selected/text update in place, so a
     click never rebuilds fifty rows (ui_v3 perf work)."""
 
-    def __init__(self, m: dict, selected: bool, on_open):
+    def __init__(self, m: dict, selected: bool, on_open, on_star):
         super().__init__(on_open, selected)
         self.mail_id = m["id"]
         # No setMinimumHeight: an explicit minimum replaces the layout's, and
@@ -113,7 +113,20 @@ class MailRow(ClickRow):
             chips.addStretch(1)
             col.addLayout(chips)
         h.addLayout(col, 1)
+
+        # Star button at the row's right edge. Uses a QPushButton (IconButton)
+        # so its click is handled by the button and does NOT propagate to the
+        # parent ClickRow's mousePressEvent — it cannot open the message.
+        star_col = vbox(m=(0, 4, 0, 0), s=0)
+        self.star_btn = IconButton(
+            "star", "Star this message", size=32, icon_size=T.ICON_SM,
+            on_click=on_star)
+        star_col.addWidget(self.star_btn, 0, Qt.AlignmentFlag.AlignTop)
+        star_col.addStretch(1)
+        h.addLayout(star_col)
+
         self._unread = None
+        self._starred = None
         self.update_from(m, selected)
 
     def can_update_to(self, m: dict) -> bool:
@@ -126,13 +139,24 @@ class MailRow(ClickRow):
             self._unread = unread
             self.dot.setVisible(unread)
             _set_weight(self.from_lab, unread)
+        starred = bool(m.get("is_starred"))
+        if starred != self._starred:
+            self._starred = starred
+            self.star_btn.set_icon("star-fill" if starred else "star",
+                                   "warn" if starred else "fg2")
+            self.star_btn.setToolTip(
+                "Unstar this message" if starred else "Star this message")
+            self.star_btn.setAccessibleName(
+                "Unstar" if starred else "Star")
         self.set_selected(selected)
         for lab, key in ((self.from_lab, "from"), (self.subj_lab, "subj"),
                          (self.prev_lab, "preview"), (self.time_lab, "time")):
             if lab.text() != m.get(key, ""):
                 lab.setText(m.get(key, ""))
         state = "Unread. " if unread else ""
-        self.setAccessibleName(f"{state}{m.get('from', '')}: {m.get('subj', '')}")
+        star_state = " Starred." if starred else ""
+        self.setAccessibleName(
+            f"{state}{m.get('from', '')}: {m.get('subj', '')}{star_state}")
 
 
 class _LabelChip(QFrame):
@@ -664,7 +688,9 @@ class MailScreen(QWidget):
             return
         for m in mails:
             mid = m["id"]
-            row = MailRow(m, mid == sel, on_open=lambda i=mid: self._open(i))
+            row = MailRow(m, mid == sel,
+                          on_open=lambda i=mid: self._open(i),
+                          on_star=lambda i=mid: self._toggle_star(i))
             self._rows[mid] = row
             self.list_lay.addWidget(row)
         self.list_lay.addStretch(1)
@@ -696,6 +722,10 @@ class MailScreen(QWidget):
         if scope == "unread":
             return EmptyState("check", "No unread mail",
                               "You've opened everything that has arrived.",
+                              "Show inbox", lambda: self._set_scope("inbox"))
+        if scope == "starred":
+            return EmptyState("star", "No starred mail",
+                              "Star a message to keep it here.",
                               "Show inbox", lambda: self._set_scope("inbox"))
         return EmptyState("inbox", f"Nothing in {_scope_name(scope)}",
                           "There are no messages here yet.",
@@ -745,6 +775,13 @@ class MailScreen(QWidget):
             self._delete(self.state.sel_mail()["id"])
             ev.accept()
             return
+        if key == Qt.Key.Key_S and not ev.modifiers():
+            # Gmail-convention: s toggles the star on the focused / open message.
+            m = self.state.sel_mail()
+            if m is not None:
+                self._toggle_star(m["id"])
+                ev.accept()
+                return
         if key == Qt.Key.Key_Escape and self._narrow and self._reading:
             self._back_to_list()
             ev.accept()
@@ -783,7 +820,7 @@ class MailScreen(QWidget):
             sig = ("none", bool(st.mails))
         else:
             sig = (m["id"], m.get("subj"), m.get("from"), m.get("date"),
-                   bool(m.get("unread")),
+                   bool(m.get("unread")), bool(m.get("is_starred")),
                    tuple(m.get("label_names") or []),
                    tuple(m.get("attachments") or []),
                    self._narrow and self._reading)
@@ -869,6 +906,16 @@ class MailScreen(QWidget):
         else:
             acts.addWidget(Button("Mark as unread", "ghost", icon="eye-off",
                                   on_click=lambda: self._mark(m, False)))
+        # Star toggle in the reading pane (s key or button).
+        if m.get("is_starred"):
+            star_btn = Button("Starred", "ghost", icon="star-fill",
+                              on_click=lambda: self._toggle_star(m["id"]))
+            star_btn.setToolTip("Remove the star (s)")
+        else:
+            star_btn = Button("Star", "ghost", icon="star",
+                              on_click=lambda: self._toggle_star(m["id"]))
+            star_btn.setToolTip("Star this message (s)")
+        acts.addWidget(star_btn)
         v.addWidget(acts_host)
         v.addSpacing(T.S4)
 
@@ -898,6 +945,13 @@ class MailScreen(QWidget):
         v.addSpacing(T.S5)
 
     # ---- actions ------------------------------------------------------------
+    def _toggle_star(self, mid: str):
+        """Toggle the STARRED system label — optimistic local flip via state."""
+        m = next((x for x in self.state.mails if x["id"] == mid), None)
+        if m is None:
+            return
+        self.state.star_mail(mid, not m.get("is_starred"))
+
     def _delete(self, mid: str):
         # External write: the daemon shows the confirm before touching Gmail.
         self.state.delete_mail(mid)

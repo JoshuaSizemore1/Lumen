@@ -1893,3 +1893,56 @@ def test_a_search_reply_is_not_stale_against_its_own_request(qtbot):
     st.search_mails("budget")
     data.cb_for("emails.search")({"emails": [daemon_mail_row(3)]})
     assert [m["id"] for m in st.mails] == ["m3"]
+
+
+# ---- starred mail (#40) ----------------------------------------------------
+
+def test_starred_scope_survives_a_list_reply(qtbot):
+    """The scope guard used to treat "starred" as a vanished label and reset
+    to Inbox on the first reply, leaving starred rows under an Inbox header."""
+    data = FakeClient()
+    st = AppState(data=data)
+    st.set_mail_scope("starred")
+    assert data.requests[-1][1].get("filter") == "starred"
+    data.cb_for("emails.list")({"emails": [daemon_mail_row()], "labels": [],
+                                "connected": True})
+    assert st.mail_scope == "starred"
+
+
+def _starred_state():
+    data = FakeClient()
+    st = AppState(data=data)
+    st.refresh_mails()
+    data.cb_for("emails.list")({"emails": [daemon_mail_row(unread=False)],
+                                "labels": [], "connected": True})
+    toasts = []
+    st.toast_requested.connect(toasts.append)
+    data.requests.clear()
+    return data, st, toasts
+
+
+def test_a_failed_star_says_why_and_reloads_from_the_mirror(qtbot):
+    data, st, toasts = _starred_state()
+    st.star_mail("m1", True)
+    assert st.mails[0]["is_starred"] is True                 # optimistic
+    data.cb_for("emails.star")({"ok": False,
+                                "message": "Couldn't reach Gmail — nothing was changed."})
+    assert toasts == ["Couldn't reach Gmail — nothing was changed."]
+    assert "emails.list" in [t for t, _p, _cb in data.requests]   # mirror settles it
+
+
+def test_a_dropped_star_request_also_reloads(qtbot):
+    data, st, toasts = _starred_state()
+    st.star_mail("m1", True)
+    on_error = next(e for t, _p, e in data.errors if t == "emails.star")
+    on_error("daemon unavailable")
+    assert toasts == ["daemon unavailable"]
+    assert "emails.list" in [t for t, _p, _cb in data.requests]
+
+
+def test_a_successful_star_is_quiet_and_reloads(qtbot):
+    data, st, toasts = _starred_state()
+    st.star_mail("m1", True)
+    data.cb_for("emails.star")({"ok": True, "message": "Starred."})
+    assert toasts == []
+    assert "emails.list" in [t for t, _p, _cb in data.requests]

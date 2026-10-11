@@ -1,5 +1,10 @@
 """mail_html: remote-image handling for the reading pane (todo-fixes #12).
-Pure functions — no Qt, no network (fetch is monkeypatched)."""
+Pure functions — no network (fetch is monkeypatched); only the #30 layout
+tests at the end lay markup out in Qt."""
+import re
+
+import pytest
+
 from lumen.ui_v2 import mail_html
 
 _HTML = (
@@ -149,3 +154,116 @@ def test_prepare_html_leaves_no_broken_style_attributes():
 def test_prepare_html_is_idempotent():
     once = prepare_html('<td style="color:#fff; width:9999px">hi</td>')
     assert prepare_html(once).count("<td>") == 1
+
+
+# ---- CSS-built layouts and the measured fit (todo-fixes #30) ----------------
+#
+# Shaped like the Stripe receipt that rendered as a strip a few letters wide:
+# a hidden preheader, a centred 480px column sized only in CSS, cells sized
+# `width:100%; width:482px`, and a links table whose cells sit straight in
+# <tbody> with no <tr>.
+
+from lumen.ui_v2.mail_html import _add_missing_rows, _drop_hidden, fit_html
+
+_CELL = '<td style="width:100%; width:482px">'
+RECEIPT_LIKE = (
+    '<table width="100%"><tr><td></td><td>'
+    '<table align="center" style="width:480px; min-width:480px; max-width:480px">'
+    '<tr><td><div style="display:none !important">PREHEADER-TEXT</div>'
+    '<table style="width:100%"><tr>' + _CELL +
+    '<table style="width:100%"><tr><td style="width:32px"></td><td>'
+    '<table style="width:100%"><tr><td style="width:100%">'
+    'Receipt from Example Store, Inc.</td></tr></table>'
+    '<table style="width:100%"><tr><td style="width:100%">$20.00</td></tr></table>'
+    '<table style="width:100%"><tr><td style="width:100%">Paid July 16, 2026'
+    '</td></tr></table></td><td style="width:76px"></td></tr></table>'
+    '<table><tbody><td><a href="#">Download invoice</a></td>'
+    '<td style="width:16px"></td><td><a href="#">Download receipt</a></td>'
+    '</tbody></table>'
+    '<table style="width:100%"><tr><td>Receipt number</td>'
+    '<td align="right">1234-5678-9012</td></tr></table>'
+    '</td></tr></table></td></tr></table></td><td></td></tr></table>')
+
+
+def _layout(markup, width):
+    from PyQt6.QtGui import QTextDocument
+    doc = QTextDocument()
+    doc.setHtml(markup)
+    doc.setTextWidth(width)
+    return doc
+
+
+def test_hidden_elements_are_removed_with_their_content():
+    out = _drop_hidden('<p>a</p><div style="color:red;display: none">'
+                       '<div>b</div></div><p>c</p>')
+    assert out == "<p>a</p><p>c</p>"
+
+
+def test_a_hidden_element_without_an_end_tag_keeps_the_rest():
+    out = _drop_hidden('<span style="display:none">x <p>rest of the mail</p>')
+    assert "rest of the mail" in out and "display" not in out
+
+
+def test_rowless_cells_get_a_row():
+    out = _add_missing_rows("<table><tbody><td>a</td><td>b</td></tbody></table>")
+    assert out == "<table><tbody><tr><td>a</td><td>b</td></tr></tbody></table>"
+    ok = "<table><tr><td>a</td></tr></table>"
+    assert _add_missing_rows(ok) == ok
+
+
+def test_structured_turns_css_widths_into_attributes_and_scales_together():
+    out = prepare_html(RECEIPT_LIKE, 360, structured=True)
+    # 480 and 482 shrink by one factor (360/482), spacers with them.
+    f = 360 / 482
+    for px in (480, 482, 32, 76):
+        assert f'width="{round(px * f)}"' in out
+    assert "PREHEADER-TEXT" not in out
+
+
+def test_the_conservative_preparation_leaves_css_widths_alone():
+    out = prepare_html(RECEIPT_LIKE, 360)
+    assert 'width="359"' not in out and 'width="480"' not in out
+    assert "PREHEADER-TEXT" not in out
+
+
+@pytest.mark.parametrize("width", [360, 600])
+def test_fit_html_lays_a_css_built_receipt_out_readably(qapp, width):
+    """The bug: Qt ignores CSS widths, so every column collapsed and the
+    receipt became a tall strip of broken words."""
+    before = _layout(prepare_html(RECEIPT_LIKE, width), width)
+    after = _layout(fit_html(RECEIPT_LIKE, width), width)
+    assert after.idealWidth() <= width + 2               # nothing cut off
+    assert after.size().height() < before.size().height() / 2
+    text = after.toPlainText()
+    assert "Receipt from Example Store, Inc." in text
+    assert "PREHEADER-TEXT" not in text
+
+
+def test_fit_html_keeps_the_conservative_layout_when_scaling_would_squeeze(qapp):
+    # One wide box sets the scale factor; shrinking everything by it would
+    # squeeze the text column, so the measured choice keeps the reflow.
+    words = " ".join(["word"] * 120)
+    html = (f'<table style="width:1100px"><tr><td style="width:1100px">banner'
+            f'</td></tr></table><table style="width:300px"><tr>'
+            f'<td style="width:300px">{words}</td></tr></table>')
+    plain = _layout(prepare_html(html, 360), 360)
+    chosen = _layout(fit_html(html, 360), 360)
+    assert chosen.idealWidth() <= 362
+    assert chosen.size().height() <= plain.size().height()
+
+
+def test_fit_html_skips_measuring_mail_with_nothing_to_restructure(qapp):
+    html = "<p>Just a short note.</p>"
+    assert fit_html(html, 360) == prepare_html(html, 360)
+
+
+def test_fit_html_still_fits_a_receipt_carrying_inlined_images(qapp):
+    """With "always load images" on, inlined data: URIs alone used to push an
+    ordinary receipt past FIT_MAX_BYTES, skipping the fix exactly there."""
+    big = "A" * (mail_html.FIT_MAX_BYTES + 50_000)
+    html = RECEIPT_LIKE.replace(
+        "Receipt from", f'<img src="data:image/png;base64,{big}" width="32"> Receipt from')
+    chosen = fit_html(html, 360)
+    # The structured layout: the CSS-only 480px column got a width attribute.
+    assert re.search(r'<table width="\d+" align="center"', chosen)
+    assert big in chosen                                 # images kept in the result

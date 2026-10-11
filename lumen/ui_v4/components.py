@@ -1059,9 +1059,16 @@ class ClaudeUnavailableNotice(_Notice):
 class HtmlBody(QTextBrowser):
     """HTML mail on a paper card (mail assumes a light page), sized to its
     document so the outer scroll area does the scrolling. No scripts, no
-    remote fetches; links open externally."""
+    remote fetches; links open externally.
 
-    def __init__(self, html: str):
+    Given `mail` (a sender's raw HTML) instead of ready markup, it fits it
+    to its own width (`mail_html.fit_html`), and again when the pane crosses
+    a FIT_STEP: fixed widths that fit a 620px pane are cut off in the ~400px
+    one a 1280px window gives the reading pane (#30)."""
+
+    FIT_STEP = 40
+
+    def __init__(self, html: str = "", *, mail: str | None = None, width: int = 0):
         super().__init__()
         self.setOpenExternalLinks(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1071,6 +1078,11 @@ class HtmlBody(QTextBrowser):
         f.setPixelSize(15)
         self.document().setDefaultFont(f)
         self._paper()
+        self._mail = mail
+        if mail is not None:
+            from ..ui_v2 import mail_html
+            self._fit_to = self._step(width or mail_html.CONTENT_WIDTH)
+            html = mail_html.fit_html(mail, self._fit_to, f)
         self.setHtml(html)
         self.document().documentLayout().documentSizeChanged.connect(
             lambda _s: self._fit())
@@ -1085,8 +1097,18 @@ class HtmlBody(QTextBrowser):
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        self.document().setTextWidth(self.viewport().width())
+        w = self.viewport().width()
+        if self._mail is not None and w > 50 and self._step(w) != self._fit_to:
+            from ..ui_v2 import mail_html
+            self._fit_to = self._step(w)
+            self.setHtml(mail_html.fit_html(self._mail, self._fit_to,
+                                            self.document().defaultFont()))
+        self.document().setTextWidth(w)
         self._fit()
+
+    @classmethod
+    def _step(cls, width: int) -> int:
+        return max(200, width // cls.FIT_STEP * cls.FIT_STEP)
 
     def _fit(self):
         h = max(int(self.document().size().height()) + 32, 48)
@@ -1142,7 +1164,7 @@ class MailBody(QWidget):
         if raw:
             done = self._loaded.get(mid)
             if done is not None:
-                return HtmlBody(mail_html.prepare_html(done))
+                return self._html(done)
             hidden = mail_html.remote_image_count(raw)
             if hidden and self.state.load_remote_images:
                 self._load_images(mid, raw)
@@ -1159,11 +1181,15 @@ class MailBody(QWidget):
                     "Load images", "secondary", icon="download", size="sm",
                     on_click=lambda: self._load_images(mid, raw)))
                 v.addWidget(bar)
-                v.addWidget(HtmlBody(mail_html.prepare_html(
-                    mail_html.strip_remote_images(raw))))
+                v.addWidget(self._html(mail_html.strip_remote_images(raw)))
                 return w
-            return HtmlBody(mail_html.prepare_html(raw))
+            return self._html(raw)
         return Label(m.get("body", ""), "body", wrap=True, selectable=True)
+
+    def _html(self, raw: str) -> HtmlBody:
+        # Prepared for the width the pane has now (less the card's padding
+        # and border), so the common case lays out once.
+        return HtmlBody(mail=raw, width=self.width() - 30 if self.width() > 100 else 0)
 
     def _placeholder(self) -> QWidget:
         w = QWidget()

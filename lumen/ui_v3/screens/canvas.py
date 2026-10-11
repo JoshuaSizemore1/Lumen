@@ -1297,8 +1297,12 @@ class CanvasScreen(QWidget):
             existing = canvas_creds.load()
         except Exception:
             log.exception("canvas keyring read failed")
-        if existing and (u or existing[0]) == existing[0] and pw == existing[1]:
-            return                      # already stored, and unchanged
+        if existing and (not pw or (
+                (not u or u.strip().casefold() == existing[0].strip().casefold())
+                and pw == existing[1])):
+            # Already stored, and nothing new was read: the same values, or a
+            # re-login whose password the poll missed (#67).
+            return
         if existing and not u:
             u = existing[0]
         note = ""

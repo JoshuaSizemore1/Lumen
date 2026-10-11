@@ -235,6 +235,11 @@ def _set_never_save(on: bool) -> None:
     QSettings(*_PREFS).setValue("canvas/never_save", bool(on))
 
 
+def _same_unid(captured: str, stored: str) -> bool:
+    """A missing capture agrees with anything; uNIDs ignore case."""
+    return not captured or captured.strip().casefold() == stored.strip().casefold()
+
+
 # ---- "Save this login?" -------------------------------------------------------
 class SaveLoginCard(QFrame):
     """Chrome's "Save password?" bubble in Field Notes. The fields are
@@ -242,7 +247,7 @@ class SaveLoginCard(QFrame):
     you can fill rather than a silent failure (ui_v3 #44)."""
 
     def __init__(self, parent, unid: str, password: str, *,
-                 updating: bool = False, note: str = ""):
+                 updating: bool = False, note: str = "", offer_never: bool = True):
         super().__init__(parent)
         self.setProperty("role", "card")
         self.setAutoFillBackground(True)
@@ -279,11 +284,12 @@ class SaveLoginCard(QFrame):
         actions.addWidget(Button("Not now", "secondary", size="sm",
                                  on_click=lambda: self._dismiss("not_now")))
         actions.addStretch(1)
-        never = Button("Never for Canvas", "ghost", size="sm",
-                       on_click=lambda: self._dismiss("never"))
-        never.setToolTip("Stop offering. You can turn this back on in Canvas "
-                         "settings.")
-        actions.addWidget(never)
+        if offer_never:
+            never = Button("Never for Canvas", "ghost", size="sm",
+                           on_click=lambda: self._dismiss("never"))
+            never.setToolTip("Stop offering. You can turn this back on in "
+                             "Canvas settings.")
+            actions.addWidget(never)
         v.addLayout(actions)
         self._sync_save_enabled()
         self.unid.input.textChanged.connect(self._sync_save_enabled)
@@ -1417,7 +1423,13 @@ class CanvasScreen(QWidget):
             existing = canvas_creds.load()
         except Exception:
             log.exception("canvas keyring read failed")
-        if existing and (u or existing[0]) == existing[0] and pw == existing[1]:
+        if existing and (not pw or (_same_unid(u, existing[0])
+                                    and pw == existing[1])):
+            # A login is already saved and nothing new was read: either the
+            # stored values again, or a re-login whose password the poll
+            # missed (it usually is, once CAS hands off to Duo). Asking on
+            # every Browse was #67; changing it on purpose is the Canvas
+            # settings button's job.
             return
         if existing and not u:
             u = existing[0]
@@ -1425,11 +1437,23 @@ class CanvasScreen(QWidget):
                 "and it will be saved." if not pw else "")
         self._show_save_card(u, pw, updating=bool(existing), note=note)
 
-    def _show_save_card(self, unid, password, *, updating=False, note=""):
+    def _edit_saved_login(self):
+        """Save or change the login on purpose, from Canvas settings."""
+        existing = None
+        try:
+            existing = canvas_creds.load()
+        except Exception:
+            log.exception("canvas keyring read failed")
+        self._show_save_card(existing[0] if existing else "", "",
+                             updating=bool(existing), offer_never=False)
+
+    def _show_save_card(self, unid, password, *, updating=False, note="",
+                        offer_never=True):
         self._dismiss_save_card()
         parent = self._host if self._stack.currentIndex() == self._BROWSER_IDX \
             else self
-        card = SaveLoginCard(parent, unid, password, updating=updating, note=note)
+        card = SaveLoginCard(parent, unid, password, updating=updating, note=note,
+                             offer_never=offer_never)
         card.on_save(self._save_login_from_card)
         card.on_dismiss(self._on_save_card_dismissed)
         self._save_card = card
@@ -1480,6 +1504,8 @@ class CanvasScreen(QWidget):
         self.win.show_toast("Login saved to your keyring" if ok
                             else "Couldn't save the login to your keyring")
         self._after_save_card()
+        if self._stack.currentIndex() == self._MANAGE_IDX:
+            self._render_login_prefs()
         self._refresh_content()
 
     def _on_save_card_dismissed(self, how: str):
@@ -1548,6 +1574,7 @@ class CanvasScreen(QWidget):
         self._stack.setCurrentIndex(self._MANAGE_IDX)
 
     def _close_manage(self):
+        self._dismiss_save_card()       # one opened from Change stays behind
         self._stack.setCurrentIndex(self._CONTENT_IDX)
         self._refresh_status()
         self._refresh_content()
@@ -1567,6 +1594,9 @@ class CanvasScreen(QWidget):
         row.addLayout(col, 1)
         row.addWidget(Badge("success" if saved else "neutral",
                             "Saved" if saved else "Not saved"), 0,
+                      Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(Button("Change" if saved else "Save a login", "secondary",
+                             size="sm", on_click=self._edit_saved_login), 0,
                       Qt.AlignmentFlag.AlignVCenter)
         if saved:
             row.addWidget(Button("Forget", "ghost", size="sm",
