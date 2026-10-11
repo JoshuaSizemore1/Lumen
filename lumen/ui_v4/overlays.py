@@ -10,6 +10,8 @@ goes back where it was on close.
 Every one of them gates a write. The confirm overlay is the last stop before
 Lumen touches a connected account: every way out of it answers the daemon.
 """
+import time
+
 from PyQt6 import sip
 from PyQt6.QtCore import (
     QEasingCurve, QEvent, QParallelAnimationGroup, QPoint, QPropertyAnimation,
@@ -180,9 +182,15 @@ class ConfirmOverlay(_Overlay):
     which case a daemon connection is blocked awaiting the answer — so every
     path out, Esc included, answers it. Payload keys: icon, title, intro,
     rows [(key, value)], confirm_label, check_label/check_default, danger,
-    toast. A confirm arriving while one is open waits its turn."""
+    toast. A confirm arriving while one is open waits its turn.
+
+    It can arrive mid-keystroke or under a moving mouse (todo-fixes #80): a
+    Space typed into the Ask bar used to press the focused Approve. So focus
+    goes to the card, not a button, and Approve ignores clicks for ARM_MS
+    after the card — or the window, re-shown from the tray — appears."""
 
     CARD_W = 500
+    ARM_MS = 500
 
     def __init__(self, parent):
         super().__init__(parent, dismissable=False)
@@ -190,6 +198,7 @@ class ConfirmOverlay(_Overlay):
         self._payload: dict = {}
         self._queue: list = []
         self._active = False
+        self._armed_at = 0.0
         self.check = None
         self.lay = vbox(self.card, (0, 0, 0, 0), 0)
 
@@ -246,13 +255,27 @@ class ConfirmOverlay(_Overlay):
         fl.addWidget(cancel)
         ok = Button(payload.get("confirm_label", "Confirm"),
                     "danger" if danger else "primary",
-                    on_click=lambda: self._answer(True))
+                    on_click=self._approve_clicked)
         fl.addWidget(ok)
         self.lay.addWidget(foot)
 
         self.pop()
-        # A destructive write never sits one Enter away.
-        (cancel if danger else ok).setFocus()
+        # No write sits one Space or Enter away: Tab reaches Cancel first.
+        self.card.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._armed_at = time.monotonic()
+
+    def _approve_clicked(self):
+        if time.monotonic() - self._armed_at < self.ARM_MS / 1000:
+            return          # the click was meant for whatever was there before
+        self._answer(True)
+
+    def eventFilter(self, obj, ev):
+        # Show only, not WindowActivate: activation would silently swallow a
+        # deliberate first click on Approve in a visible, unfocused window.
+        if (obj is self.parentWidget() and self._active
+                and ev.type() == QEvent.Type.Show):
+            self._armed_at = time.monotonic()
+        return super().eventFilter(obj, ev)
 
     def cancel(self):
         self._answer(False)

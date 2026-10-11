@@ -56,6 +56,9 @@ class CanvasSync:
         self._sync_lock = asyncio.Lock()
         # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
         self.paused = lambda: False
+        # Google Calendar's own switch: paused, the Canvas→Calendar writes stop
+        # too (todo-fixes #83) — the mirror and todos still sync.
+        self.calendar_paused = lambda: False
         # The Settings model switch, wired the same way. Separate from `paused`:
         # with the model off the mirror still syncs — only the AI passes stop.
         self.model_paused = lambda: False
@@ -131,7 +134,12 @@ class CanvasSync:
         Two phases so archived courses cost zero network (#28): fetch the course
         list, decide the pull set on the loop thread (which respects the user's
         archive flags), then fetch items only for that set. All Canvas HTTP runs
-        in worker threads; all SQLite stays on the loop thread."""
+        in worker threads; all SQLite stays on the loop thread.
+
+        Paused means every caller, not just the poll timer: tab-open, Sync
+        now and the sign-in hand-off all land here (todo-fixes #83)."""
+        if self.paused():
+            return False
         async with self._sync_lock:
             if not self.connected:
                 return False                   # no session yet — a normal tick
@@ -239,7 +247,7 @@ class CanvasSync:
     async def _sync_calendar(self) -> dict:
         """The one external-write path in the poll loop. Google HTTP goes to a
         worker thread; every SQLite touch stays on this one."""
-        if self._prefs is None:
+        if self._prefs is None or self.calendar_paused():
             return {}
         actions = canvas_calendar.plan_calendar(self._store, self._prefs,
                                                 datetime.now())

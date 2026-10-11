@@ -133,7 +133,7 @@ without a click), loses something typed, or makes a feature not work at all.
 
 ### Safety rules (writes without a click, or the wrong thing deleted)
 
-77. **The model can run tools it was never offered** (review #6) [checked; whether the 4B would actually emit one is untested]
+77. **The model can run tools it was never offered** (review #6) [checked; whether the 4B would actually emit one is untested] — ✔ fixed (2026-10-11)
     - In Local mode the tool executor runs any tool name the model emits,
       including `create_event`, `update_event` and `delete_event`, which are kept
       out of the offered list on purpose. A slip by the 4B would write to Google
@@ -141,7 +141,12 @@ without a click), loses something typed, or makes a feature not work at all.
       names.
     - **Where:** `daemon/router.py:3490-3534`.
     - **Fix:** reject any tool name not offered this turn.
-78. **Mail rules match keywords inside other words** (review #7) [checked]
+    - **Done:** the chat tool executor builds the set of names offered this
+      turn and answers anything else with "tool error: there is no tool named
+      … here" (logged to the tool log as a failed call; the bridge is never
+      reached). The book-recommendation loop had the same hole and the same
+      guard.
+78. **Mail rules match keywords inside other words** (review #7) [checked] — ✔ fixed (2026-10-11)
     - The rule author is also told to emit "generous" keyword lists. The prompt's
       own BSA example matched three unrelated messages, which would be moved out
       of the inbox in Gmail on every sync: a Wells Fargo statement ("bsa" inside a
@@ -150,45 +155,86 @@ without a click), loses something typed, or makes a feature not work at all.
       `daemon/llm/rule_author.py:17-24`.
     - **Fix:** word-boundary matching, ignore URLs, and show sample matches in the
       rule confirm.
-79. **"don't forget" deletes memories** (review #8) [checked order; probe]
+    - **Done:** `mail_rules.keyword_hit()` matches whole words/phrases
+      (case-insensitive, a plural "s"/"es" still counts, flexible spacing inside
+      a phrase) on text with links removed. All three examples above now miss;
+      "BSA camp-out" and "Troops 12 and 40" still hit. The rule author no
+      longer asks for "generous" lists: it's told keywords match whole words
+      and every match leaves the inbox. The Create-mail-rule confirm gains a
+      "For example" row with up to 3 matching inbox emails (sender — subject).
+79. **"don't forget" deletes memories** (review #8) [checked order; probe] — ✔ fixed (2026-10-11)
     - "add a todo: don't forget to call mom" goes to the memory-forget route,
       which runs before todo-add. It deletes every memory bullet and log row about
       "mom", asks for no confirmation, and adds no todo.
     - **Where:** `daemon/router.py:381-383`, `:2307`.
     - **Fix:** require an explicit memory target ("forget what you know
       about…"), exclude "don't / not forget", and check todo-add first.
-80. **A confirm that pops up while you type can be approved by Space** (review #9) [checked; probe]
+    - **Done:** the forget route now needs a request aimed at Lumen's memory:
+      "forget" leading the message (after "please", "Lumen,", "can you", …)
+      but not "forget to …", or "stop remembering" / "delete what you know" /
+      "forget everything you know". "forget about PulteGroup" and "Forget that
+      I like tea" still work. Todo-add ("add a todo:", "remind me to") is
+      checked first.
+80. **A confirm that pops up while you type can be approved by Space** (review #9) [checked; probe] — ✔ fixed (2026-10-11)
     - Non-destructive confirms (Create event, Allow file write, Save rule, Add to
       calendar) put focus on Approve. If one arrives while typing in the Ask bar,
       the next Space approves it. Same if the window was hidden and gets re-shown.
     - **Where:** `ui_v4/overlays.py:253-255`.
     - **Fix:** focus the card itself and ignore clicks for ~500 ms after it opens.
-81. **`lumen --quit` can kill unrelated programs** (review #10) [checked]
+    - **Done:** focus goes to the card, so Space/Enter press nothing; Tab
+      reaches Cancel first. Approve ignores clicks for 500 ms after the card
+      opens, and again after the window is re-shown from the tray. (Not on
+      mere re-activation: that silently ate a deliberate first click on a
+      visible, unfocused window.) v4 only; the v3 fallback's overlay still
+      focuses Approve.
+81. **`lumen --quit` can kill unrelated programs** (review #10) [checked] — ✔ fixed (2026-10-11)
     - Any process whose first argument starts with "lumen" counts as Lumen.
       `nvim lumen-notes.md`, `less lumen.log` and `grep lumen file` would get
       SIGTERM then SIGKILL, so an editor with unsaved work could lose it.
     - **Where:** `instance_lock.py:54-62`.
     - **Fix:** match only the real console scripts or `-m lumen.*`.
-82. **Gmail "Disabled" doesn't stop Gmail sync** (review #11) [checked]
+    - **Done:** `instance_lock._program()` reads what a process runs off the
+      command itself: an executable named exactly like one of the pyproject
+      console scripts, or a Python interpreter handed one of those scripts or
+      `-m lumen.*`. Another program's arguments never count (a `git commit -m
+      "lumen.…"` was also a match before). A test pins `CONSOLE_SCRIPTS` to
+      pyproject's `[project.scripts]`.
+82. **Gmail "Disabled" doesn't stop Gmail sync** (review #11) [checked] — ✔ fixed (2026-10-11)
     - `mail.refresh` still syncs and runs mail rules (which write to Gmail) on
       launch, on each Mail visit, and on ↻. `calendar.refresh` has the guard, with
       a comment about this exact bug.
     - **Where:** `daemon/router.py:1892-1898`.
     - **Fix:** the same guard `calendar.refresh` has.
-83. **Canvas "Pause sync" only pauses the timer** (review #12) [probe]
+    - **Done:** `Router._enabled(connection)` (was `_calendar_enabled`) guards
+      both refreshes. Disabled, `mail.refresh` returns the mirror with no
+      network.
+83. **Canvas "Pause sync" only pauses the timer** (review #12) [probe] — ✔ fixed (2026-10-11)
     - Opening the Canvas tab (mirror older than 5 minutes), Sync now, and the
       sign-in hand-off all still sync, including calendar writes and model calls.
       Settings says "Paused" while the tab says "Synced just now". Pausing Google
       Calendar doesn't stop Canvas→Calendar writes either.
     - **Where:** `daemon/connectors/canvas_sync.py:127,206,239`,
       `daemon/router.py:879,1307,1576-1594`.
-84. **Mail keyword pre-sort treats gmail.com as one sender** (review #13) [probe]
+    - **Done:** `CanvasSync.sync_once` refuses while paused, which covers
+      every caller. `canvas.sync_now` / `canvas.reconcile_now` answer `{ok:
+      false, reason: "paused"}` and `canvas.status` carries `paused`. The v4
+      tab shows "Sync paused", skips its open-time sync, and Sync now explains
+      the pause with an Open Settings button instead of "Sync failed". The v3
+      pill says "sync paused". With Google Calendar paused, Canvas still
+      mirrors and reconciles todos but writes nothing to the calendar
+      (`CanvasSync.calendar_paused`, wired to the calendar's switch); it
+      catches up on resume.
+84. **Mail keyword pre-sort treats gmail.com as one sender** (review #13) [probe] — ✔ fixed (2026-10-11)
     - If BSA leaders write from Gmail, then Mom's and recruiters' Gmail mail gets
       suggested as BSA, and "Accept all" files it away.
     - **Where:** `daemon/llm/label_keywords.py:56-61,129-135`.
     - **Fix:** ignore free-mail domains (gmail.com, outlook.com, …) as a sender
       domain signal.
-85. **Any error in a UI click handler crashes all of Lumen** (review #14) [checked; probe]
+    - **Done:** `label_keywords.FREE_MAIL` (Gmail, Outlook/Hotmail/Live, Yahoo,
+      iCloud, AOL, Proton, GMX, Zoho, Fastmail, HEY, Yandex and the big US ISP
+      domains) contributes no `domain:` term. The exact address still counts,
+      so mail from a known leader's Gmail address is still evidence.
+85. **Any error in a UI click handler crashes all of Lumen** (review #14) [checked; probe] — ✔ fixed (2026-10-11)
     - PyQt 6.11 aborts the process on an unhandled exception in a slot, and in
       `lumen` mode the daemon dies with it. No `sys.excepthook` is installed, and
       when launched by Super+L stderr goes nowhere. Any latent screen bug is a
@@ -196,6 +242,13 @@ without a click), loses something typed, or makes a feature not work at all.
     - **Where:** `ui_v4/app.py`.
     - **Fix:** an excepthook that logs to `~/.local/state/lumen/ui.log` and shows
       a toast.
+    - **Done:** `ui_v4/app.py` installs `_excepthook` at startup: it logs the
+      traceback to ui.log and stderr, and toasts "Something went wrong
+      there. Lumen kept running; details are in ui.log." Ctrl+C still quits. The UI
+      process now has a log at all (`setup_logging`: rotating
+      `$XDG_STATE_HOME/lumen/ui.log`, 1 MB × 2, INFO and up for `lumen.*`),
+      so the Canvas sign-in diagnostics (#44) finally land somewhere. The v3
+      fallback (`lumen-ui-v3`) doesn't get the hook.
 
 ### Losing what you typed or saved
 

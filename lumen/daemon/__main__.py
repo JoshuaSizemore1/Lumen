@@ -90,6 +90,7 @@ async def run() -> None:
     mail.paused = lambda: not connections.enabled("gmail")
     calendar.paused = lambda: not connections.enabled("google_calendar")
     canvas.paused = lambda: not connections.enabled("canvas")
+    canvas.calendar_paused = calendar.paused
     memory_log = MemoryLog(conn)
     procedures = ProcedureStore(cfg.procedures_dir, cfg.memory, llm)
     memory_worker = MemoryWorker(llm, memory_log, cfg.memory_path, cfg.memory,

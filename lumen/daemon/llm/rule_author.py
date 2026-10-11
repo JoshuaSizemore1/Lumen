@@ -14,9 +14,12 @@ SYSTEM = (
     '{"label": "...", "from_addrs": [], "domains": [], "subject_kw": [], '
     '"body_kw": []}\n'
     "The rule files matching mail under the label. Expand the user's concept "
-    "into generous lowercase keyword lists for subject_kw and body_kw — "
-    "synonyms, related words, organization names. Add sender domains only "
-    "when you are confident; from_addrs only for addresses the user wrote. "
+    "into lowercase keyword lists for subject_kw and body_kw — synonyms, "
+    "related words, organization names. Keywords match whole words, and every "
+    "match leaves the inbox, so use only words that show up in mail about "
+    "this topic; skip common words unrelated mail would also contain. Add "
+    "sender domains only when you are confident; from_addrs only for "
+    "addresses the user wrote. "
     "Prefer one of the user's existing labels when one fits; otherwise a "
     "short new label name.\n"
     'Example — "filter all emails relating to boy scouts as BSA":\n'

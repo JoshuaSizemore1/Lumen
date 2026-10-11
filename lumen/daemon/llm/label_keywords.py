@@ -40,6 +40,17 @@ while who why will with would you your fwd fw
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9'&+-]{2,}")
 _ADDRESS = re.compile(r"[\w.+-]+@[\w.-]+")
 
+# Personal-mail providers: the domain names the provider, not the sender, so
+# it is no evidence of a label (todo-fixes #84 — BSA leaders writing from
+# Gmail made every Gmail sender, Mom included, look like BSA). The full
+# address still counts.
+FREE_MAIL = frozenset("""
+gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com
+ymail.com rocketmail.com icloud.com me.com mac.com aol.com proton.me
+protonmail.com pm.me gmx.com gmx.net mail.com zoho.com fastmail.com hey.com
+yandex.com comcast.net att.net sbcglobal.net verizon.net cox.net
+""".split())
+
 
 def terms(row: dict) -> set[str]:
     """What one message contributes to (or is matched against) a profile: its
@@ -53,7 +64,9 @@ def terms(row: dict) -> set[str]:
     if m:
         addr = m.group(0)
         out.add(f"from:{addr}")
-        out.add(f"domain:{addr.split('@', 1)[1]}")
+        domain = addr.split("@", 1)[1]
+        if domain not in FREE_MAIL:
+            out.add(f"domain:{domain}")
     for word in _TOKEN.findall((row.get("subject") or "").lower()):
         if word not in _STOP and not word.isdigit():
             out.add(f"subj:{word}")

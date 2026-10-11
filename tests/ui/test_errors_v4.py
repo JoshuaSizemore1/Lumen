@@ -107,3 +107,38 @@ def test_briefing_error_settles_the_button(live, qtbot):
     assert data.fail("briefing.today", msg="model crashed")
     assert today.brief_btn.isEnabled()
     assert today.brief_text.text() == "model crashed"
+
+
+@pytest.mark.qt_no_exception_capture
+def test_an_error_in_a_slot_is_logged_and_toasted_not_fatal(
+        live, qtbot, tmp_path, monkeypatch):
+    """todo-fixes #85: PyQt6 aborts the whole process — and under `lumen`, the
+    daemon with it — on an exception escaping a slot, unless sys.excepthook
+    is replaced. Launched by Super+L, stderr went nowhere either."""
+    import logging
+    import sys
+
+    from PyQt6.QtCore import QTimer
+
+    from lumen.ui_v4 import app as app_mod
+    win, _data = live
+    toasts = []
+    monkeypatch.setattr(win, "show_toast", lambda m, undo=None: toasts.append(m))
+    lumen_log = logging.getLogger("lumen")
+    handlers, level = list(lumen_log.handlers), lumen_log.level
+    try:
+        app_mod.setup_logging(tmp_path / "ui.log")
+        monkeypatch.setattr(sys, "excepthook", app_mod._excepthook)
+
+        def boom():
+            raise RuntimeError("a latent screen bug")
+
+        QTimer.singleShot(0, boom)
+        qtbot.waitUntil(lambda: bool(toasts), timeout=2000)
+    finally:
+        for h in lumen_log.handlers[len(handlers):]:
+            h.close()
+        lumen_log.handlers[:], lumen_log.level = handlers, level
+    assert toasts == [app_mod.ERROR_TOAST]
+    text = (tmp_path / "ui.log").read_text()
+    assert "a latent screen bug" in text and "Traceback" in text

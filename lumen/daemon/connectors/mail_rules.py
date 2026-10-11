@@ -7,6 +7,7 @@ import re
 from datetime import datetime
 
 _ADDR = re.compile(r"<([^<>\s]+@[^<>\s]+)>")
+_URL = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _LIST_COLS = ("from_addrs", "domains", "subject_kw", "body_kw")
 
 
@@ -18,9 +19,23 @@ def sender_address(sender: str) -> str:
     return s.casefold() if "@" in s else ""
 
 
+def keyword_hit(keywords: list[str], text: str) -> bool:
+    """Case-insensitive WHOLE-word/phrase match, plural s/es allowed, with
+    links removed first (todo-fixes #78): a substring match let "bsa" hit
+    "Absa Group" and a statement URL, and "troop" hit "troopers"."""
+    text = _URL.sub(" ", text or "")
+    for k in keywords:
+        words = (k or "").split()
+        if words and re.search(
+                rf"(?<!\w){r'\s+'.join(map(re.escape, words))}(?:e?s)?(?!\w)",
+                text, re.IGNORECASE):
+            return True
+    return False
+
+
 def rule_matches(rule: dict, msg: dict) -> bool:
-    """ANY condition hits: exact address, domain suffix, or case-insensitive
-    substring on subject/body."""
+    """ANY condition hits: exact address, domain suffix, or a whole-word
+    keyword in subject/body."""
     addr = sender_address(msg.get("sender", ""))
     if addr and addr in (a.casefold() for a in rule["from_addrs"]):
         return True
@@ -29,11 +44,8 @@ def rule_matches(rule: dict, msg: dict) -> bool:
         d = d.casefold().lstrip("@")
         if d and (domain == d or domain.endswith("." + d)):
             return True
-    subject = (msg.get("subject") or "").casefold()
-    if any(k.casefold() in subject for k in rule["subject_kw"] if k):
-        return True
-    body = (msg.get("body") or "").casefold()
-    return any(k.casefold() in body for k in rule["body_kw"] if k)
+    return (keyword_hit(rule["subject_kw"], msg.get("subject"))
+            or keyword_hit(rule["body_kw"], msg.get("body")))
 
 
 def matching_labels(rules: list[dict], msg: dict) -> list[str]:

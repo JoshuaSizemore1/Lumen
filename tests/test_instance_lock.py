@@ -95,4 +95,24 @@ def test_lumen_processes_exclude_this_one_and_unrelated_commands():
         ["/v/bin/python", "-m", "pytest", "tests/daemon"]) is False
     assert instance_lock.is_lumen_argv(["zsh", "-c", "tail lumen.daemon.log"]) is False
     assert instance_lock.is_lumen_argv([]) is False
+    # todo-fixes #81: a file or word starting with "lumen" as another
+    # program's argument is not Lumen — --quit would SIGKILL an editor.
+    for argv in (["nvim", "lumen-notes.md"], ["less", "lumen.log"],
+                 ["grep", "lumen", "file"], ["/usr/bin/vim", "lumen"],
+                 ["git", "commit", "-m", "lumen.daemon: fix"],
+                 ["/v/bin/python3", "lumen_scratch.py"],
+                 ["/v/bin/python3", "/tmp/lumen-notes.py", "-m", "lumen.x"]):
+        assert instance_lock.is_lumen_argv(argv) is False, argv
+    assert instance_lock.is_lumen_argv(["/v/bin/lumen-ui"]) is True
+    assert instance_lock.is_lumen_argv(
+        ["/usr/bin/python3.12", "-u", "-m", "lumen.ui_v4.app"]) is True
+
+
+def test_console_scripts_match_pyproject():
+    # A new console script left out of the set would survive `lumen --quit`.
+    import tomllib
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    scripts = tomllib.loads((root / "pyproject.toml").read_text())["project"]["scripts"]
+    assert set(scripts) == instance_lock.CONSOLE_SCRIPTS
     assert os.getpid() not in instance_lock.lumen_pids()

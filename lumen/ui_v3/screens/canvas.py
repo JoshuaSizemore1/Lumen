@@ -1025,7 +1025,8 @@ class CanvasScreen(QWidget):
         self._syncing = False
         self._sync_btn.setEnabled(True)
         res = res if isinstance(res, dict) else {}
-        if res.get("ok") is False and res.get("reason") != "already syncing":
+        if res.get("ok") is False and res.get("reason") not in (
+                "already syncing", "paused"):
             # A sync that ran but pulled nothing (dead session, network error)
             # still has to say so, or the pill sits on "syncing…" forever.
             self._status_pill.set_status("sync failed", T.WARN, T.WARN)
@@ -1093,6 +1094,9 @@ class CanvasScreen(QWidget):
             last = st.get("last_sync")
             if self._syncing:
                 self._status_pill.set_status("syncing…", T.TEXT_MUTED, T.WARN)
+            elif st.get("paused"):              # Settings' Pause sync (#83)
+                self._status_pill.set_status("sync paused", T.TEXT_MUTED,
+                                             T.TEXT_GHOST)
             else:
                 self._status_pill.set_status(
                     f"last sync {_ago(last) or '—'}", T.OK, T.OK)
@@ -1101,7 +1105,7 @@ class CanvasScreen(QWidget):
             # empty for a whole interval (live bug 2026-08-25).
             if self._auto_sync_armed:
                 self._auto_sync_armed = False
-                if _stale(last):
+                if _stale(last) and not st.get("paused"):
                     self._sync_now()
         else:
             self._status_pill.set_status("Not connected", T.TEXT_MUTED,

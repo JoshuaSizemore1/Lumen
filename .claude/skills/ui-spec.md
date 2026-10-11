@@ -90,7 +90,9 @@ any v4 screen, and update it when you add or change behaviour.
   poll often half-reads (#67). With nothing saved it is offered once per typed
   login; "Not now" doesn't return on the next page. Canvas settings' Change /
   Save a login button opens the card on purpose (uNID prefilled, password
-  empty, no "Never").
+  empty, no "Never"). Paused in Settings, the badge reads "Sync paused", the
+  tab doesn't sync on open, and Sync now explains the pause (with Open
+  Settings) instead of "Sync failed" (#83).
 - **Settings:** all three answer modes are explained; Canvas Connect starts
   the sign-in from Accounts; Advanced shows only keys the daemon reports.
 - **Model naming:** plain words ("On this computer", "Claude · Haiku"); the
@@ -101,6 +103,11 @@ any v4 screen, and update it when you add or change behaviour.
   ConfirmOverlay. Approve only starts the write: a success toast waits for
   the daemon's answer (the screen shows it from the reply). Only sample
   mode's demo confirms carry a `toast` key, shown by the window on approve.
+- A confirm can appear mid-keystroke (#80): it focuses its card, never a
+  button, so Space/Enter approve nothing, and Approve ignores clicks for
+  `ConfirmOverlay.ARM_MS` after the card or the window appears.
+- An exception escaping a slot is logged to `ui.log` and toasted; it must
+  never abort the process (`ui_v4/app.py::_excepthook`, #85).
 - A daemon error or dropped connection must settle any waiting UI:
   `DaemonClient.request(..., on_error=)`; state exposes `mail_error` /
   `todos_error`, and calendar callbacks get `{"error": ...}`. No skeleton or

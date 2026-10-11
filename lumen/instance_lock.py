@@ -19,11 +19,16 @@ from pathlib import Path
 
 TERM_GRACE_S = 5.0
 
-# Console scripts (`lumen`, `lumen-daemon`, `lumen-ui`) run as
+# Console scripts (pyproject [project.scripts]) run as
 # `…/python3 …/bin/lumen …`; everything else as `…/python3 -m lumen.<mod>`.
 # Matching argv this way — rather than grepping the whole command line — keeps
 # the sweep off shells and editors that merely mention lumen.
+CONSOLE_SCRIPTS = frozenset({
+    "lumen", "lumen-daemon", "lumen-ui", "lumen-ui-v4", "lumen-ui-v3",
+    "lumen-ui-v2", "lumen-google-auth"})
 _MODULE_PREFIX = "lumen."
+_DAEMON_PROGRAMS = frozenset({"lumen-daemon", "lumen.daemon",
+                              "lumen.daemon.__main__"})
 
 
 def lock_path() -> Path:
@@ -51,27 +56,38 @@ def release(handle) -> None:
         handle.close()
 
 
-def is_lumen_argv(argv: list[str]) -> bool:
+def _program(argv: list[str]) -> str:
+    """The console script or `-m` module this process runs, or "". Read off
+    the command itself — the executable, or the script/`-m` a Python
+    interpreter was handed — never off another program's arguments: a
+    "starts with lumen" test on argv[1] once matched `nvim lumen-notes.md`,
+    `less lumen.log` and `grep lumen f` (todo-fixes #81), and --quit
+    SIGKILLs what it matches."""
     if not argv:
-        return False
-    if Path(argv[0]).name.startswith("lumen"):
-        return True
-    if len(argv) > 1 and Path(argv[1]).name.startswith("lumen"):
-        return True
-    return any(argv[i] == "-m" and argv[i + 1].startswith(_MODULE_PREFIX)
-               for i in range(len(argv) - 1))
+        return ""
+    name = Path(argv[0]).name
+    if name in CONSOLE_SCRIPTS:
+        return name
+    if not name.startswith("python"):
+        return ""
+    rest = iter(argv[1:])
+    for a in rest:
+        if a == "-m":
+            return next(rest, "")
+        if not a.startswith("-"):          # the script path
+            return Path(a).name if Path(a).name in CONSOLE_SCRIPTS else ""
+    return ""
+
+
+def is_lumen_argv(argv: list[str]) -> bool:
+    prog = _program(argv)
+    return prog in CONSOLE_SCRIPTS or prog.startswith(_MODULE_PREFIX)
 
 
 def is_daemon_argv(argv: list[str]) -> bool:
     """Just the background daemon, not the UI (#47 — "stray daemons need a way
     to be killed", without taking the running window down with them)."""
-    if not argv:
-        return False
-    if any(Path(a).name == "lumen-daemon" for a in argv[:2]):
-        return True
-    return any(argv[i] == "-m"
-               and argv[i + 1] in ("lumen.daemon", "lumen.daemon.__main__")
-               for i in range(len(argv) - 1))
+    return _program(argv) in _DAEMON_PROGRAMS
 
 
 def _pids_matching(predicate) -> list[int]:

@@ -36,6 +36,20 @@ def test_matchers_any_condition_case_insensitive():
     assert not rule_matches(rule(subject_kw=["invoice"]), row())
 
 
+def test_keywords_match_whole_words_not_fragments_or_links():
+    # todo-fixes #78: the rule author's own BSA example hit all three of these.
+    bsa = rule(subject_kw=["bsa", "troop", "boy scout"],
+               body_kw=["bsa", "troop", "boy scout"])
+    assert not rule_matches(bsa, row(subject="Your statement is ready",
+                                     body="View it at https://wf.com/s?id=bsa&x=1"))
+    assert not rule_matches(bsa, row(subject="Absa Group is hiring", body=""))
+    assert not rule_matches(bsa, row(subject="Drive safe",
+                                     body="The troopers closed I-15 tonight"))
+    assert rule_matches(bsa, row(subject="BSA camp-out", body=""))
+    assert rule_matches(bsa, row(subject="", body="Troops 12 and 40 meet Monday"))
+    assert rule_matches(bsa, row(subject="", body="All Boy\n Scouts welcome"))
+
+
 def test_matching_labels_all_rules_dedup():
     rules = [rule(label="BSA", domains=["scouting.org"]),
              rule(label="Bills", subject_kw=["derby"]),

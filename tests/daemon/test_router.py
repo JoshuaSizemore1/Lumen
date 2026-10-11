@@ -774,7 +774,8 @@ async def test_slow_tool_call_times_out_with_recoverable_message(monkeypatch):
             yield {"content": f"done: {captured['text']}"}
 
     out = await collect(
-        Router(ErrLLM(), FakeStore(), bridge=HangBridge(), model_router=FakeModelRouter()),
+        Router(ErrLLM(), FakeStore(), bridge=HangBridge(tools=(("search_files", "fs"),)),
+               model_router=FakeModelRouter()),
         "chat", {"message": "search my files"})
     assert "timed out" in captured["text"]                 # fed back so the model can recover
     assert any("timed out" in o.get("chunk", "") for o in out)
@@ -1188,6 +1189,30 @@ async def test_ungranted_write_decline_never_calls_tool(tmp_path):
     assert grants.is_granted(str(tmp_path / "f.txt")) is False
     assert any(e.get("chunk") == f"result: {DENIAL}" for e in events)
     assert ("write_file", False, DENIAL) in logrec  # denial logged like any call
+
+
+async def test_unoffered_tool_is_refused_not_run(tmp_path):
+    # todo-fixes #77: create_event is withheld from the offered list, so a
+    # model that emits it anyway must not reach the bridge (no confirm exists
+    # on that path). A tool from a group not attached this turn is the same.
+    for tool in ("create_event", "search_email"):
+        bridge = FakeBridge(tools=(("write_file", "fs"), ("create_event", "fs"),
+                                   ("search_email", "mail")))
+        logrec = []
+
+        class FakeLog:
+            def write(self, tool, arguments, ok, result, duration_ms):
+                logrec.append((tool, ok))
+
+        router, broker, grants = gated_router(
+            tmp_path, GateLLM(tool=tool, args={"summary": "x"}),
+            bridge=bridge, tool_log=FakeLog())
+        events = await collect(router, "chat",
+                               {"message": "save hello to /tmp/h.txt"})
+        assert bridge.calls == []
+        assert not any("confirm_request" in e for e in events)
+        assert any("no tool named" in e.get("chunk", "") for e in events)
+        assert logrec == [(tool, False)]
 
 
 async def test_granted_write_skips_confirm_entirely(tmp_path):
@@ -2546,6 +2571,19 @@ async def test_mail_refresh_triggers_sync():
     assert sync.synced == 1 and "result" in out[-1]
 
 
+async def test_mail_refresh_respects_the_disable_switch(tmp_path):
+    # todo-fixes #82: a sync runs the mail rules, which write to Gmail.
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "s.db"))
+    conns.set_enabled("gmail", False)
+    store, sync = FakeMailStore(), FakeMailSync()
+    router = Router(FakeLLM(), FakeStore(), mail=sync, mail_store=store,
+                    connection_state=conns)
+    out = await collect(router, "mail.refresh", {})
+    assert sync.synced == 0 and "result" in out[-1]     # the mirror, no network
+
+
 async def test_mail_refresh_skips_sync_when_already_syncing():
     store, sync = FakeMailStore(), FakeMailSync()
     sync.syncing = True
@@ -2729,6 +2767,9 @@ async def test_rules_create_confirms_saves_and_backfills(tmp_path):
             assert req["title"] == "Create mail rule"
             assert ("Label", "Bills") in [tuple(r) for r in req["rows"]]
             assert "1 matching" in req["check"]["label"]   # m1 is from a@x.com
+            # #78: the confirm names what the rule would catch
+            examples = dict(map(tuple, req["rows"]))["For example"]
+            assert "a@x.com" in examples and examples.count("\n") == 0
             broker.resolve(ev["confirm_id"], {"approved": True, "check": True})
     assert events[-1]["result"]["ok"] is True
     assert len(events[-1]["result"]["rules"]) == 1
@@ -4606,6 +4647,28 @@ async def test_canvas_status_reports_live_state():
                         "canvas.status", {})
     assert out[-1]["result"]["connected"] is True
     assert out[-1]["result"]["last_sync"] == "2026-08-01T09:00:00"
+
+
+async def test_paused_canvas_says_so_and_never_syncs(tmp_path):
+    # todo-fixes #83: Settings said "Paused" while the tab synced on open,
+    # on Sync now, and after sign-in.
+    import asyncio
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "s.db"))
+    conns.set_enabled("canvas", False)
+    canvas = FakeCanvas(connected=True, last_sync="2026-08-01T09:00:00")
+    router = Router(FakeLLM(), FakeStore(), canvas=canvas,
+                    connection_state=conns)
+    status = (await collect(router, "canvas.status", {}))[-1]["result"]
+    assert status["paused"] is True
+    for type_ in ("canvas.sync_now", "canvas.reconcile_now"):
+        res = (await collect(router, type_, {}))[-1]["result"]
+        assert res["ok"] is False and res["reason"] == "paused", type_
+    await asyncio.sleep(0)
+    assert canvas.syncs == 0
+    conns.set_enabled("canvas", True)
+    assert (await collect(router, "canvas.status", {}))[-1]["result"]["paused"] is False
 
 
 async def test_canvas_disconnect_clears_session():

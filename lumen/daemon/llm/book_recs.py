@@ -91,10 +91,14 @@ async def recommend(llm, bridge, books, *, model=None, tool_log=None,
         return {"error": "book lookup tools are unavailable right now"}
 
     collected: list[str] = []
+    offered = {t.get("function", {}).get("name") for t in tools}
 
     async def executor(name, args):
         start = time.monotonic()
         try:
+            if name not in offered:    # todo-fixes #77: never an unoffered tool
+                raise ValueError(f"there is no tool named {name!r} here — "
+                                 "use only the tools you were given")
             text = await bridge.call(name, args)
             ok = True
             collected.append(text)

@@ -605,12 +605,15 @@ class CanvasScreen(QWidget):
             self._last_sync = st.get("last_sync")
             if self._syncing:
                 self._set_badge("warn", "Syncing…")
+            elif st.get("paused"):
+                # Settings' Pause sync (#83) — the daemon refuses every sync.
+                self._set_badge("neutral", "Sync paused")
             else:
                 ago = _ago(self._last_sync)
                 self._set_badge("success", f"Synced {ago}" if ago else "Connected")
             if self._auto_sync_armed:
                 self._auto_sync_armed = False
-                if _stale(self._last_sync):
+                if _stale(self._last_sync) and not st.get("paused"):
                     self._sync_now()
         else:
             self._set_badge("neutral", "Not connected")
@@ -647,7 +650,8 @@ class CanvasScreen(QWidget):
         except RuntimeError:
             return
         res = res if isinstance(res, dict) else {}
-        if res.get("ok") is False and res.get("reason") != "already syncing":
+        if res.get("ok") is False and res.get("reason") not in (
+                "already syncing", "paused"):
             self._set_badge("danger", "Sync failed")
         else:
             self._refresh_status()
@@ -656,6 +660,14 @@ class CanvasScreen(QWidget):
 
     def _render_summary(self, res: dict):
         clear_layout(self._summary_box)
+        if res.get("reason") == "paused":
+            self._summary_box.addWidget(self._strip(
+                "info", "fg2",
+                "Canvas sync is paused, so nothing was pulled.",
+                "Open Settings", lambda: self.win.switch_to("settings"),
+                "Resume it under Settings → Accounts."))
+            self._summary_box.addSpacing(T.S4)
+            return
         if not res or res.get("ok") is False:
             if res and res.get("ok") is False and self.state.live and \
                     res.get("reason") != "already syncing":

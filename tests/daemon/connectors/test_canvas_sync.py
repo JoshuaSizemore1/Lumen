@@ -378,6 +378,32 @@ async def test_the_switch_off_writes_nothing(tmp_path):
     assert writer.created == [] and queue.count() == 0
 
 
+async def test_paused_refuses_every_sync_not_just_the_timer(tmp_path):
+    # todo-fixes #83: tab-open, Sync now and the sign-in hand-off all call
+    # sync_once directly; Pause sync has to stop them there.
+    def boom():
+        raise AssertionError("no Canvas traffic while paused")
+
+    store, sync, queue, writer = calendar_sync(tmp_path, _client())
+    sync._client_factory = boom
+    sync.paused = lambda: True
+    assert await sync.sync_once() is False
+    assert (await sync.reconcile_now())["ok"] is False
+    assert sync.last_sync() is None and writer.created == []
+
+
+async def test_calendar_paused_stops_canvas_calendar_writes(tmp_path):
+    # todo-fixes #83: Google Calendar's own pause covers Canvas's writes to it.
+    store, sync, queue, writer = calendar_sync(tmp_path, _client())
+    sync.calendar_paused = lambda: True
+    assert await sync.sync_once() is True                 # the mirror still syncs
+    assert [a["name"] for a in store.assignments()] == ["HW1"]
+    assert writer.created == []
+    sync.calendar_paused = lambda: False                  # resumed: it catches up
+    await sync.sync_once()
+    assert len(writer.created) == 1
+
+
 async def test_submitting_queues_a_removal_through_the_poll_loop(tmp_path):
     store, sync, queue, writer = calendar_sync(tmp_path, _client())
     await sync.sync_once()

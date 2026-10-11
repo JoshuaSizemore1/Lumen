@@ -8,8 +8,11 @@ launcher overlay — "toggle-launcher" (Super+L) brings the window up with the
 Ask bar focused instead, and hides it when Lumen is already in front.
 Launch with: lumen (with the daemon), lumen-ui, or python -m lumen.ui_v4
 """
+import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -24,6 +27,60 @@ from lumen.ui_v2.single_instance import (
 
 from . import SOCKET_NAME
 from . import theme as T
+
+log = logging.getLogger("lumen.ui")
+
+ERROR_TOAST = ("Something went wrong there. Lumen kept running; details are "
+               "in ui.log.")
+
+
+def ui_log_path() -> Path:
+    base = os.environ.get("XDG_STATE_HOME")
+    root = Path(base) if base else Path.home() / ".local" / "state"
+    return root / "lumen" / "ui.log"
+
+
+def setup_logging(path: Path | None = None) -> None:
+    """The UI process had no logging config, so its warnings (and the Canvas
+    sign-in diagnostics) went nowhere — launched by Super+L, stderr is not a
+    terminal. One small rotating file beside daemon.log."""
+    path = path or ui_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=1,
+                                      encoding="utf-8")
+    except OSError:
+        return
+    fmt = logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+    handler.setFormatter(fmt)
+    # A handler of our own retires logging's last-resort stderr output, so
+    # warnings still reach the terminal when lumen-ui is run by hand.
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(fmt)
+    root = logging.getLogger("lumen")
+    root.addHandler(handler)
+    root.addHandler(console)
+    root.setLevel(logging.INFO)
+
+
+def _excepthook(etype, value, tb) -> None:
+    """PyQt6 aborts the process on an exception escaping a slot unless
+    sys.excepthook is replaced, and under `lumen` the daemon dies with it
+    (todo-fixes #85). Log it, say so, keep running."""
+    if issubclass(etype, KeyboardInterrupt):     # Ctrl+C in a terminal still quits
+        sys.__excepthook__(etype, value, tb)
+        QApplication.quit()
+        return
+    # ui.log, and stderr too through setup_logging's console handler
+    log.error("unhandled exception in the UI", exc_info=(etype, value, tb))
+    try:
+        win = next((w for w in QApplication.topLevelWidgets()
+                    if hasattr(w, "show_toast")), None)
+        if win is not None:
+            win.show_toast(ERROR_TOAST)
+    except Exception:
+        log.exception("could not show the error toast")
 
 
 def _prepare_webengine() -> None:
@@ -54,6 +111,8 @@ def main() -> None:
     if try_send(SOCKET_NAME, command):
         return          # a running instance handled it
 
+    setup_logging()
+    sys.excepthook = _excepthook
     # Ask the desktop whether it wants animations off (hyprctl/gsettings)
     # off the GUI thread, while the rest of startup runs.
     T.prime_reduced_motion()

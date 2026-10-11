@@ -257,3 +257,18 @@ def test_ask_context_sends_local_due_times(canvas, set_tz):
     scr._assign_data = [{"name": "HW 5", "course_code": "CS 4150",
                          "due_at": "2026-10-12T05:59:00Z"}]
     assert scr.ask_context()["assignments"][0]["due"] == "2026-10-11 23:59"
+
+
+def test_paused_sync_shows_paused_not_failed(live_canvas):
+    """todo-fixes #83: the daemon refuses a sync while Settings has Canvas
+    paused. The tab says so, doesn't auto-sync on open, and Sync now is not
+    reported as a failure."""
+    win, data, scr, _toasts = live_canvas
+    scr._auto_sync_armed = True
+    scr._apply_status({"connected": True, "last_sync": None, "paused": True})
+    assert scr.status_badge.text() == "Sync paused"
+    assert data.last("canvas.reconcile_now") is None      # stale, but paused
+    scr._sync_now()
+    _p, cb = data.last("canvas.reconcile_now")
+    cb({"ok": False, "reason": "paused"})
+    assert scr.status_badge.text() != "Sync failed"

@@ -113,6 +113,45 @@ async def test_forget_removes_matching_line(tmp_path):
     assert m.delete_matching("pultegroup") == 0   # log rows already gone
 
 
+async def test_dont_forget_todo_never_touches_memory(tmp_path):
+    # todo-fixes #79: this used to delete every memory about "mom" and add no
+    # todo. The ForgetLLM would hand the forget path "mom" if it ran.
+    p = tmp_path / "memory.md"
+    original = "## People\n- Calls mom on Sundays. (last seen 2026-07-14)\n"
+    p.write_text(original)
+    m = MemoryLog(db.connect(tmp_path / "mem.db"))
+    store = FakeStore(rows=[{"id": 1, "text": "call mom", "tags": []}])
+    r = Router(ForgetLLM("mom"), store, memory=m, memory_path=p,
+               memory_cap=4000)
+    for msg in ("add a todo: don't forget to call mom",
+                "remind me to forget about the old lease",
+                "don't forget to call mom",
+                "I always forget my keys, any tips?",
+                "forget to call mom"):
+        await collect(r, "chat", {"message": msg})
+        assert p.read_text() == original, msg
+    assert ("add", "don't forget to call mom") in store.calls
+
+
+def test_forget_hint_needs_a_request_aimed_at_memory():
+    from lumen.daemon.router import FORGET_HINT
+    for msg in ("forget about PulteGroup", "Forget that I like tea",
+                "please forget the PulteGroup thing",
+                "Lumen, can you forget my old address?",
+                "stop remembering my work schedule",
+                "delete what you know about Chris",
+                "ok so forget everything you know about my ex",
+                "Actually, forget the PulteGroup thing",
+                "Also forget my old address"):
+        assert FORGET_HINT.search(msg), msg
+    for msg in ("don't forget to call mom", "never forget the milk",
+                "add a todo: don't forget to call mom",
+                "how do I not forget birthdays?", "forget to water plants",
+                "and don't forget the milk", "so I forget my keys a lot",
+                "also forget to call the bank"):
+        assert not FORGET_HINT.search(msg), msg
+
+
 async def test_forget_nothing_matched_is_honest(tmp_path):
     p = tmp_path / "memory.md"
     p.write_text("## Todos\n- Groups errands. (last seen 2026-07-14)\n")

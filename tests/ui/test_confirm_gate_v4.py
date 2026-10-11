@@ -155,3 +155,46 @@ def test_calendar_event_update_routes_to_gated_type(client_and_win):
     assert payload["id"] == "evt1"
     assert payload["calendar_id"] == "primary"
     assert "changes" in payload
+
+
+# ---- a confirm that pops up mid-keystroke (todo-fixes #80) ------------------
+
+def _open_create_event(win, results):
+    from PyQt6.QtWidgets import QPushButton
+    win.confirm.open({"title": "Create event", "confirm_label": "Create"},
+                     lambda ok, _p: results.append(ok))
+    return next(b for b in win.confirm.card.findChildren(QPushButton)
+                if b.text() == "Create")
+
+
+def test_space_or_enter_cannot_approve_a_fresh_confirm(client_and_win, qtbot):
+    """A non-destructive confirm used to focus Approve, so the next Space typed
+    into the Ask bar approved it."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QApplication, QPushButton
+    _client, win = client_and_win
+    results = []
+    _open_create_event(win, results)
+    assert QApplication.focusWidget() is win.confirm.card
+    assert not isinstance(QApplication.focusWidget(), QPushButton)
+    for key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        qtbot.keyClick(QApplication.focusWidget(), key)
+    assert results == [] and win.confirm.isVisible()
+
+
+def test_approve_ignores_clicks_right_after_it_appears(client_and_win, qtbot):
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtWidgets import QApplication
+    _client, win = client_and_win
+    results = []
+    ok = _open_create_event(win, results)
+    qtbot.mouseClick(ok, Qt.MouseButton.LeftButton)
+    assert results == []                              # too soon — ignored
+    win.confirm._armed_at -= 1.0
+    # the window coming back from the tray re-arms the guard
+    QApplication.sendEvent(win, QEvent(QEvent.Type.Show))
+    qtbot.mouseClick(ok, Qt.MouseButton.LeftButton)
+    assert results == []
+    win.confirm._armed_at -= 1.0
+    qtbot.mouseClick(ok, Qt.MouseButton.LeftButton)
+    assert results == [True]

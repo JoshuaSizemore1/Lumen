@@ -184,6 +184,20 @@ async def test_recommend_injects_catalog_and_passes_model_and_request():
     assert llm.seen_model == "esc-14b"
 
 
+async def test_recommend_refuses_a_tool_it_did_not_offer():
+    # todo-fixes #77: the bridge would run create_event; the loop must not.
+    class StrayLLM(RecLLM):
+        async def chat_with_tools(self, messages, tools, executor, **kw):
+            self.result = await executor("create_event", {"summary": "x"})
+            yield {"content": self._answer}
+
+    llm, bridge = StrayLLM(), FakeBridge(
+        tool_names=("search_books", "get_book", "create_event"))
+    await recommend(llm, bridge, FakeBooks())
+    assert bridge.calls == []
+    assert "no tool named 'create_event'" in llm.result
+
+
 async def test_recommend_writes_tool_log():
     logged = []
 

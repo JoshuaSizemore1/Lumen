@@ -377,10 +377,20 @@ MAIL_HINT = re.compile(
 )
 
 # Explicit forget: prune the topic from both memory tiers. Checked ahead of
-# every other chat route so "forget the PulteGroup thing" never becomes a
-# generic chat turn.
+# the other chat routes (todo-add excepted) so "forget the PulteGroup thing"
+# never becomes a generic chat turn. It deletes without a confirm, so it needs
+# a request aimed at Lumen's memory: "forget" leading the message ("please
+# forget…", "can you forget…") or "what you know/remember" (todo-fixes #79).
+# A bare \bforget\b sent "add a todo: don't forget to call mom" here, which
+# wiped every memory of mom and added no todo.
 FORGET_HINT = re.compile(
-    r"\bforget\b|\bstop remembering\b|\bdelete what you (?:know|remember)\b",
+    r"^\W*(?:(?:please|hey|ok(?:ay)?|lumen|actually|also|yes|so|and|oh|now)"
+    r"\b\W*)*"
+    r"(?:(?:can|could|would|will) you\s+|i (?:want|need) you to\s+)?"
+    r"(?:please\s+)?forget\b(?!\s+to\b)"
+    r"|\bstop remembering\b"
+    r"|\b(?:delete|erase|remove|clear) what you (?:know|remember)\b"
+    r"|\bforget (?:what|everything|all) you (?:know|remember)\b",
     re.IGNORECASE)
 
 # A follow-up in this shape is a correction (stronger memory signal than a
@@ -882,12 +892,13 @@ class Router:
             result["name"] = m
         return result
 
-    def _calendar_enabled(self) -> bool:
-        """#38's runtime Disable. The poll loops consult it every tick; a manual
-        refresh has to as well, or "disabled" would still mean "talks to Google
-        whenever the calendar screen is opened"."""
+    def _enabled(self, connection: str) -> bool:
+        """#38's runtime Disable ("gmail", "google_calendar", "canvas"). The
+        poll loops consult it every tick; a manual refresh has to as well, or
+        "disabled" would still mean "talks to Google whenever the screen is
+        opened" (todo-fixes #82, #83)."""
         return (self._connection_state is None
-                or self._connection_state.enabled("google_calendar"))
+                or self._connection_state.enabled(connection))
 
     def _kick_canvas_sync(self) -> None:
         """Run a sync in the background, ignoring the outcome. A strong ref is
@@ -907,12 +918,15 @@ class Router:
         route answers with this shape as a *result* so the UI's per-id callback
         fires and the label reflects the daemon's truth."""
         if self._canvas is None:
-            return {"connected": False, "last_sync": None, "enabled": False}
+            return {"connected": False, "last_sync": None, "enabled": False,
+                    "paused": False}
         return {
             "connected": self._canvas.connected,
             "last_sync": self._canvas.last_sync(),
             "enabled": (self._config.canvas.enabled
                         if self._config is not None else False),
+            # Settings' Pause sync (#83): the tab says so instead of "Synced".
+            "paused": not self._enabled("canvas"),
         }
 
     async def _accept_proposal(self, pid: int, approve: bool) -> dict:
@@ -1595,6 +1609,9 @@ class Router:
             # the next poll tick. Guarded by the existing sync lock.
             if self._canvas is None:
                 yield {"error": "canvas unavailable"}
+            elif not self._enabled("canvas"):
+                yield {"result": {"started": False, "ok": False,
+                                  "reason": "paused"}}
             elif self._canvas.busy:
                 yield {"result": {"started": False, "reason": "already syncing"}}
             else:
@@ -1608,6 +1625,8 @@ class Router:
             # queued REMOVALS being surfaced at the moment they appear.
             if self._canvas is None:
                 yield {"error": "canvas unavailable"}
+            elif not self._enabled("canvas"):
+                yield {"result": {"ok": False, "reason": "paused"}}
             elif self._canvas.busy:
                 yield {"result": {"ok": False, "reason": "already syncing"}}
             else:
@@ -1803,7 +1822,7 @@ class Router:
             if self._calendar is None:
                 yield {"error": "calendar unavailable"}
             else:
-                if type_ == "calendar.refresh" and self._calendar_enabled():
+                if type_ == "calendar.refresh" and self._enabled("google_calendar"):
                     await self._calendar.sync_once()
                 today = date.today().isoformat()
                 yield {"result": {
@@ -1910,8 +1929,10 @@ class Router:
                 # A refresh during a running/pending bulk just returns the
                 # current page immediately — the poller finishes the sync —
                 # instead of awaiting inline and stalling the serial IPC
-                # channel for the whole sync's duration.
-                if not (self._mail.busy or self._mail.syncing):
+                # channel for the whole sync's duration. Disabled in Settings
+                # means no sync at all — it runs the mail rules, which write.
+                if (self._enabled("gmail")
+                        and not (self._mail.busy or self._mail.syncing)):
                     await self._mail.sync_once()
                 # keep the caller's scope so a label view reloads as itself
                 type_, payload = "emails.list", {
@@ -2321,13 +2342,14 @@ class Router:
                                  | self._subject_groups(message)),
                 extra_context=local_files.ask_context(cwd, open_file))
             subsystem = "files"
+        elif m := TODO_ADD.match(message):
+            # Ahead of forget: "add a todo: forget about the old lease" is a todo.
+            sub, subsystem = self._nl_add_chat(m.group(1).strip()), "todos"
         elif (self._memory_path is not None and self._memory is not None
                 and FORGET_HINT.search(message)):
             # The forget turn must not be logged — its own text names the topic
             # and would re-seed what was just pruned.
             sub, subsystem, skip_log = self._forget_chat(message), "chat", True
-        elif m := TODO_ADD.match(message):
-            sub, subsystem = self._nl_add_chat(m.group(1).strip()), "todos"
         elif m := MARK_DONE.match(message):
             sub, subsystem = self._mark_done_chat(m.group(1)), "todos"
         elif m := ALREADY_DONE.match(message):
@@ -3380,13 +3402,20 @@ class Router:
         Save is the pre-authorization for every future auto-apply. Yields UI
         events, then a final {"_saved", "_applied", "_matched"}."""
         inbox = self._mail_store.list_page("inbox", limit=RULE_SCAN_LIMIT)
-        matches = [m["id"] for m in inbox if mail_rules.rule_matches(rule, m)]
+        hits = [m for m in inbox if mail_rules.rule_matches(rule, m)]
+        matches = [m["id"] for m in hits]
         rows = [("Label", rule["label"])]
         for key, name in (("from_addrs", "From"), ("domains", "Domains"),
                           ("subject_kw", "Subject"), ("body_kw", "Body")):
             if rule[key]:
                 rows.append((name, ", ".join(rule[key])))
         rows.append(("Existing", f"{len(matches)} matching in your inbox"))
+        # todo-fixes #78: show what it would catch, so a keyword that hits
+        # unrelated mail is visible before Save, not after Gmail moves it.
+        if hits:
+            rows.append(("For example", "\n".join(
+                f"{m.get('sender') or '(unknown sender)'} — "
+                f"{m.get('subject') or '(no subject)'}" for m in hits[:3])))
         confirm_id = self._confirm.begin()
         req = {"icon": "⚑", "title": "Create mail rule",
                "intro": "New mail matching this rule is labeled and moved out "
@@ -3504,8 +3533,21 @@ class Router:
         async def emit(ev: dict) -> None:
             await queue.put(ev)
 
+        offered = {t.get("function", {}).get("name") for t in tools}
+
         async def executor(name, args):
             start = time.monotonic()
+            # todo-fixes #77: run only what was offered this turn. Ollama runs
+            # any name the model emits, and WRITE_TOOLS are withheld from the
+            # list precisely so a slip can't write without a confirm.
+            if name not in offered:
+                text = (f"tool error: there is no tool named {name!r} here — "
+                        "use only the tools you were given")
+                log.warning("model called a tool it was not offered: %r", name)
+                if self._tool_log is not None:
+                    self._tool_log.write(name, args, False, text,
+                                         int((time.monotonic() - start) * 1000))
+                return text
             short = name.split("__")[-1]
             if short in local_tools.LOCAL_TOOL_NAMES:
                 text = local_tools.dispatch(short, args, self._todos)

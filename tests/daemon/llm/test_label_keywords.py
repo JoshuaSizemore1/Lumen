@@ -37,6 +37,20 @@ def test_terms_namespace_sender_and_subject_separately():
     assert "fidelity.com" not in t
 
 
+def test_a_free_mail_domain_is_not_evidence():
+    # todo-fixes #84: BSA leaders writing from Gmail made Mom's and recruiters'
+    # Gmail mail a confident BSA suggestion.
+    t = lk.terms(row("Leader <leader1@gmail.com>", "Campout"))
+    assert "from:leader1@gmail.com" in t and "domain:gmail.com" not in t
+    profiles = lk.build_profiles({
+        "BSA": [row("leader1@gmail.com", "Troop 42 campout"),
+                row("leader2@gmail.com", "Pinewood derby signup"),
+                row("leader3@gmail.com", "Eagle court of honor")],
+        "Shipping": [row("ship-confirm@amazon.com", "Your package has shipped")]})
+    assert lk.classify(row("Mom <mom@gmail.com>", "Sunday dinner"), profiles) is None
+    assert lk.classify(row("leader1@gmail.com", "Troop campout"), profiles) == "BSA"
+
+
 def test_terms_drop_mail_furniture_and_bare_numbers():
     t = lk.terms(row("a@x.com", "Your update about the 2026 thing"))
     assert "subj:your" not in t and "subj:about" not in t and "subj:the" not in t
