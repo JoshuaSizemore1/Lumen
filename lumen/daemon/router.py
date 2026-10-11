@@ -788,7 +788,6 @@ class Router:
                  mail_store=None, bridge=None, confirm=None, write_gate=None,
                  model_router=None, tool_log=None, conversations=None,
                  suggestions=None, scheduling=None, notes=None, write_dir=None,
-                 manabi=None,
                  memory=None, memory_path=None, memory_cap=4000,
                  procedures=None, distill_trigger=None,
                  config=None, rules=None, marker_writer=None,
@@ -817,7 +816,6 @@ class Router:
         # notes Q&A folder so a written file is immediately searchable there.
         self._write_dir = Path(write_dir) if write_dir else (
             Path.home() / "Documents" / "Notes")
-        self._manabi = manabi            # ManabiStatus — Japanese-study nudge
         self._memory = memory                # MemoryLog — tier-1 raw log
         self._memory_path = memory_path      # Path to memory.md
         self._memory_cap = memory_cap
@@ -1246,11 +1244,6 @@ class Router:
                 yield {"error": str(e)}
                 return
             yield {"result": {"text": "".join(text)}}
-        elif type_ == "manabi.status":
-            # Dashboard nudge one-shot: a cheap read-only DB peek, no LLM.
-            yield {"result": (self._manabi.status() if self._manabi is not None
-                              else {"configured": False, "due": None,
-                                    "last_review": None})}
         elif type_ == "settings.get":
             # Read-only snapshot of the loaded config for the Settings screen.
             if self._config is None:
@@ -2673,8 +2666,6 @@ class Router:
             cal_connected=(self._calendar is not None and self._calendar.connected),
             mail_connected=(self._mail is not None and self._mail.connected),
             mail_syncing=(self._mail is not None and self._mail.syncing),
-            manabi_due=(self._manabi is not None
-                        and self._manabi.status(now)["due"] is True),
             canvas_announcements=canvas_anns)
 
     async def _briefing_chat(self):

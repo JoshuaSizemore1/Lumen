@@ -843,9 +843,18 @@ ead do it programatically, where the email id / whatever signifies that email is
 69. Even with claude CLI it does not first look for an email address  in the inbox when drafting an email. The first step when drafting an email should be finding the email adress (at some point we should add a contacts system). — ✔ fixed (2026-10-10)
     - **Root cause:** the address lookup only ran for the explicit "find X's address, then email him" phrasing. "email Chris about the meeting" never looked anyone up, in Local or Claude mode alike (the lookup is router code, not the model).
     - **Done:** every new compose that names a recipient without an address looks the name up in the mirror *before* drafting: people you've written to first (SENT recipients), then senders, newest first; automated senders (no-reply, digests, "X via LinkedIn") are skipped. The answer says which address it used and lists any others ("Also seen: …; change To if that's wrong"), or says it couldn't find one. Only your typing or the mirror lookup can fill To — the model still can't. **Live-verified:** the first live run picked a LinkedIn digest address (`messaging-digest-noreply@linkedin.com`) for Chris Sizemore; the ranking fix above came from that, and the rerun filled `chris@abellalarms.net`. Nothing was sent. A real contacts system is still a later feature.
-70. Remove the manabi japanese review suggustion from the daily section
+70. Remove the manabi japanese review suggustion from the daily section — ✔ removed (2026-10-11)
+    - **Done:** the nudge is gone everywhere it surfaced — the Today card (v4, and v3/v2's Today/dashboard), the line in the morning briefing, the `manabi.status` daemon route and the `[manabi]` config setting (the section was dropped from your config.toml; an old copy is simply ignored). Nothing in Lumen reads Manabi's database any more. Tested: Today makes no Manabi request and draws no nudge; the briefing never mentions it.
 71. Completly redesign the TODO section — ⧗ deferred by Josh (2026-10-10, "we will do more redesigning of todo later"). Answers already given: Canvas assignments get a short coloured course chip ("CS 4150", course prefix stripped from the title, the "canvas" tag hidden) with points / submitted / Open in Canvas in the detail; completed items go to a collapsed "Done (N)" section. Layout (list + detail pane vs single list vs board) and extras are still open. Note: `canvas_assignments.html_url`/points/submitted aren't joined into the todo dict yet.
 ---
+
+## Josh's Finds — status 2026-10-11
+
+Every entry is closed except **#44** (rebuilt; needs your live Canvas login
+through CAS + Duo to confirm) and **#71** (Todos redesign, deferred by you).
+#70 was the last open fix. A check of ui_v4 against every UI fix from #1–#69
+found all of them present in v4, now the default UI. Suite: 2046 passed /
+19 skipped.
 
 ## Josh's Finds — status 2026-07-21
 

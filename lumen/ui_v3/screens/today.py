@@ -1,9 +1,9 @@
 """Today at a glance — the mockup's three-column dashboard.
 
 The mock draws three columns (todos / schedule / unread). Lumen's own dashboard
-intelligence — morning briefing, commitment suggestions scanned from sent mail,
-and the Manabi study nudge — has no place in the mock, so it lands in bands
-above and below the grid that stay hidden until they have something to say.
+intelligence — the morning briefing and commitment suggestions scanned from
+sent mail — has no place in the mock, so it lands in bands above and below the
+grid that stay hidden until they have something to say.
 """
 from datetime import date, datetime
 
@@ -47,7 +47,6 @@ class TodayScreen(LazyRebuild, QWidget):
         # the calendar too, and it was equally stuck on the daemon's cache. The
         # debounce is shared state, so opening both tabs still costs one sync.
         self.state.sync_calendar(today, today, self._on_events)
-        self.state.refresh_manabi()
 
     def _on_events(self, result: dict):
         if result.get("error"):
@@ -92,10 +91,6 @@ class TodayScreen(LazyRebuild, QWidget):
         bv.addWidget(self.brief_off)
         self.brief_panel.hide()
         self.lay.addWidget(self.brief_panel)
-
-        if self.state.manabi_due:
-            self.lay.addWidget(self._manabi())
-            self.lay.addSpacing(14)
 
         # three columns ---------------------------------------------------
         grid = QWidget()
@@ -201,17 +196,6 @@ class TodayScreen(LazyRebuild, QWidget):
         self.state.view_requested.emit("mail")
 
     # ---- Lumen extras -----------------------------------------------------
-    def _manabi(self) -> QWidget:
-        """Study nudge: a single accent-soft strip, dismissible by acting on it."""
-        f = QFrame()
-        f.setProperty("role", "panel")
-        row = hbox(f, (14, 10, 14, 10), 10)
-        row.addWidget(Dot(6, T.WARN))
-        row.addWidget(label("Japanese reviews are due in Manabi.", 13.5,
-                            T.TEXT_BODY))
-        row.addStretch(1)
-        return f
-
     def _commitments(self, suggestions: list[dict]) -> QWidget:
         """Commitments Lumen spotted in sent mail, each accept/dismiss."""
         w = QWidget()

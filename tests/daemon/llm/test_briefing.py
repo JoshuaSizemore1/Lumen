@@ -107,17 +107,10 @@ async def test_compose_streams_and_carries_sections():
     assert s in llm.messages[1]["content"]
 
 
-def test_manabi_nudge_appears_in_todos_section():
-    s = sections(manabi_due=True)
-    assert "Japanese reviews" in s
-    s_none = sections(todos=[], manabi_due=True)
-    assert "Japanese reviews" in s_none
-    assert "No todos due." not in s_none            # the nudge IS a due item
-
-
-def test_no_nudge_when_done_or_unconfigured():
-    assert "Japanese" not in sections(manabi_due=False)
+def test_briefing_has_no_manabi_nudge():
+    # todo-fixes #70: the Japanese-review nudge was removed from the daily view.
     assert "Japanese" not in sections()
+    assert "No todos due." in sections(todos=[])
 
 
 def test_build_sections_includes_canvas_announcements():

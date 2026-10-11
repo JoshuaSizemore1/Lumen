@@ -3418,42 +3418,14 @@ async def test_notes_chat_without_store_falls_through():
     assert [e for e in out if "chunk" in e] == [{"chunk": "plain"}]
 
 
-# ---- Manabi nudge (Phase 8 feature 8) ----
+# ---- Manabi nudge (Phase 8 feature 8) — removed ----
 
-class FakeManabi:
-    def __init__(self, due=True, configured=True):
-        self._due = due
-        self._configured = configured
+# Removed by todo-fixes #70 (2026-10-11): neither the route nor the briefing
+# line exists any more.
 
-    def status(self, now=None):
-        if not self._configured:
-            return {"configured": False, "due": None, "last_review": None}
-        return {"configured": True, "due": self._due,
-                "last_review": None if self._due else "2026-07-14T08:00:00-06:00"}
-
-
-async def test_manabi_status_one_shot():
-    router = Router(FakeLLM(), FakeStore(), manabi=FakeManabi(due=True))
-    out = await collect(router, "manabi.status", {})
-    assert out == [{"result": {"configured": True, "due": True,
-                               "last_review": None}}]
-
-
-async def test_manabi_status_without_connector_is_unconfigured():
-    out = await collect(Router(FakeLLM(), FakeStore()), "manabi.status", {})
-    assert out[0]["result"]["configured"] is False
-
-
-async def test_briefing_carries_manabi_nudge():
+async def test_briefing_has_no_manabi_nudge():
     llm = FakeLLM(chunks=("ok",))
-    router = Router(llm, FakeStore(), manabi=FakeManabi(due=True))
-    await collect(router, "chat", {"message": "brief me"})
-    assert "Japanese reviews" in llm.messages[-1]["content"]
-
-
-async def test_briefing_no_nudge_when_done():
-    llm = FakeLLM(chunks=("ok",))
-    router = Router(llm, FakeStore(), manabi=FakeManabi(due=False))
+    router = Router(llm, FakeStore())
     await collect(router, "chat", {"message": "brief me"})
     assert "Japanese reviews" not in llm.messages[-1]["content"]
 

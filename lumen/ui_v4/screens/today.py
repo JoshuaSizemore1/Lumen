@@ -9,7 +9,6 @@ Keeps everything the ui_v3 Today screen did:
 - a link from each column to its full screen
 - the morning briefing on request, with the model-off notice when the
   local model is switched off (also when the daemon answers model_off)
-- the Manabi study nudge (state.refresh_manabi on every visit)
 - commitments spotted in your sent mail: add as a todo, dismiss, rescan
 - mail sync status
 - repaints live on todos_changed, mails_changed and suggestions_changed
@@ -29,7 +28,7 @@ from PyQt6.QtWidgets import QBoxLayout, QWidget
 from .. import theme as T
 from ..components import (
     Badge, Button, Card, ClickRow, Divider, Dot, ElideLabel, EmptyState,
-    Eyebrow, Heading, IconButton, IconLabel, Label, ModelOffNotice, Panel,
+    Eyebrow, Heading, IconButton, IconLabel, Label, ModelOffNotice,
     ScreenHeader, ScrollArea, SkeletonRow, TypingDots, clear_layout,
     fire_on_next_tick, hbox, vbox,
 )
@@ -152,7 +151,6 @@ class TodayScreen(QWidget):
             if mine == self._ev_req:
                 self._on_events(result or {})
         self.state.sync_calendar(today, today, done)
-        self.state.refresh_manabi()
 
     def refresh(self):
         self.on_shown()
@@ -259,8 +257,6 @@ class TodayScreen(QWidget):
         self._sync_badge()
         clear_layout(self.live)
 
-        if self.state.manabi_due:
-            self.live.addWidget(self._manabi())
         self.live.addWidget(self._up_next())
 
         host = QWidget()
@@ -303,15 +299,6 @@ class TodayScreen(QWidget):
                     pass
         self.sync_badge.set_kind(kind, text)
         self.sync_badge.setAccessibleName(text)
-
-    def _manabi(self) -> QWidget:
-        p = Panel(padding=T.S4, spacing=0)
-        p.lay.setDirection(QBoxLayout.Direction.LeftToRight)
-        p.lay.setSpacing(T.S3)
-        p.lay.addWidget(Badge("warn", "Due"), 0, Qt.AlignmentFlag.AlignVCenter)
-        p.lay.addWidget(Label("Your Japanese reviews are due in Manabi.",
-                              "body", wrap=True), 1)
-        return p
 
     def _up_next(self) -> QWidget:
         card = Card(padding=T.S5, spacing=T.S3)

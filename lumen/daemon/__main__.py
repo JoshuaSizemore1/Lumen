@@ -22,7 +22,6 @@ from lumen.daemon.connectors.email_menu import EmailStore, GmailSync
 from lumen.daemon.connectors.mail_rules import RuleStore
 from lumen.daemon.connectors.gcal import (CalendarMarkerWriter, CalendarSync,
                                           EventStore)
-from lumen.daemon.connectors.manabi import ManabiStatus
 from lumen.daemon.connectors.memory_log import MemoryLog
 from lumen.daemon.connectors.notes import NotesStore
 from lumen.daemon.connectors.procedures import ProcedureStore
@@ -119,7 +118,6 @@ async def run() -> None:
                         lambda texts: llm.embed(texts, cfg.notes.embed_model),
                         cfg.notes.folder, cfg.notes.embed_model),
                     write_dir=cfg.notes.write_dir or cfg.notes.folder,
-                    manabi=ManabiStatus(cfg.manabi.db_path),
                     memory=memory_log, memory_path=cfg.memory_path,
                     memory_cap=cfg.memory.blob_cap_chars,
                     procedures=procedures,
