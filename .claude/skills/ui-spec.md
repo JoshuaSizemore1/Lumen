@@ -85,9 +85,10 @@ any v4 screen, and update it when you add or change behaviour.
   calendar's); the legend uses calendar colours. Out-of-month days are muted
   text on the same ground. The edit dialog accepts 24:00 and reads an end at
   or before the start as the next day.
-- **Canvas:** once a login is saved, the "Save this login?" card appears only
-  when a password was actually captured and differs from the stored one (a
-  missed capture or uNID case never re-asks, #67). Canvas settings' Change /
+- **Canvas:** once a login is saved, the "Save this login?" card never opens
+  on its own — not even for a captured password that differs, which the 1 Hz
+  poll often half-reads (#67). With nothing saved it is offered once per typed
+  login; "Not now" doesn't return on the next page. Canvas settings' Change /
   Save a login button opens the card on purpose (uNID prefilled, password
   empty, no "Never").
 - **Settings:** all three answer modes are explained; Canvas Connect starts

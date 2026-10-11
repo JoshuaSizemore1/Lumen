@@ -235,11 +235,6 @@ def _set_never_save(on: bool) -> None:
     QSettings(*_PREFS).setValue("canvas/never_save", bool(on))
 
 
-def _same_unid(captured: str, stored: str) -> bool:
-    """A missing capture agrees with anything; uNIDs ignore case."""
-    return not captured or captured.strip().casefold() == stored.strip().casefold()
-
-
 # ---- "Save this login?" -------------------------------------------------------
 class SaveLoginCard(QFrame):
     """Chrome's "Save password?" bubble in Field Notes. The fields are
@@ -1414,28 +1409,23 @@ class CanvasScreen(QWidget):
             return
         u = self._pending_creds.get("u") or ""
         pw = self._pending_creds.get("p") or ""
+        # One offer per typed login. Canvas re-sets its cookies as you click
+        # around and each change lands here, so a leftover capture brought a
+        # dismissed card straight back.
+        self._pending_creds = {"u": "", "p": ""}
         if not u and not pw:
             # Nothing was typed this time: the session came back from the
             # stored cookies, so there's no login to offer to save (L11).
             return
-        existing = None
-        try:
-            existing = canvas_creds.load()
-        except Exception:
-            log.exception("canvas keyring read failed")
-        if existing and (not pw or (_same_unid(u, existing[0])
-                                    and pw == existing[1])):
-            # A login is already saved and nothing new was read: either the
-            # stored values again, or a re-login whose password the poll
-            # missed (it usually is, once CAS hands off to Duo). Asking on
-            # every Browse was #67; changing it on purpose is the Canvas
-            # settings button's job.
+        if canvas_creds.has_saved() or canvas_creds.load():
+            # Once a login is saved, never ask on our own (#67) — changing it
+            # is the Canvas settings button's job. A captured password that
+            # "differs" is no signal: the 1 Hz poll often holds a half-typed
+            # one when the page leaves for Duo before the next read.
             return
-        if existing and not u:
-            u = existing[0]
         note = ("Lumen couldn't read the password from the page. Type it here "
                 "and it will be saved." if not pw else "")
-        self._show_save_card(u, pw, updating=bool(existing), note=note)
+        self._show_save_card(u, pw, note=note)
 
     def _edit_saved_login(self):
         """Save or change the login on purpose, from Canvas settings."""

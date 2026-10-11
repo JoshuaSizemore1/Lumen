@@ -119,21 +119,39 @@ def saved_login(monkeypatch):
     {"u": "U1234567", "p": ""},     # uNIDs ignore case
     {"u": "u1234567", "p": "s3cret"},
     {"u": "", "p": "s3cret"},
+    {"u": "u1234567", "p": "s3c"},  # #67 again: a typed password, half-read
+    {"u": "someone", "p": "other"},
 ])
-def test_a_saved_login_is_not_asked_about_on_every_browse(canvas, saved_login,
-                                                          captured):
+def test_a_saved_login_is_never_asked_about_again(canvas, saved_login,
+                                                  captured):
+    """Once saved, the card only opens from Canvas settings (Josh, #67)."""
     win, scr = canvas
     scr._pending_creds = captured
     scr._maybe_save_login()
     assert scr._save_card is None
 
 
-def test_a_new_password_still_offers_an_update(canvas, saved_login):
+def test_a_failed_keyring_read_still_counts_as_saved(canvas, saved_login,
+                                                     monkeypatch):
     win, scr = canvas
-    scr._pending_creds = {"u": "u1234567", "p": "changed"}
+    monkeypatch.setattr(canvas_mod.canvas_creds, "load", lambda: None)
+    scr._pending_creds = {"u": "u1234567", "p": "s3cret"}
     scr._maybe_save_login()
-    assert scr._save_card is not None
-    assert scr._save_card.values() == ("u1234567", "changed")
+    assert scr._save_card is None
+
+
+def test_not_now_doesnt_come_back_on_the_next_page(canvas, saved_login):
+    """Canvas re-sets its cookies as you click around, and each change re-ran
+    the offer with the same leftover capture."""
+    win, scr = canvas
+    saved_login["creds"] = None
+    scr._pending_creds = {"u": "u1234567", "p": "s3cret"}
+    scr._maybe_save_login()
+    assert scr._save_card.values() == ("u1234567", "s3cret")
+    scr._save_card._dismiss("not_now")
+    assert scr._save_card is None
+    scr._maybe_save_login()                 # the next cookie change
+    assert scr._save_card is None
 
 
 def test_settings_can_change_the_saved_login_on_purpose(canvas, saved_login):

@@ -243,8 +243,7 @@ class SaveLoginCard(QFrame):
     recovers.
     """
 
-    def __init__(self, parent, unid: str, password: str, *,
-                 updating: bool = False, note: str = ""):
+    def __init__(self, parent, unid: str, password: str, *, note: str = ""):
         super().__init__(parent)
         self.setProperty("role", "panel")
         self.setAutoFillBackground(True)
@@ -253,8 +252,7 @@ class SaveLoginCard(QFrame):
         self._on_dismiss = None
 
         v = vbox(self, (16, 14, 16, 14), 8)
-        v.addWidget(label("Update saved password?" if updating
-                          else "Save this login?", 14, T.TEXT_PRIMARY, 600))
+        v.addWidget(label("Save this login?", 14, T.TEXT_PRIMARY, 600))
         v.addWidget(label(
             "Kept in your system keyring, on this machine. Lumen fills it in "
             "for you next time; it never leaves your computer.",
@@ -1292,30 +1290,20 @@ class CanvasScreen(QWidget):
             return
         u = self._pending_creds.get("u") or ""
         pw = self._pending_creds.get("p") or ""
-        existing = None
-        try:
-            existing = canvas_creds.load()
-        except Exception:
-            log.exception("canvas keyring read failed")
-        if existing and (not pw or (
-                (not u or u.strip().casefold() == existing[0].strip().casefold())
-                and pw == existing[1])):
-            # Already stored, and nothing new was read: the same values, or a
-            # re-login whose password the poll missed (#67).
+        if canvas_creds.has_saved() or canvas_creds.load():
+            # Once a login is saved, never ask on our own (#67) — Forget it to
+            # sign in fresh. A captured password that "differs" is no signal:
+            # the 1 Hz poll often holds a half-typed one.
             return
-        if existing and not u:
-            u = existing[0]
         note = ""
         if not pw:
             note = ("Lumen couldn't read the password from this page — type it "
                     "here and it will be saved.")
-        self._show_save_card(u, pw, updating=bool(existing), note=note)
+        self._show_save_card(u, pw, note=note)
 
-    def _show_save_card(self, unid: str, password: str, *,
-                        updating: bool = False, note: str = ""):
+    def _show_save_card(self, unid: str, password: str, *, note: str = ""):
         self._dismiss_save_card()
-        card = SaveLoginCard(self._host, unid, password,
-                             updating=updating, note=note)
+        card = SaveLoginCard(self._host, unid, password, note=note)
         card.on_save(self._save_login_from_card)
         card.on_dismiss(self._on_save_card_dismissed)
         self._save_card = card

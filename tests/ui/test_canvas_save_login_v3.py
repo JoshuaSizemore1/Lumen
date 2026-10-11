@@ -134,12 +134,24 @@ def test_the_password_is_masked_with_a_reveal_toggle(qtbot, keyring):
 
 
 # ---- update vs. save -------------------------------------------------------
-def test_a_changed_password_offers_an_update(qtbot, keyring):
+def test_a_different_password_is_not_asked_about_either(qtbot, keyring):
+    """Once saved, never asked again on its own (Josh, #67): a hand-typed
+    password is often only half-read, so "differs" was not a real change."""
     keyring["creds"] = ("u1234567", "old")
     screen = _screen(qtbot)
     screen._pending_creds = {"u": "u1234567", "p": "new"}
     screen._maybe_save_login()
-    assert "Update saved password?" in _text(_card(screen))
+    assert _card(screen) is None
+
+
+def test_a_failed_keyring_read_still_counts_as_saved(qtbot, keyring,
+                                                     monkeypatch):
+    keyring["creds"] = ("u1234567", "same")
+    monkeypatch.setattr(canvas_creds, "load", lambda: None)
+    screen = _screen(qtbot)
+    screen._pending_creds = {"u": "u1234567", "p": "s3cret"}
+    screen._maybe_save_login()
+    assert _card(screen) is None
 
 
 def test_an_unchanged_login_is_not_asked_about_again(qtbot, keyring):
