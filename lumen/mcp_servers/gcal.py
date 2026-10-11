@@ -55,7 +55,13 @@ def _format_event(item: dict, calendar_name: str) -> str:
         if end.get("dateTime"):
             when += f"–{datetime.fromisoformat(end['dateTime']).astimezone().strftime('%H:%M')}"
     loc = f" at {item['location']}" if item.get("location") else ""
-    return f"- {when}: {item.get('summary', 'Untitled')} [{calendar_name}]{loc}"
+    # Mark declined/transparent so the model doesn't count them as busy (#125)
+    attendees = item.get("attendees", [])
+    self_rsvp = next((a.get("responseStatus") for a in attendees if a.get("self")), None)
+    note = (" (declined)" if self_rsvp == "declined"
+            else " (marked free)" if item.get("transparency") == "transparent"
+            else "")
+    return f"- {when}: {item.get('summary', 'Untitled')}{note} [{calendar_name}]{loc}"
 
 
 def _collect(service, time_min: str, time_max: str, q: str | None) -> list[str]:

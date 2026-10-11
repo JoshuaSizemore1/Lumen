@@ -50,6 +50,21 @@ def test_events_formatted_timed_and_all_day():
     assert "all day: PTO" in s
 
 
+def test_an_event_that_began_yesterday_isnt_listed_as_starting_today(set_tz):
+    """#113: the cache now hands over events still running from an earlier
+    day; "22:00–02:00" under CALENDAR TODAY read as tonight's party."""
+    set_tz("America/Denver")
+    party = dict(EVENT, title="Party", location=None,
+                 start_at="2026-07-12T22:00:00-06:00",
+                 end_at="2026-07-13T02:00:00-06:00")
+    trip = dict(EVENT, title="Trip", location=None,
+                start_at="2026-07-11T18:00:00-06:00",
+                end_at="2026-07-15T12:00:00-06:00")
+    s = sections(events=[party, trip])
+    assert "until 02:00 (started Sun 22:00): Party" in s
+    assert "all day (started Sat 18:00): Trip" in s
+
+
 def test_overdue_todos_flagged_distinctly_from_due_today():
     s = sections()
     assert "buy milk (due today) [errands]" in s

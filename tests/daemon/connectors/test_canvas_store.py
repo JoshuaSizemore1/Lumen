@@ -88,7 +88,8 @@ def _seed_reconcile(store):
                           {"id": 9, "name": "OLD", "course_code": "OLD"}])
     store.deactivate_courses_except([1])   # course 9 concluded
     store.upsert_assignments([
-        {"id": 10, "course_id": 1, "name": "HW1", "due_at": "2026-09-01T06:59:59Z",
+        # Far-future date so the pending_markers past-due filter never skips it.
+        {"id": 10, "course_id": 1, "name": "HW1", "due_at": "2027-09-01T06:59:59Z",
          "points": 100.0, "html_url": "u", "description": None, "submitted": False},
         {"id": 99, "course_id": 9, "name": "OLD HW", "due_at": None, "points": None,
          "html_url": None, "description": None, "submitted": False}])
@@ -115,10 +116,10 @@ def test_pending_markers_create_then_update(tmp_path):
     pend = s.pending_markers([1])
     assert [p["id"] for p in pend] == [10]
     assert pend[0]["action"] == "create"
-    s.set_calendar_marker(10, "evt_1", "2026-09-01")
+    s.set_calendar_marker(10, "evt_1", "2027-09-01")
     assert s.pending_markers([1]) == []
     s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
-                           "due_at": "2026-09-05T06:59:59Z", "points": 100.0,
+                           "due_at": "2027-09-05T06:59:59Z", "points": 100.0,
                            "html_url": "u", "description": None, "submitted": False}])
     pend = s.pending_markers([1])
     assert pend[0]["id"] == 10 and pend[0]["action"] == "update"
@@ -132,7 +133,7 @@ def test_pending_markers_skip_events_owned_by_the_calendar_sync(tmp_path):
     # "Add to calendar" would patch_all_day it into a flat all-day block.
     s = make_store(tmp_path); _seed_reconcile(s)
     s.link_todo(10, 55, "2026-07-21T09:00:00")
-    s.set_calendar_event(10, "evt_sync", "timed", "2026-09-01T05:59:59", "sig")
+    s.set_calendar_event(10, "evt_sync", "timed", "2027-09-01T05:59:59", "sig")
     assert s.pending_markers([1]) == []
     # Clearing the sync's link hands the assignment back to the marker path.
     s.clear_calendar_event(10)
@@ -177,7 +178,8 @@ def test_archive_hides_assignments_but_keeps_rows(tmp_path):
     assert next(a for a in kept if a["id"] == 10)["todo_id"] == 55
     # Un-archiving brings it straight back with the link intact.
     s.set_course_included(1, True)
-    assert [a["id"] for a in s.active_assignments()] == [10, 11]
+    # Order: 11 (2026-09-08) before 10 (2027-09-01) due_at ASC.
+    assert {a["id"] for a in s.active_assignments()} == {10, 11}
 
 
 def test_archive_hides_announcements_but_absent_course_still_shows(tmp_path):
@@ -208,7 +210,8 @@ def test_dismiss_assignment_hides_but_keeps_row_and_undo_restores(tmp_path):
     assert kept["dismissed"] == 1 and kept["todo_id"] == 55
     # Undo restores it.
     s.set_assignment_dismissed(10, False)
-    assert [a["id"] for a in s.active_assignments()] == [10, 11]
+    # Order: 11 (2026-09-08) before 10 (2027-09-01) due_at ASC.
+    assert {a["id"] for a in s.active_assignments()} == {10, 11}
 
 
 def test_dismiss_survives_resync(tmp_path):
@@ -237,10 +240,14 @@ def test_dismiss_announcement_hides_and_undo_restores(tmp_path):
 
 
 def test_announcement_classification_roundtrip(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from lumen.daemon.connectors.canvas_store import ANNOUNCEMENT_CUTOFF_DAYS
     s = make_store(tmp_path)
     s.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])
+    # Use a recent date so the cutoff filter (todo-fixes #137) doesn't suppress it.
+    recent = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     s.upsert_announcements([{"id": 5, "course_id": 1, "title": "Exam moved",
-                             "posted_at": "2026-08-20T00:00:00Z",
+                             "posted_at": recent,
                              "message": "midterm now Friday", "html_url": "a"}])
     assert [a["id"] for a in s.unclassified_announcements(10)] == [5]
     s.set_announcement_flag(5, 1, '{"text": "Study", "due": "2026-08-28"}')
@@ -249,3 +256,135 @@ def test_announcement_classification_roundtrip(tmp_path):
     assert a["actionable"] == 1 and a["seen"] == 1
     s.link_announcement_todo(5, 77)
     assert s.get_announcement(5)["todo_id"] == 77
+
+
+# --- #127: gone assignments leave active_assignments + todo cleanup -----------
+
+def test_gone_assignments_excluded_from_active_assignments(tmp_path):
+    """todo-fixes #127: once missing_syncs reaches GONE_STREAK the assignment
+    drops out of active_assignments(), the tab, reconcile, and pending_markers."""
+    from lumen.daemon.connectors.canvas_events import GONE_STREAK
+
+    s = make_store(tmp_path)
+    s.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": "2026-11-01T06:59:59Z", "points": 10.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    assert len(s.active_assignments()) == 1
+
+    # Increment missing_syncs to the streak threshold.
+    with s._conn:
+        s._conn.execute("UPDATE canvas_assignments SET missing_syncs = ? WHERE id = 10",
+                        (GONE_STREAK,))
+    assert s.active_assignments() == []         # excluded as gone
+
+    # Re-appearing resets missing_syncs to 0.
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": "2026-11-01T06:59:59Z", "points": 10.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    assert len(s.active_assignments()) == 1     # back in the list
+
+
+def test_gone_linked_assignments_returns_streak_with_todo(tmp_path):
+    """todo-fixes #127: gone_linked_assignments picks up exactly the rows that
+    need cleanup — streak reached, linked, not handled."""
+    from lumen.daemon.connectors.canvas_events import GONE_STREAK
+
+    s = make_store(tmp_path)
+    s.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": None, "points": None,
+                           "html_url": "u", "description": None, "submitted": False},
+                          {"id": 11, "course_id": 1, "name": "HW2",
+                           "due_at": None, "points": None,
+                           "html_url": "u", "description": None, "submitted": False}])
+    s.link_todo(10, 55, "2026-07-21T09:00:00")   # linked
+    # Only assignment 10 hits the streak; 11 is below it.
+    with s._conn:
+        s._conn.execute("UPDATE canvas_assignments SET missing_syncs = ? WHERE id = 10",
+                        (GONE_STREAK,))
+    gone = s.gone_linked_assignments()
+    assert [g["id"] for g in gone] == [10]
+
+
+def test_unlink_todo_clears_link_without_handled(tmp_path):
+    """todo-fixes #127: unlink_todo clears todo_id but leaves handled=0 so the
+    assignment can link a new todo if it reappears."""
+    s = make_store(tmp_path)
+    s.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": None, "points": None,
+                           "html_url": "u", "description": None, "submitted": False}])
+    s.link_todo(10, 55, "2026-07-21T09:00:00")
+    s.unlink_todo(10)
+    row = next(a for a in s.assignments(course_id=1) if a["id"] == 10)
+    assert row["todo_id"] is None
+    assert row["handled"] == 0   # not handled — a reappearance can link again
+
+
+def test_gone_assignment_cleanup_deletes_untouched_todo(tmp_path):
+    """todo-fixes #127: cleanup_gone_todos deletes the todo when it's untouched."""
+    import json
+    from lumen.daemon.connectors.canvas_events import GONE_STREAK
+    from lumen.daemon.connectors.canvas_reconcile import reconcile_todos, cleanup_gone_todos
+    from lumen.daemon.connectors.todos import TodoStore
+    from lumen.daemon import db
+
+    conn = db.connect(tmp_path / "g.db")
+    s = CanvasStore(conn)
+    todos = TodoStore(conn)
+    s.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": "2026-11-01T06:59:59Z", "points": 10.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    # Reconcile creates the todo.
+    reconcile_todos(s, todos)
+    row = next(a for a in s.assignments(course_id=1) if a["id"] == 10)
+    assert row["todo_id"] is not None
+    tid = row["todo_id"]
+
+    # Simulate the assignment going missing for GONE_STREAK passes.
+    with s._conn:
+        s._conn.execute("UPDATE canvas_assignments SET missing_syncs = ? WHERE id = 10",
+                        (GONE_STREAK,))
+    report = cleanup_gone_todos(s, todos)
+    assert report["gone_deleted"] == 1
+    assert report["gone_unlinked"] == 0
+    # Todo was deleted.
+    assert not todos.exists(tid)
+    # Assignment is unlinked (not handled).
+    row2 = next(a for a in s.assignments(course_id=1) if a["id"] == 10)
+    assert row2["todo_id"] is None and row2["handled"] == 0
+
+
+def test_gone_assignment_cleanup_preserves_edited_todo(tmp_path):
+    """todo-fixes #127: cleanup_gone_todos unlinks but keeps a user-edited todo."""
+    from lumen.daemon.connectors.canvas_events import GONE_STREAK
+    from lumen.daemon.connectors.canvas_reconcile import reconcile_todos, cleanup_gone_todos
+    from lumen.daemon.connectors.todos import TodoStore
+    from lumen.daemon import db
+
+    conn = db.connect(tmp_path / "ge.db")
+    s = CanvasStore(conn)
+    todos = TodoStore(conn)
+    s.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])
+    s.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
+                           "due_at": "2026-11-01T06:59:59Z", "points": 10.0,
+                           "html_url": "u", "description": None, "submitted": False}])
+    reconcile_todos(s, todos)
+    row = next(a for a in s.assignments(course_id=1) if a["id"] == 10)
+    tid = row["todo_id"]
+    # User edits the todo text.
+    todos.update(tid, text="My custom text for HW1")
+
+    with s._conn:
+        s._conn.execute("UPDATE canvas_assignments SET missing_syncs = ? WHERE id = 10",
+                        (GONE_STREAK,))
+    report = cleanup_gone_todos(s, todos)
+    assert report["gone_unlinked"] == 1
+    assert report["gone_deleted"] == 0
+    # Todo was kept (user edited it).
+    assert todos.exists(tid)
+    # Assignment is unlinked.
+    row2 = next(a for a in s.assignments(course_id=1) if a["id"] == 10)
+    assert row2["todo_id"] is None

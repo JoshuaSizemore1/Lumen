@@ -68,7 +68,19 @@ _NEXT_WD = re.compile(rf"\bnext\s+({_WD})\b")
 # Not a possessive ("friday's call"), straight or curly apostrophe (#98).
 _NOT_POSSESSIVE = r"(?![\x27’]s)"
 _BARE_WD = re.compile(rf"\b(?:this\s+|on\s+|by\s+)?({_WD})\b{_NOT_POSSESSIVE}")
-_IN_N = re.compile(rf"\bin\s+(\d+|{'|'.join(_NUM_WORDS)})\s+(days?|weeks?)\b")
+_NUM_WORDS_ALT = "|".join(_NUM_WORDS)   # pre-built to avoid nested-quote issues
+_IN_N = re.compile(rf"\bin\s+(\d+|{_NUM_WORDS_ALT})\s+(days?|weeks?)\b")
+
+# todo-fixes #118: "the friday after next" and "a week from today" shapes.
+# "the X after next" = next week's X + 7 more days (consistent with the
+# "next X = next week's X" convention already used for _NEXT_WD).
+_AFTER_NEXT_WD = re.compile(rf"\bthe\s+({_WD})\s+after\s+next\b", re.IGNORECASE)
+# "N days/weeks from today/tomorrow/a-weekday" — anchored at an explicit point.
+_NUM_WORDS_RE = "|".join(sorted(_NUM_WORDS, key=len, reverse=True))
+_N_FROM = re.compile(
+    rf"\b(\d+|{_NUM_WORDS_RE})\s+(days?|weeks?)\s+from\s+"
+    rf"(today|tonight|tomorrow|{_WD})\b",
+    re.IGNORECASE)
 
 # ---- month / year arithmetic ------------------------------------------------
 # The weekday patterns above never look further than a few weeks out, so
@@ -190,12 +202,36 @@ def resolve_relative_phrase(text: str, today: date) -> tuple[date, str] | None:
     """(resolved date, matched phrase) for the one relative date in `text`,
     or None. Bails when several weekdays are named (not one resolvable date).
     Convention: bare/'this' weekday = the coming occurrence (today counts);
-    'next <weekday>' = that weekday of NEXT week, even said on the same day."""
+    'next <weekday>' = that weekday of NEXT week, even said on the same day.
+
+    When a non-possessive tomorrow/today appears BEFORE a bare weekday, the
+    earlier phrase wins (leftmost date, todo-fixes #118)."""
     t = text.lower()
     # Month phrasing is more specific than a weekday ("Wednesday March 5th"
     # names one date; the weekday is corroboration), so it resolves first.
     if month := _resolve_month_phrase(t, today):
         return month
+    # "the friday after next" — two Fridays out, consistent with the convention
+    # that "next friday" = next week's Friday (todo-fixes #118).
+    if m := _AFTER_NEXT_WD.search(t):
+        wd = _FULL_WEEKDAYS[m.group(1).lower()]
+        return today + timedelta(days=14 - today.weekday() + wd), m.group(0)
+    # "N days/weeks from today/tomorrow/a-weekday" (todo-fixes #118).
+    if m := _N_FROM.search(t):
+        n_str, unit, anchor = (m.group(1).lower(), m.group(2).lower(),
+                                m.group(3).lower())
+        n = int(n_str) if n_str.isdigit() else _NUM_WORDS[n_str]
+        days = n * (7 if unit.startswith("week") else 1)
+        if anchor in ("today", "tonight"):
+            anchor_d = today
+        elif anchor == "tomorrow":
+            anchor_d = today + timedelta(days=1)
+        elif anchor in _FULL_WEEKDAYS:
+            wd = _FULL_WEEKDAYS[anchor]
+            anchor_d = today + timedelta(days=(wd - today.weekday()) % 7)
+        else:
+            anchor_d = today
+        return anchor_d + timedelta(days=days), m.group(0)
     if len({_FULL_WEEKDAYS[m.group(1)] for m in _BARE_WD.finditer(t)}) > 1:
         return None
     for pat in (_NEXT_WEEK_ON, _ON_NEXT_WEEK, _NEXT_WD):
@@ -204,6 +240,16 @@ def resolve_relative_phrase(text: str, today: date) -> tuple[date, str] | None:
             return today + timedelta(days=7 - today.weekday() + wd), m.group(0)
     if m := _BARE_WD.search(t):
         wd = _FULL_WEEKDAYS[m.group(1)]
+        wd_pos = m.start()
+        # If a non-possessive tomorrow/today appears earlier, take that instead
+        # (leftmost-date rule: "dinner tomorrow before the recital on friday"
+        # names the dinner for tomorrow, not the recital's date; todo-fixes #118).
+        if m2 := re.search(rf"\btomorrow\b{_NOT_POSSESSIVE}", t):
+            if m2.start() < wd_pos:
+                return today + timedelta(days=1), m2.group(0)
+        if m2 := re.search(rf"\b(?:today|tonight)\b{_NOT_POSSESSIVE}", t):
+            if m2.start() < wd_pos:
+                return today, m2.group(0)
         return today + timedelta(days=(wd - today.weekday()) % 7), m.group(0)
     if m := _IN_N.search(t):
         n = int(m.group(1)) if m.group(1).isdigit() else _NUM_WORDS[m.group(1)]
@@ -262,8 +308,10 @@ def parse_todo_input(raw: str, today: date) -> tuple[str, str | None, list[str]]
                 at_due = d
                 continue
         elif m := _TAG_RE.fullmatch(word):
-            tag = m.group(1).lower()
-            if tag not in tags:
+            # Preserve case (like the edit path); dedupe case-insensitively,
+            # first spelling wins (todo-fixes #123).
+            tag = m.group(1)
+            if tag.casefold() not in (t.casefold() for t in tags):
                 tags.append(tag)
             continue
         words.append(word)

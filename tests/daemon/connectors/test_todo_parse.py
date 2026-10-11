@@ -56,9 +56,11 @@ def test_leap_day_rolls_to_next_leap_year():
     assert due == "2028-02-29" and text == "x"
 
 
-def test_tags_lowercased_deduped_stripped():
+def test_tags_case_preserved_deduped_stripped():
+    # todo-fixes #123: quick-add preserves tag case (like the edit path);
+    # dedup is case-insensitive, first spelling wins.
     text, _, tags = parse("Renew domain #Admin #admin #work")
-    assert tags == ["admin", "work"] and text == "Renew domain"
+    assert tags == ["Admin", "work"] and text == "Renew domain"
 
 
 def test_case_insensitive_dates():
@@ -280,3 +282,82 @@ def test_plain_phrase_does_not_affect_at_tokens():
     assert parse("x @fri")[1] == "2026-07-10"
     assert parse("x @2026-07-12")[1] == "2026-07-12"
     assert parse("email @priya about sync") == ("email @priya about sync", None, [])
+
+
+# ---- todo-fixes #118: "a week from today" and "the friday after next" --------
+# Fixed today = Wednesday 2026-07-08; WED = 2026-07-15.
+
+def test_a_week_from_today():
+    assert parse("call dentist a week from today")[1] == "2026-07-15"
+
+
+def test_two_weeks_from_today():
+    # WED = July 8; +14 days = July 22
+    assert resolve_relative_phrase("in two weeks from today", WED)[0] == date(2026, 7, 29)
+    # "two weeks from today" without "in"
+    assert resolve_relative_phrase("two weeks from today", WED)[0] == date(2026, 7, 29)
+
+
+def test_a_week_from_tomorrow():
+    # WED Jul 15: tomorrow = Jul 16, +7 = Jul 23
+    assert resolve_relative_phrase("a week from tomorrow", WED)[0] == date(2026, 7, 23)
+
+
+def test_n_days_from_anchor():
+    # "3 days from friday" from WED Jul 15: bare Friday = Jul 17, +3 = Jul 20
+    assert resolve_relative_phrase("3 days from friday", WED)[0] == date(2026, 7, 20)
+    # "a week from friday" from WED Jul 15: bare Friday = Jul 17, +7 = Jul 24
+    assert resolve_relative_phrase("a week from friday", WED)[0] == date(2026, 7, 24)
+
+
+def test_the_friday_after_next():
+    # WED Jul 15: next Friday = Jul 24 (formula: 7-2+4=9); the Friday after = Jul 31
+    assert resolve_relative_phrase("the friday after next", WED)[0] == date(2026, 7, 31)
+    # said on a Friday (wd=4): next Friday = +7; the one after = +14
+    fri = date(2026, 7, 17)
+    assert resolve_relative_phrase("schedule the tuesday after next", fri)[0] == date(2026, 7, 28)
+
+
+def test_the_friday_after_next_from_friday():
+    fri = date(2026, 7, 17)   # a Friday
+    assert resolve_relative_phrase("the friday after next", fri)[0] == date(2026, 7, 31)
+
+
+# ---- todo-fixes #118: leftmost-date rule (multi-date messages) ---------------
+
+def test_tomorrow_before_weekday_picks_tomorrow():
+    # "dinner tomorrow before the recital on friday" → tomorrow wins (leftmost)
+    d, phrase = resolve_relative_phrase("dinner tomorrow before the recital on friday", WED)
+    assert d == date(2026, 7, 16) and "tomorrow" in phrase
+
+
+def test_parse_todo_leftmost_tomorrow_weekday():
+    # Quick-add todo: leftmost date (tomorrow) is used for due date
+    _, due, _ = parse_todo_input(
+        "dinner tomorrow before the recital on friday", WED)
+    assert due == "2026-07-16"
+
+
+def test_weekday_before_tomorrow_picks_weekday():
+    # Weekday comes first in the text → weekday wins
+    d, phrase = resolve_relative_phrase("prep friday stuff then relax tomorrow", WED)
+    assert d == date(2026, 7, 17) and "friday" in phrase.lower()
+
+
+# ---- todo-fixes #123: quick-add preserves tag case ---------------------------
+
+def test_quick_add_tag_case_preserved():
+    _, _, tags = parse("Follow up #AbellCRM #admin")
+    # first occurrence wins, case preserved; duplicate dropped case-insensitively
+    assert tags[0] == "AbellCRM"
+    assert "admin" in tags
+
+
+def test_quick_add_tag_case_dedup_case_insensitive():
+    _, _, tags = parse("Task #CRM #crm #CRM")
+    assert len(tags) == 1 and tags[0] == "CRM"
+
+
+def test_quick_add_tag_lowercase_still_works():
+    _, _, tags = parse("send report #work")
+    assert tags == ["work"]

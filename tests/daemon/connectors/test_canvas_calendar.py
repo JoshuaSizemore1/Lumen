@@ -270,6 +270,23 @@ def test_conflicts_become_alerts(bits):
     assert any("Study group" in d for d in details)
 
 
+def test_conflict_alert_is_not_duplicated_every_sync(bits):
+    """todo-fixes #130: the same conflict must not grow the alert list by one
+    entry every poll tick — CanvasAlerts.add() deduplicates unseen conflicts."""
+    store, prefs, queue, alerts = bits
+    seed(store)
+    busy = [{"id": "ext", "start_at": "2026-09-01T23:30:00-06:00",
+             "end_at": "2026-09-02T00:30:00-06:00", "all_day": 0,
+             "title": "Doctor"}]
+    for _ in range(3):
+        actions = cc.plan_calendar(store, prefs, NOW)
+        writer = FakeWriter()
+        results = cc.execute_calendar(writer, actions)
+        cc.commit_calendar(store, queue, alerts, results,
+                           ce.conflicts(actions, busy))
+    assert alerts.count() == 1      # only one unseen alert, not three
+
+
 # --- resolving a queued removal ----------------------------------------------
 def _queued(bits):
     store, prefs, queue, alerts = bits

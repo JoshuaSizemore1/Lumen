@@ -258,18 +258,72 @@ async def test_a_transient_error_KEEPS_the_persisted_session(tmp_path):
     assert sync.connected is True
 
 
-async def test_a_401_during_phase_two_also_deletes_the_session(tmp_path):
-    """The item fetch is a second, separate 401 site."""
+async def test_per_course_401_keeps_the_session_and_skips_the_course(tmp_path):
+    """todo-fixes #126: a per-course 401 is a Canvas permission error, not a
+    session expiry. The session must remain alive and the other courses still
+    sync. (The old test expected the session to die — that was the bug.)"""
 
-    class ExpiringItems(FakeClient):
+    class PartialAccess(FakeClient):
         def assignments(self, cid):
-            raise CanvasSessionExpired("assignments")
+            if cid == 1:
+                raise CanvasSessionExpired("course 1 access denied")
+            return list(self._assignments.get(cid, []))
 
-    client = ExpiringItems(courses=[{"id": 1, "name": "CS", "course_code": "CS"}])
+    courses = [{"id": 1, "name": "Locked", "course_code": "LCK"},
+               {"id": 2, "name": "Open", "course_code": "OPEN"}]
+    client = PartialAccess(
+        courses=courses,
+        assignments={2: [{"id": 20, "course_id": 2, "name": "HW1",
+                          "due_at": None, "points": None,
+                          "html_url": "u", "description": None,
+                          "submitted": False}]},
+        announcements={1: [], 2: []})
     _store, sync, path = make_persistent(tmp_path, client)
-    sync.set_session({"canvas_session": "stale"})
+    sync.set_session({"canvas_session": "good"})
+    # Sync succeeds overall despite course 1's 401.
+    assert await sync.sync_once() is True
+    # Session is still alive — it was a per-course error, not an expiry.
+    assert sync.connected is True
+    assert path.exists()
+    # Course 2's assignment was fetched normally.
+    assert [a["name"] for a in _store.assignments(course_id=2)] == ["HW1"]
+    assert sync._report["failed_courses"] == 1
+
+
+async def test_aclose_stops_a_running_sync(tmp_path):
+    """Shutdown: the shared sync task outlives the cancelled poller, so
+    aclose ends it before the database closes under it (#129)."""
+    import asyncio
+    gate = asyncio.Event()
+    _store, sync, _path = make_persistent(tmp_path, _client())
+    sync.set_session({"canvas_session": "good"})
+
+    async def stuck():
+        await gate.wait()
+        return True
+    sync._do_sync = stuck
+    waiter = asyncio.create_task(sync.sync_once())
+    await asyncio.sleep(0)
+    assert sync.busy
+    await sync.aclose()
+    assert not sync.busy
+    waiter.cancel()
+
+
+async def test_a_pass_where_no_course_answered_is_not_a_success(tmp_path):
+    """#126: per-course errors are skipped — but when every course failed,
+    nothing was pulled, and "Synced, up to date" would be a lie."""
+
+    class Down(FakeClient):
+        def assignments(self, cid):
+            raise ConnectionError("network down")
+
+    client = Down(courses=[{"id": 1, "name": "CS", "course_code": "CS"}],
+                  assignments={}, announcements={1: []})
+    _store, sync, _path = make_persistent(tmp_path, client)
+    sync.set_session({"canvas_session": "good"})
     assert await sync.sync_once() is False
-    assert not path.exists()
+    assert sync.connected is True and sync.last_sync() is None
 
 
 async def test_the_jar_that_just_401d_is_refused_on_the_way_back_in(tmp_path):
@@ -553,3 +607,169 @@ async def test_model_paused_skips_ai_enrichment(tmp_path):
                       llm=BoomLLM())
     sync.model_paused = lambda: True
     assert await sync._enrich() == {}
+
+
+async def test_exam_rescan_runs_once_in_the_next_enrichment_pass(tmp_path, monkeypatch):
+    """#134: switching AI on asks for a re-scan of recent announcements; it
+    runs inside the sync's own pass (so model-off applies), and only once."""
+    from lumen.daemon.connectors.canvas_prefs import CanvasPrefs
+    from lumen.daemon.connectors.canvas_proposals import CanvasProposals
+    from lumen.daemon.llm import canvas_enrich
+    conn = db.connect(tmp_path / "e.db")
+    store, prefs = CanvasStore(conn), CanvasPrefs(conn)
+    prefs.set_sync_enabled(True)
+    prefs.set_ai_mode(True)
+    calls = []
+
+    async def rescan(*_a, **_k):
+        calls.append(1)
+        return {"proposed": 0}
+    monkeypatch.setattr(canvas_enrich, "find_exam_dates_rescan", rescan)
+    sync = CanvasSync(store, CanvasConfig(enabled=True),
+                      client_factory=lambda: _client(), prefs=prefs,
+                      llm=object(), proposals=CanvasProposals(conn))
+    await sync._enrich()
+    assert calls == []                      # not asked for
+    sync.request_exam_rescan()
+    sync.model_paused = lambda: True
+    await sync._enrich()
+    assert calls == [] and sync._exam_rescan  # model off: still owed
+    sync.model_paused = lambda: False
+    await sync._enrich()
+    await sync._enrich()
+    assert calls == [1] and not sync._exam_rescan
+
+
+# --- #126: per-course 401 leaves session alive + errored course skipped -------
+
+async def test_errored_course_is_excluded_from_mark_missing(tmp_path):
+    """A course that errors out must not have its assignments accused of being
+    gone — only successfully fetched courses may accrue the missing streak
+    (todo-fixes #126)."""
+
+    class FailingCourse(FakeClient):
+        def assignments(self, cid):
+            if cid == 2:
+                raise OSError("network timeout")
+            return list(self._assignments.get(cid, []))
+
+    courses = [{"id": 1, "name": "A", "course_code": "A"},
+               {"id": 2, "name": "B", "course_code": "B"}]
+    asgn1 = {"id": 10, "course_id": 1, "name": "HW1", "due_at": None,
+              "points": None, "html_url": "u", "description": None, "submitted": False}
+    asgn2 = {"id": 20, "course_id": 2, "name": "HW2", "due_at": None,
+              "points": None, "html_url": "u", "description": None, "submitted": False}
+    client = FailingCourse(courses=courses,
+                           assignments={1: [asgn1], 2: [asgn2]},
+                           announcements={1: [], 2: []})
+    store, sync = make(tmp_path, client)
+    # Seed course 2's assignment via a healthy sync first.
+    good = FakeClient(courses=courses, assignments={1: [asgn1], 2: [asgn2]},
+                      announcements={1: [], 2: []})
+    sync._client_factory = lambda: good
+    await sync.sync_once()
+    assert store.assignments(course_id=2)[0]["missing_syncs"] == 0
+
+    # Next sync: course 2 errors → must NOT increment missing_syncs for course 2.
+    sync._client_factory = lambda: client
+    assert await sync.sync_once() is True    # sync still succeeds overall
+    row2 = store.assignments(course_id=2)[0]
+    assert row2["missing_syncs"] == 0        # NOT accused of being gone
+
+
+# --- #128: set_session only kicks a sync on first connect ---------------------
+# (Tested via CanvasSync.set_session + CanvasSync.connected state, since the
+#  actual kick happens in the router. The sync's _inflight mechanism is the
+#  observable signal here.)
+
+async def test_coalesced_sync_once_returns_same_result(tmp_path):
+    """todo-fixes #129: a second caller arriving mid-sync awaits the running
+    task and gets the same True result — no 'already syncing' rejection."""
+    started: list[int] = []
+
+    class SlowClient(FakeClient):
+        def courses(self, state="active"):
+            started.append(1)
+            return list(self._courses)
+
+    client = SlowClient(
+        courses=[{"id": 1, "name": "A", "course_code": "A"}],
+        assignments={1: []}, announcements={1: []})
+    store, sync = make(tmp_path, client)
+
+    # Launch two sync_once calls concurrently.
+    r1, r2 = await asyncio.gather(sync.sync_once(), sync.sync_once())
+    assert r1 is True and r2 is True
+    # Only one actual network fetch happened.
+    assert len(started) == 1
+
+
+async def test_reconcile_now_coalesces_with_running_sync(tmp_path):
+    """todo-fixes #129: reconcile_now awaits an in-flight sync rather than
+    returning 'already syncing'."""
+    from lumen.daemon.connectors.todos import TodoStore
+
+    conn = db.connect(tmp_path / "c.db")
+    store, todos = CanvasStore(conn), TodoStore(conn)
+    client = FakeClient(
+        courses=[{"id": 1, "name": "CS", "course_code": "CS"}],
+        assignments={1: [{"id": 10, "course_id": 1, "name": "HW1",
+                          "due_at": "2026-11-01T06:59:59Z", "points": 10.0,
+                          "html_url": "u", "description": None, "submitted": False}]},
+        announcements={1: []})
+    sync = CanvasSync(store, CanvasConfig(enabled=True), todos=todos,
+                      client_factory=lambda: client)
+    sync.set_session({"canvas_session": "abc"})
+
+    # Both calls must succeed and not raise.
+    r1, r2 = await asyncio.gather(sync.sync_once(), sync.reconcile_now())
+    assert r1 is True
+    assert r2["ok"] is True
+    assert r2.get("assignments") == 1   # report from the real sync
+
+
+# --- #137: announcement cutoff on classifier ----------------------------------
+
+async def test_old_announcements_are_not_offered_to_the_classifier(tmp_path):
+    """todo-fixes #137: only announcements within ANNOUNCEMENT_CUTOFF_DAYS are
+    offered to the classifier — prevents 100+ model calls on first connect."""
+    from datetime import datetime, timedelta, timezone
+    from lumen.daemon.connectors.canvas_store import ANNOUNCEMENT_CUTOFF_DAYS
+
+    store, sync = make(tmp_path, FakeClient(courses=[]))
+    # An announcement posted well outside the cutoff window.
+    old_date = (datetime.now(timezone.utc) - timedelta(days=ANNOUNCEMENT_CUTOFF_DAYS + 30)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.upsert_announcements([{"id": 1, "course_id": 1, "title": "Old exam info",
+                                 "posted_at": old_date, "message": "m", "html_url": "a"}])
+    # Old announcement: stored as actionable=0 AND filtered by cutoff query.
+    assert store.unclassified_announcements(10) == []
+
+
+async def test_recent_announcements_are_offered_to_the_classifier(tmp_path):
+    """todo-fixes #137: announcements within the cutoff window still classify."""
+    from datetime import datetime, timedelta, timezone
+    from lumen.daemon.connectors.canvas_store import ANNOUNCEMENT_CUTOFF_DAYS
+
+    store, sync = make(tmp_path, FakeClient(courses=[]))
+    recent_date = (datetime.now(timezone.utc) - timedelta(days=3)
+                   ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.upsert_announcements([{"id": 2, "course_id": 1, "title": "Quiz moved",
+                                 "posted_at": recent_date, "message": "m", "html_url": "a"}])
+    unclassified = store.unclassified_announcements(10)
+    assert len(unclassified) == 1 and unclassified[0]["id"] == 2
+
+
+async def test_old_announcement_inserted_as_non_actionable(tmp_path):
+    """todo-fixes #137: upsert_announcements pre-classifies old rows as 0 so
+    they never enter the classifier queue."""
+    from datetime import datetime, timedelta, timezone
+    from lumen.daemon.connectors.canvas_store import ANNOUNCEMENT_CUTOFF_DAYS
+
+    store, sync = make(tmp_path, FakeClient(courses=[]))
+    old_date = (datetime.now(timezone.utc) - timedelta(days=ANNOUNCEMENT_CUTOFF_DAYS + 5)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.upsert_announcements([{"id": 3, "course_id": 1, "title": "Term recap",
+                                 "posted_at": old_date, "message": "m", "html_url": "a"}])
+    ann = store.get_announcement(3)
+    assert ann["actionable"] == 0   # pre-classified, not NULL

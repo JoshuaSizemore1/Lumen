@@ -34,6 +34,7 @@ from ..components import (
 )
 from .calendar import DayColumn, day_hours, event_color, hhmm, time_range
 from .todos import TodoRow, toggle_with_undo
+from ...ui_v2.state import expand_events
 
 NARROW = 860            # content width below which the columns stack
 MAIL_SHOWN = 5
@@ -78,6 +79,7 @@ class TodayScreen(QWidget):
         self._now_col: DayColumn | None = None
         self._scanning = False
         self._pending = False
+        self._today = date.today()          # midnight-rollover guard (#115)
         # First answer from the daemon seen yet? (Until then: skeletons.)
         self._seen_todos = (not self.state.live) or bool(self.state.todos)
         self._seen_mails = (not self.state.live) or bool(self.state.mails)
@@ -136,12 +138,13 @@ class TodayScreen(QWidget):
         self.rebuild()
 
     # ---- hooks --------------------------------------------------------------
-    def on_shown(self, brief=False):
+    def on_shown(self, brief=False, resumed=False):  # noqa: ARG002
         if self._dirty:
             self.rebuild()
         if brief and self.brief_btn.isEnabled():  # command palette; not twice
             fire_on_next_tick(self._briefing)
-        today = date.today().isoformat()
+        self._today = date.today()
+        today = self._today.isoformat()
         # The Calendar screen's debounced sync (#59): the schedule here is the
         # calendar too. The debounce is shared, so both screens cost one sync.
         self._ev_req += 1
@@ -151,6 +154,11 @@ class TodayScreen(QWidget):
             if mine == self._ev_req:
                 self._on_events(result or {})
         self.state.sync_calendar(today, today, done)
+        # Refresh todos on every show so Canvas-created todos and items whose
+        # due date just became today appear without needing another screen
+        # switch. _norm_todo recalculates group against the current date.
+        # (todo-fixes #114)
+        self.state.refresh_todos()
 
     def refresh(self):
         self.on_shown()
@@ -161,7 +169,10 @@ class TodayScreen(QWidget):
         evs = self._sorted_events()
         if evs:
             lines.append("Calendar today:")
-            lines += [f"- {time_range(e)}: {e.get('title', '')}" for e in evs]
+            for e in evs:
+                suffix = " [declined]" if e.get("declined") else ""
+                lines.append(
+                    f"- {time_range(e)}: {e.get('title', '')}{suffix}")
         else:
             lines.append("Nothing on the calendar today.")
         due = self._due_todos()
@@ -204,7 +215,7 @@ class TodayScreen(QWidget):
             self._ev_error = not self._events
         else:
             self._ev_error = False
-            self._events = result.get("events", [])
+            self._events = expand_events(result.get("events", []))
         self.rebuild()
 
     def _on_todos(self):
@@ -231,15 +242,30 @@ class TodayScreen(QWidget):
         QTimer.singleShot(0, run)
 
     def _tick(self):
-        if self._now_col is None:
-            return
+        """Per-minute, only while shown (hideEvent stops the timer): the now
+        line, greeting and Up next's countdown (#115). A new day re-fetches
+        the calendar and todos, and their answers rebuild the page (#114).
+        Only the time-bound parts are redrawn: a full rebuild every minute
+        would drop keyboard focus and any half-done click in the columns."""
         now = datetime.now()
-        try:
-            self._now_col.set_now(now.hour * 60 + now.minute)
-        except RuntimeError:
-            self._now_col = None
+        if now.date() != self._today:
+            self.on_shown()
+            return
+        self.header.set_title(greeting(now))
+        self._sync_badge()
+        if self._now_col is not None:
+            try:
+                self._now_col.set_now(now.hour * 60 + now.minute)
+            except RuntimeError:
+                self._now_col = None
+        item = self.live.itemAt(0)
+        old = item.widget() if item is not None else None
+        if old is not None:
+            self.live.replaceWidget(old, self._up_next())
+            old.deleteLater()
 
     def _sorted_events(self) -> list[dict]:
+        """Today's events — a multi-day event as today's piece of it (#113)."""
         today = date.today().isoformat()
         return sorted((e for e in self._events if e.get("date") == today),
                       key=lambda e: (not e.get("all_day"), e.get("start_min", 0)))
@@ -308,7 +334,10 @@ class TodayScreen(QWidget):
         col.addWidget(Eyebrow("Up next"))
         now = datetime.now()
         now_min = now.hour * 60 + now.minute
-        timed = [e for e in self._sorted_events() if not e.get("all_day")]
+        # Exclude declined invites from Up Next — they don't block your time
+        # and "Dentist at 2pm" is wrong when you said no. (todo-fixes #125)
+        timed = [e for e in self._sorted_events()
+                 if not e.get("all_day") and not e.get("declined")]
         current = next((e for e in timed if e.get("start_min", 0) <= now_min
                         < e.get("start_min", 0) + e.get("dur", 30)), None)
         upcoming = next((e for e in timed if e.get("start_min", 0) > now_min), None)
@@ -420,10 +449,14 @@ class TodayScreen(QWidget):
                                      "muted", wrap=True))
         all_day = [e for e in evs if e.get("all_day")]
         for e in all_day:
+            declined = bool(e.get("declined"))
             r = hbox(s=T.S2)
-            r.addWidget(Dot(lambda c=event_color(e): c, 8), 0,
+            # Mute declined all-day events (#125). "muted" is a theme token.
+            dot_fn = "muted" if declined else (lambda c=event_color(e): c)
+            r.addWidget(Dot(dot_fn, 8), 0,
                         Qt.AlignmentFlag.AlignVCenter)
-            r.addWidget(ElideLabel(e.get("title", ""), "small"), 1)
+            r.addWidget(ElideLabel(e.get("title", ""),
+                                   "muted" if declined else "small"), 1)
             r.addWidget(Badge("neutral", "All day"))
             card.lay.addLayout(r)
         timed = [e for e in evs if not e.get("all_day")]

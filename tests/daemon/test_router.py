@@ -1575,6 +1575,19 @@ def test_calendar_context_shows_events_past_dst_at_their_own_offset(set_tz):
                                                             date(2026, 11, 13))
 
 
+def test_calendar_context_names_the_end_day_of_a_multi_day_event(set_tz):
+    """#113: events still running from an earlier day are now listed; their
+    end must say which day, or "18:00–12:00" reads as nonsense."""
+    set_tz("America/Denver")
+    now = datetime(2026, 10, 12, 9, 0).astimezone()
+    party = dict(CAL_ROW, start_at="2026-10-11T22:00:00-06:00",
+                 end_at="2026-10-12T02:00:00-06:00")
+    trip = dict(ALLDAY_ROW, start_at="2026-10-10", end_at="2026-10-14")
+    ctx = calendar_context([party, trip], now, date(2026, 10, 20))
+    assert "Sun 2026-10-11 22:00 – Mon 2026-10-12 02:00" in ctx
+    assert "Sat 2026-10-10 – Tue 2026-10-13 (all day)" in ctx
+
+
 def test_calendar_context_out_of_window_routes_to_tool_when_attached():
     """The window edge must become a list_events call, not a dead end — but
     only when the tool actually rides along (mail_context's fabrication guard)."""
@@ -1676,6 +1689,147 @@ async def test_calendar_refresh_respects_the_disable_switch(tmp_path):
 async def test_calendar_refresh_without_calendar_errors():
     out = await collect(Router(FakeLLM(), FakeStore()), "calendar.refresh", {})
     assert "unavailable" in out[0]["error"]
+
+
+# ---- #117: ↻ reports sync_failed / sync_paused honestly --------------------
+
+class FailingFakeCal(FakeCal):
+    """sync_once returns False — simulates a network/auth failure."""
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.synced = 0
+
+    async def sync_once(self):
+        self.synced += 1
+        return False
+
+
+async def test_calendar_refresh_failed_sync_sets_sync_failed(tmp_path):
+    """When Google is reachable but sync fails, the result must carry
+    sync_failed=True so the UI can show an error indicator (todo-fixes #117)."""
+    cal = FailingFakeCal(rows=[CAL_ROW])
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
+                        "calendar.refresh", {})
+    assert cal.synced == 1
+    assert out[-1]["result"]["sync_failed"] is True
+    assert out[-1]["result"]["sync_paused"] is False
+    assert out[-1]["result"]["events"] == [CAL_ROW]   # stale cache still returned
+
+
+async def test_calendar_refresh_not_connected_is_not_a_failure():
+    """Not connected says so on its own (`connected`); it isn't a failed pull."""
+    cal = FailingFakeCal(rows=[], connected=False)
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
+                        "calendar.refresh", {})
+    assert out[-1]["result"]["sync_failed"] is False
+
+
+async def test_calendar_refresh_disabled_sets_sync_paused(tmp_path):
+    """When the Calendar connection is disabled the result must carry
+    sync_paused=True (todo-fixes #117)."""
+    from lumen.daemon import db
+    from lumen.daemon.connectors.connection_state import ConnectionState
+    conns = ConnectionState(db.connect(tmp_path / "s.db"))
+    conns.set_enabled("google_calendar", False)
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal,
+                               connection_state=conns), "calendar.refresh", {})
+    assert cal.synced == 0
+    assert out[-1]["result"]["sync_paused"] is True
+    assert out[-1]["result"]["sync_failed"] is False
+
+
+async def test_calendar_refresh_success_says_both_false():
+    """A refresh always states how its pull went, so the UI can clear a
+    failure it showed before (todo-fixes #117)."""
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
+                        "calendar.refresh", {})
+    assert out[-1]["result"]["sync_failed"] is False
+    assert out[-1]["result"]["sync_paused"] is False
+
+
+async def test_calendar_list_never_has_sync_keys():
+    """calendar.list is a cache-only read — it never sets sync keys even if
+    the calendar is disconnected (todo-fixes #117)."""
+    cal = FakeCal(connected=False)
+    out = await collect(Router(FakeLLM(), FakeStore(), calendar=cal),
+                        "calendar.list", {})
+    assert "sync_failed" not in out[-1]["result"]
+    assert "sync_paused" not in out[-1]["result"]
+
+
+# ---- #120: update-event confirm is human-readable --------------------------
+
+async def test_calendar_update_colour_only_shows_event_and_when(tmp_path):
+    """A colour-only change must still name the event and its current time so
+    the user knows which event they are editing (todo-fixes #120)."""
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge(result="Updated: Standup")
+    events = await drive_oneshot(
+        create_router(bridge=bridge, cal=cal, broker=broker),
+        "calendar.update",
+        {"id": "t1", "calendar_id": "primary",
+         "changes": {"color_id": "7"}}, broker, True)
+    req = next(e for e in events if "confirm_request" in e)
+    rows = dict(req["confirm_request"]["rows"])
+    assert rows["Event"] == "Standup"     # title always present
+    assert "When" in rows                 # current time always shown
+
+
+async def test_calendar_update_time_change_shows_old_new_human_readable(tmp_path):
+    """When the time changes the confirm must show old → new in a human-readable
+    format rather than raw ISO strings (todo-fixes #120)."""
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    cal = SyncingFakeCal(rows=[CAL_ROW])
+    bridge = FakeBridge(result="Updated: Standup")
+    new_start = "2026-10-14T15:00:00+02:00"
+    new_end = "2026-10-14T16:00:00+02:00"
+    events = await drive_oneshot(
+        create_router(bridge=bridge, cal=cal, broker=broker),
+        "calendar.update",
+        {"id": "t1", "calendar_id": "primary",
+         "changes": {"start": new_start, "end": new_end}}, broker, True)
+    req = next(e for e in events if "confirm_request" in e)
+    rows = dict(req["confirm_request"]["rows"])
+    when_val = rows["When"]
+    assert "→" in when_val           # shows old → new
+    assert "T" not in when_val       # no raw ISO 'T' separator
+    assert "2026-10-14" not in when_val   # no ISO date in When; uses strftime
+
+
+# ---- #125: calendar_context marks declined/transparent events ---------------
+
+def test_calendar_context_marks_declined_events(set_tz):
+    """The model context must label declined invites '(declined)' so
+    'am I free at 3?' isn't answered 'busy' (todo-fixes #125)."""
+    set_tz("Europe/Berlin")
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone(_td(hours=2)))
+    declined = dict(CAL_ROW, response_status="declined")
+    ctx = calendar_context([declined], now, date(2026, 7, 24))
+    assert "(declined)" in ctx
+
+
+def test_calendar_context_marks_transparent_events(set_tz):
+    """Transparent ('show as free') events must be marked '(marked free)'
+    in the model context (todo-fixes #125)."""
+    set_tz("Europe/Berlin")
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone(_td(hours=2)))
+    transparent = dict(CAL_ROW, transparency="transparent",
+                       response_status=None)
+    ctx = calendar_context([transparent], now, date(2026, 7, 24))
+    assert "(marked free)" in ctx
+
+
+def test_calendar_context_normal_events_have_no_status_note(set_tz):
+    """A plain accepted event must not get a spurious note (todo-fixes #125)."""
+    set_tz("Europe/Berlin")
+    now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone(_td(hours=2)))
+    ctx = calendar_context([CAL_ROW], now, date(2026, 7, 24))
+    assert "(declined)" not in ctx and "(marked free)" not in ctx
 
 
 # ---- Phase 5 write half: confirm.response routing ----
@@ -2041,6 +2195,8 @@ async def test_calendar_delete_unknown_event_is_an_error():
 # ---- calendar.update (confirm-gated event edit, #12) ----
 
 async def test_calendar_update_approved_patches_and_syncs():
+    # todo-fixes #120: confirm now always shows Event + When, old→new title,
+    # attendees-not-notified note.
     from lumen.daemon.confirm import ConfirmBroker
     broker = ConfirmBroker()
     cal = SyncingFakeCal(rows=[CAL_ROW])
@@ -2053,8 +2209,12 @@ async def test_calendar_update_approved_patches_and_syncs():
          "changes": {"title": "Standup v2", "color_id": "7"}}, broker, True)
     req = next(e for e in events if "confirm_request" in e)
     rows = dict(req["confirm_request"]["rows"])
-    assert rows["Title"] == "Standup v2"
+    assert rows["Event"] == "Standup"            # always present (#120)
+    assert rows["Title"] == "Standup → Standup v2"   # old → new
     assert rows["Colour"] == "Peacock"           # colorId 7 rendered by name
+    assert "Priya" in rows["Attendees"]          # attendee note present
+    assert "not notified" in rows["Attendees"]   # sendUpdates=none, be honest
+    assert "When" in rows                        # always shown even if unchanged
     assert bridge.calls[0][0] == "update_event"
     assert bridge.calls[0][1]["color_id"] == "7"
     assert tool_log.entries == [("update_event", True)]
@@ -2417,6 +2577,23 @@ async def test_accept_suggestion_promotes_to_real_todo(tmp_path):
     new = res["todos"][-1]
     assert new["text"] == "send the report"
     assert new["due_date"] == "2026-07-17"
+    assert new["source"] == "llm-extracted"
+
+
+async def test_accept_suggestion_keeps_text_verbatim(tmp_path):
+    """todo-fixes #122: accepting 'Send invoice #4471 to Chris' must not strip
+    '#4471' as a tag or lowercase anything — add_structured bypasses NL parsing."""
+    router, store, todos = sugg_router(tmp_path)
+    sid = store.add("Send invoice #4471 to Chris", None,
+                    "I'll send invoice #4471 to Chris", "s2", "Re: invoice")
+    out = await collect(router, "todos.accept_suggestion", {"id": sid})
+    res = out[0]["result"]
+    assert res["suggestions"] == []
+    new = res["todos"][-1]
+    # Text verbatim — not re-parsed by the NL grammar
+    assert new["text"] == "Send invoice #4471 to Chris"
+    # No tags extracted from the text
+    assert new["tags"] == []
     assert new["source"] == "llm-extracted"
 
 
@@ -4910,6 +5087,19 @@ async def test_canvas_set_session_does_not_sync_on_a_refused_jar():
     assert canvas.syncs == 0
 
 
+async def test_canvas_set_session_does_not_sync_on_cookie_rotation():
+    """todo-fixes #128: browsing Canvas rotates CSRF tokens, which triggers
+    set_session again. If already connected, the new jar is adopted silently —
+    no sync kick — so every page load doesn't start a full sync."""
+    import asyncio
+
+    canvas = FakeCanvas(connected=True)   # already connected
+    await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
+                  "canvas.set_session", {"cookies": {"canvas_session": "rotated"}})
+    await asyncio.sleep(0)
+    assert canvas.syncs == 0             # no kick: was already connected
+
+
 async def test_canvas_status_reports_live_state():
     canvas = FakeCanvas(connected=True, last_sync="2026-08-01T09:00:00")
     out = await collect(Router(FakeLLM(), FakeStore(), canvas=canvas),
@@ -4938,6 +5128,36 @@ async def test_paused_canvas_says_so_and_never_syncs(tmp_path):
     assert canvas.syncs == 0
     conns.set_enabled("canvas", True)
     assert (await collect(router, "canvas.status", {}))[-1]["result"]["paused"] is False
+
+
+async def test_canvas_sync_now_coalesces_instead_of_rejecting(tmp_path):
+    """todo-fixes #129: canvas.sync_now awaits an in-flight sync rather than
+    returning 'already syncing'. Both concurrent calls must succeed."""
+    import asyncio
+    from lumen.daemon import db
+    from lumen.daemon.config import CanvasConfig
+    from lumen.daemon.connectors.canvas_store import CanvasStore
+    from lumen.daemon.connectors.canvas_sync import CanvasSync
+
+    conn = db.connect(tmp_path / "c.db")
+    store = CanvasStore(conn)
+    from tests.daemon.connectors.test_canvas_sync import FakeClient
+    client = FakeClient(courses=[{"id": 1, "name": "A", "course_code": "A"}],
+                        assignments={1: []}, announcements={1: []})
+    canvas = CanvasSync(store, CanvasConfig(enabled=True),
+                        client_factory=lambda: client)
+    canvas.set_session({"canvas_session": "abc"})
+    router = Router(FakeLLM(), FakeStore(), canvas=canvas)
+
+    # Both sync_now calls must get "started: True" — no "already syncing".
+    r1, r2 = await asyncio.gather(
+        collect(router, "canvas.sync_now", {}),
+        collect(router, "canvas.sync_now", {}))
+    assert r1[-1]["result"]["started"] is True
+    assert r2[-1]["result"]["started"] is True
+    # No "already syncing" appeared.
+    for r in r1 + r2:
+        assert r.get("result", {}).get("reason") != "already syncing"
 
 
 async def test_canvas_disconnect_clears_session():
@@ -4987,12 +5207,17 @@ def canvas_router(tmp_path):
     return router, store, todos, broker, writer
 
 
+# Always ahead of today: past-due assignments are never offered as markers
+# (#135), so a fixed date here rots.
+_PENDING_DUE = (date.today() + _td(days=20)).isoformat()
+
+
 def _seed_pending(store, todos):
     store.upsert_courses([{"id": 1, "name": "CS 3505", "course_code": "CS3505"}])
     store.upsert_assignments([{"id": 10, "course_id": 1, "name": "HW1",
-        "due_at": "2026-09-01T06:59:59Z", "points": 1.0, "html_url": "u",
+        "due_at": f"{_PENDING_DUE}T18:00:00Z", "points": 1.0, "html_url": "u",
         "description": None, "submitted": False}])
-    tid = todos.add_structured("CS3505 — HW1", "2026-09-01", ["CS3505", "canvas"])
+    tid = todos.add_structured("CS3505 — HW1", _PENDING_DUE, ["CS3505", "canvas"])
     store.link_todo(10, tid, "2026-07-21T00:00:00")
 
 
@@ -5015,9 +5240,9 @@ async def test_push_due_dates_confirm_writes_marker(tmp_path):
             broker.resolve(ev["confirm_id"], True)
     assert any("confirm_request" in e for e in events)
     assert events[-1]["result"] == {"added": 1, "updated": 0}
-    assert writer.created == [("CS3505 — HW1 due", "2026-09-01")]
+    assert writer.created == [("CS3505 — HW1 due", _PENDING_DUE)]
     a = store.active_assignments()[0]
-    assert a["calendar_event_id"] == "evt_1" and a["marker_due"] == "2026-09-01"
+    assert a["calendar_event_id"] == "evt_1" and a["marker_due"] == _PENDING_DUE
 
 
 async def test_push_due_dates_confirm_uses_the_overlay_schema(tmp_path):
@@ -5033,7 +5258,7 @@ async def test_push_due_dates_confirm_uses_the_overlay_schema(tmp_path):
     assert req is not None
     assert set(req) == {"icon", "title", "intro", "rows", "confirm_label"}
     assert req["title"] == "Add Canvas due dates"
-    assert req["rows"] == [("2026-09-01", "CS3505 — HW1")]
+    assert req["rows"] == [(_PENDING_DUE, "CS3505 — HW1")]
     assert "1 due-date marker" in req["intro"]     # singular
     assert req["confirm_label"] == "Add 1 to calendar"
 
@@ -5229,6 +5454,8 @@ async def test_enabling_ai_reoffers_everything_for_classification(tmp_path):
     assert store.calendar_candidates()[0]["ai_state"] == 1
     await collect(router, "canvas.set_calendar_ai", {"enabled": True})
     assert store.calendar_candidates()[0]["ai_state"] == 0
+    # #134: the exam re-scan waits for the next sync's enrichment pass.
+    assert router._canvas._exam_rescan is True
 
 
 def _queue_one(queue):
@@ -5341,6 +5568,56 @@ async def test_calendar_routes_without_canvas_are_safe():
                   "canvas.set_calendar_ai", "canvas.resolve_removal",
                   "canvas.resolve_proposal", "canvas.sync_now"):
         out = await collect(router, type_, {"id": 1, "enabled": True})
+        assert "error" in out[-1], type_
+
+
+# --- canvas.alerts routes (todo-fixes #130) ----------------------------------
+
+async def test_canvas_alerts_returns_unseen_items(tmp_path):
+    """canvas.alerts exposes the CanvasAlerts.recent() list."""
+    from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
+    conn = db.connect(tmp_path / "a.db")
+    alerts = CanvasAlerts(conn)
+    alerts.add("conflict", "HW1 overlaps Study group", assignment_id=10)
+    alerts.add("due_moved", "HW2 moved to Monday", assignment_id=20)
+    router = Router(FakeLLM(), FakeStore(), canvas_alerts=alerts)
+    out = await collect(router, "canvas.alerts", {})
+    items = out[-1]["result"]["items"]
+    assert len(items) == 2
+    # Newest first
+    assert items[0]["kind"] == "due_moved"
+
+
+async def test_canvas_alerts_seen_marks_all(tmp_path):
+    """Omitting ids marks all unseen."""
+    from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
+    conn = db.connect(tmp_path / "a2.db")
+    alerts = CanvasAlerts(conn)
+    alerts.add("conflict", "HW1 overlaps meeting", assignment_id=10)
+    alerts.add("due_moved", "HW2 moved", assignment_id=20)
+    router = Router(FakeLLM(), FakeStore(), canvas_alerts=alerts)
+    out = await collect(router, "canvas.alerts_seen", {})
+    assert out[-1]["result"]["alerts"] == 0
+    assert alerts.count() == 0
+
+
+async def test_canvas_alerts_seen_marks_selected(tmp_path):
+    """Providing ids marks only those alerts."""
+    from lumen.daemon.connectors.canvas_alerts import CanvasAlerts
+    conn = db.connect(tmp_path / "a3.db")
+    alerts = CanvasAlerts(conn)
+    id1 = alerts.add("due_moved", "HW1", assignment_id=10)
+    alerts.add("due_moved", "HW2", assignment_id=20)
+    router = Router(FakeLLM(), FakeStore(), canvas_alerts=alerts)
+    out = await collect(router, "canvas.alerts_seen", {"ids": [id1]})
+    assert out[-1]["result"]["alerts"] == 1   # one still unseen
+
+
+async def test_canvas_alerts_routes_without_wiring_are_safe():
+    """No alerts wiring → error, not crash."""
+    router = Router(FakeLLM(), FakeStore())
+    for type_ in ("canvas.alerts", "canvas.alerts_seen"):
+        out = await collect(router, type_, {})
         assert "error" in out[-1], type_
 
 
@@ -5513,11 +5790,14 @@ def test_screen_prior_needs_a_deictic():
 
 
 def test_each_screen_maps_to_its_own_group():
-    r = _screen_router(GroupSpyLLM(), calendar=FakeCal(), books=object())
-    for screen, group in (("mail", "mail"), ("calendar", "gcal"),
-                          ("todos", "todos"), ("books", "books"),
-                          ("files", "fs"), ("canvas", "todos")):
-        assert r._screen_prior(screen, "do this") == {group}, screen
+    # todo-fixes #131: canvas maps to "canvas" (was "todos") so deictic asks on
+    # the Canvas screen get the Canvas MCP tools — plus the todo tools it had.
+    r = _screen_router(GroupSpyLLM(), calendar=FakeCal(), books=object(),
+                       canvas=FakeCanvas())
+    for screen, groups in (("mail", {"mail"}), ("calendar", {"gcal"}),
+                           ("todos", {"todos"}), ("books", {"books"}),
+                           ("files", {"fs"}), ("canvas", {"canvas", "todos"})):
+        assert r._screen_prior(screen, "do this") == groups, screen
 
 
 def test_a_group_the_daemon_does_not_have_is_never_the_prior():
@@ -5549,6 +5829,71 @@ async def test_an_explicit_subject_still_beats_the_prior():
     assert "todos" in router._subject_groups("put milk on my todo list")
     # _subject_groups is consulted first, so the prior never gets a say
     assert router._screen_prior("mail", "put milk on my todo list") == set()
+
+
+# --- todo-fixes #131: CANVAS_HINT subject routing ----------------------------
+
+def test_canvas_hint_fires_on_canvas_shaped_messages():
+    """Canvas questions must pick up the canvas group when Canvas is wired."""
+    from lumen.daemon.router import CANVAS_HINT
+    canvas_questions = [
+        "any new Canvas announcements?",
+        "what's due in CS 4150 this week?",
+        "do I have any homework due today?",
+        "when is the midterm?",
+        "show me my assignments",
+        "what did the professor post?",
+        "what's my next class?",
+        "did I get my grades back?",
+    ]
+    for q in canvas_questions:
+        assert CANVAS_HINT.search(q), f"CANVAS_HINT missed: {q!r}"
+
+
+def test_canvas_hint_does_not_fire_on_unrelated_messages():
+    from lumen.daemon.router import CANVAS_HINT
+    unrelated = [
+        "what's the weather?",
+        "remind me to call mom",
+        "add milk to my todos",
+        "what emails did I get today?",
+        "give me an example of a haiku",
+        "of course, draft it anyway",
+        "I finally fixed the sink",
+        "how do python classes work?",
+        "submit the form for me",
+    ]
+    for q in unrelated:
+        assert not CANVAS_HINT.search(q), f"CANVAS_HINT false-fired on: {q!r}"
+
+
+def test_subject_groups_adds_canvas_when_canvas_wired():
+    """todo-fixes #131: CANVAS_HINT + canvas wired → 'canvas' in groups."""
+    r = _screen_router(GroupSpyLLM(), canvas=FakeCanvas())
+    assert "canvas" in r._subject_groups("any new Canvas announcements?")
+    assert "canvas" in r._subject_groups("what's due in CS 4150 this week?")
+
+
+def test_subject_groups_does_not_add_canvas_without_canvas():
+    """Without a CanvasSync instance, the canvas group must never fire — the
+    MCP server might not be running and the hint is wide enough to collide."""
+    r = _screen_router(GroupSpyLLM())    # no canvas= kwarg
+    assert "canvas" not in r._subject_groups("any new Canvas announcements?")
+
+
+def test_canvas_screen_maps_to_canvas_and_todo_groups():
+    """todo-fixes #131: deictic asks on the Canvas screen must reach Canvas
+    MCP tools (list_assignments / list_announcements) — and still the todo
+    tools they had before, since assignments are todos ("mark this done")."""
+    r = _screen_router(GroupSpyLLM(), canvas=FakeCanvas())
+    assert r._screen_prior("canvas", "do this") == {"canvas", "todos"}
+    assert r._screen_prior("canvas", "what is it about") == {"canvas", "todos"}
+
+
+def test_canvas_screen_prior_without_canvas_keeps_todos():
+    """Canvas screen with no CanvasSync → the todo prior it always had."""
+    r = _screen_router(GroupSpyLLM())   # no canvas= kwarg
+    assert r._screen_prior("canvas", "do this") == {"todos"}
 
 
 def test_mail_context_shows_received_times_in_local_time(set_tz):

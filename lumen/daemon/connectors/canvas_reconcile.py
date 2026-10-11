@@ -10,6 +10,46 @@ from lumen.daemon.connectors.canvas_store import CanvasStore
 from lumen.daemon.connectors.todos import TodoStore
 
 
+def cleanup_gone_todos(store: CanvasStore, todos: TodoStore) -> dict:
+    """Unlink or delete todos for assignments presumed gone from Canvas.
+
+    An assignment that has been absent from every successful fetch for
+    GONE_STREAK passes is filtered out of active_assignments(), so reconcile's
+    main loop never sees it. Without cleanup its todo would linger open forever
+    (todo-fixes #127).
+
+    Rule: if the todo is open AND untouched (text matches what reconcile
+    generated, no user-added description, due date is still what reconcile
+    applied), delete it. If the user edited or completed it, leave it alone but
+    unlink it. The unlink (not mark_handled) lets the assignment re-link a fresh
+    todo if it reappears on Canvas later."""
+    deleted = unlinked = 0
+    courses = store.courses_by_id()
+    for a in store.gone_linked_assignments():
+        tid = a["todo_id"]
+        if not todos.exists(tid):
+            store.unlink_todo(a["id"])
+            continue
+        todo = store.get_todo(tid)
+        if todo is None:
+            store.unlink_todo(a["id"])
+            continue
+        expected_text = _todo_text(courses.get(a["course_id"]), a["name"])
+        untouched = (
+            todo["text"] == expected_text
+            and not (todo.get("description") or "").strip()
+            and not todo["completed"]
+            and todo.get("due_date") == a.get("applied_due")
+        )
+        if untouched:
+            todos.delete(tid)
+            deleted += 1
+        else:
+            unlinked += 1
+        store.unlink_todo(a["id"])
+    return {"gone_deleted": deleted, "gone_unlinked": unlinked}
+
+
 def local_day(utc_iso: str | None) -> str | None:
     """RFC3339 UTC instant -> the user's local YYYY-MM-DD, or None."""
     if not utc_iso:
@@ -33,6 +73,7 @@ def _tags(course: dict | None) -> list[str]:
 def reconcile_todos(store: CanvasStore, todos: TodoStore, *,
                     now: datetime | None = None) -> dict:
     now = now or datetime.now()
+    gone_report = cleanup_gone_todos(store, todos)
     courses = store.courses_by_id()
     created = completed = handled = updated = 0
     for a in store.active_assignments():
@@ -77,4 +118,4 @@ def reconcile_todos(store: CanvasStore, todos: TodoStore, *,
         store.mark_applied(a["id"], 0, due)   # record initial values
         created += 1
     return {"created": created, "completed": completed,
-            "handled": handled, "updated": updated}
+            "handled": handled, "updated": updated, **gone_report}

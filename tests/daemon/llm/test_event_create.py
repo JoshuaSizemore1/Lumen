@@ -270,3 +270,120 @@ def test_year_correction_rolls_a_past_month_forward():
 def test_year_correction_leaves_ordinary_proposals_alone():
     raw = {"start": "2026-07-20T09:00", "end": "2026-07-20T09:30"}
     assert apply_year_correction(raw, "standup tomorrow", date(2026, 7, 19)) is raw
+
+
+# ---- todo-fixes #119: Google-shaped proposal fields ---------------------------
+
+from lumen.daemon.llm.event_create import _coerce_datetime_field, _coerce_recurrence
+
+
+def test_coerce_datetime_dict_extracts_datetime():
+    assert _coerce_datetime_field({"dateTime": "2026-07-11T14:00:00Z"}) == "2026-07-11T14:00:00Z"
+
+
+def test_coerce_datetime_dict_extracts_date():
+    assert _coerce_datetime_field({"date": "2026-07-11"}) == "2026-07-11"
+
+
+def test_coerce_datetime_string_passthrough():
+    assert _coerce_datetime_field("2026-07-11T14:00") == "2026-07-11T14:00"
+
+
+def test_coerce_recurrence_list_single_rrule():
+    rec, err = _coerce_recurrence(["RRULE:FREQ=WEEKLY;BYDAY=MO"])
+    assert rec == "RRULE:FREQ=WEEKLY;BYDAY=MO" and err is None
+
+
+def test_coerce_recurrence_list_multiple_rules_rejected():
+    _, err = _coerce_recurrence(["RRULE:FREQ=WEEKLY", "RRULE:FREQ=DAILY"])
+    assert err is not None and "multiple" in err.lower()
+
+
+def test_coerce_recurrence_list_non_rrule_rejected():
+    _, err = _coerce_recurrence(["EXDATE:20260715"])
+    assert err is not None
+
+
+def test_coerce_recurrence_empty_list_is_none():
+    rec, err = _coerce_recurrence([])
+    assert rec is None and err is None
+
+
+def test_coerce_recurrence_string_passthrough():
+    rec, err = _coerce_recurrence("RRULE:FREQ=WEEKLY")
+    assert rec == "RRULE:FREQ=WEEKLY" and err is None
+
+
+def test_validate_proposal_google_dict_start_end():
+    """Google's {'dateTime': ...} start/end must not crash (todo-fixes #119)."""
+    p, err = valid(proposal(
+        start={"dateTime": "2026-07-11T14:00:00-06:00"},
+        end={"dateTime": "2026-07-11T14:30:00-06:00"}))
+    assert err is None and p["title"] == "Call with Sam"
+
+
+def test_validate_proposal_google_date_start_all_day():
+    p, err = validate_proposal(
+        {"title": "Holiday", "start": {"date": "2026-07-20"},
+         "end": {"date": "2026-07-20"}, "all_day": True,
+         "location": None, "description": None,
+         "attendees": [], "recurrence": None},
+        now=NOW, user_message="holiday july 20")
+    assert err is None and p["all_day"] is True and p["start"] == "2026-07-20"
+
+
+def test_validate_proposal_google_list_recurrence():
+    p, err = valid(proposal(recurrence=["RRULE:FREQ=WEEKLY;BYDAY=MO"]))
+    assert err is None and p["recurrence"] == "RRULE:FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_validate_proposal_google_multi_recurrence_rejected():
+    p, err = valid(proposal(recurrence=["RRULE:FREQ=WEEKLY", "RRULE:FREQ=DAILY"]))
+    assert p is None and "recurrence" in err.lower()
+
+
+def test_validate_proposal_google_attendee_dicts():
+    """Attendee objects from Google Calendar must not crash (todo-fixes #119)."""
+    msg = "weekly call with priya.nair@company.com monday 2pm"
+    p, err = validate_proposal(
+        proposal(attendees=[{"email": "priya.nair@company.com",
+                             "displayName": "Priya", "self": False}]),
+        now=NOW, user_message=msg)
+    assert err is None and "priya.nair@company.com" in p["attendees"]
+
+
+def test_validate_proposal_google_location_dict():
+    p, err = valid(proposal(location={"displayName": "Google Meet"}))
+    assert err is None and p["location"] == "Google Meet"
+
+
+# ---- todo-fixes #118: multi-date messages skip apply_resolved_date ----------
+
+async def test_propose_event_multi_date_provides_reference_not_override():
+    """'dinner tomorrow before the recital on friday' — two dates present.
+    The model receives both as a reference but apply_resolved_date is skipped,
+    so the model's own date choice survives."""
+    # Model picks friday (the recital); since it's not overridden, the date stays.
+    llm = FakeLLM('{"title": "Dinner", "start": "2026-07-17T19:00", '
+                  '"end": "2026-07-17T20:00"}')
+    # NOW is Friday 2026-07-10; tomorrow = Saturday, friday = today (July 10)
+    p, err = await propose_event(
+        llm,
+        "dinner tomorrow before the recital on friday",
+        now=NOW)
+    assert err is None
+    # System prompt carries both date refs but does NOT force a single date
+    system = llm.messages[0]["content"]
+    assert "tomorrow" in system.lower() and "friday" in system.lower()
+    # "use exactly this date" is the single-date override hint — absent in multi-date
+    assert "use exactly this date" not in system
+
+
+async def test_propose_event_single_date_still_overrides():
+    """Single resolvable date: apply_resolved_date still fires (regression guard)."""
+    llm = FakeLLM('{"title": "Sync", "start": "2026-07-11T15:00", '
+                  '"end": "2026-07-11T15:30"}')
+    p, err = await propose_event(llm, "create a sync next wednesday at 3pm", now=NOW)
+    assert err is None
+    assert p["start"].startswith("2026-07-15T15:00")
+    assert "use exactly this date" in llm.messages[0]["content"]

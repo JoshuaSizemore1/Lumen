@@ -34,10 +34,11 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import date, datetime, timezone
 
-from PyQt6.QtCore import QSettings, Qt, QTimer, QUrl
+from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QBoxLayout, QFrame, QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -64,6 +65,54 @@ NARROW = 720
 # The "never offer to save" preference is shared with ui_v3 on purpose: it is
 # the same keyring entry, and a "Never" said in one shell should hold in both.
 _PREFS = ("lumen", "ui_v3")
+
+
+class _KeyringBus(QObject):
+    """Singleton signal bus for marshaling keyring results to the GUI thread.
+
+    QTimer.singleShot called from a worker thread has no event loop to deliver
+    to, so the callback silently never fires (#136). Emitting a signal from a
+    worker thread enqueues it on the receiver's thread (the main thread here)
+    and it fires reliably once Qt processes events.
+    """
+    _result = pyqtSignal(object, object)  # (done_callback, result)
+
+    def __init__(self):
+        super().__init__()
+        self._result.connect(self._dispatch, Qt.ConnectionType.QueuedConnection)
+
+    def _dispatch(self, done, result):
+        done(result)
+
+    def emit_result(self, done, result):
+        self._result.emit(done, result)
+
+
+_keyring_bus: "_KeyringBus | None" = None
+
+
+def _get_keyring_bus() -> "_KeyringBus":
+    global _keyring_bus
+    if _keyring_bus is None:
+        _keyring_bus = _KeyringBus()
+    return _keyring_bus
+
+
+def _run_keyring(fn, done):
+    """Run a keyring operation on a daemon thread and marshal the result back
+    to the GUI thread via a signal (#136). `done` is always called on the GUI
+    thread; the caller's try-except handles a destroyed widget."""
+    bus = _get_keyring_bus()
+
+    def _work():
+        try:
+            result = fn()
+        except Exception:
+            log.exception("canvas keyring op failed")
+            result = None
+        bus.emit_result(done, result)
+
+    threading.Thread(target=_work, name="canvas-keyring", daemon=True).start()
 
 
 # ---- pure helpers (same rules as ui_v3) ----------------------------------------
@@ -201,8 +250,9 @@ def _strip_html(msg: str, limit: int = 220) -> str:
 
 
 def _summary_line(res: dict) -> str:
-    """What the last Sync now changed, in plain counts. "Nothing to change" is
-    itself the answer to "did that work?"."""
+    """What the last Sync now changed, in plain counts. Reports partial or
+    wholesale calendar failures — never "Up to date" when anything failed
+    (#135)."""
     todos = res.get("todos") or {}
     cal = res.get("calendar") or {}
     bits = []
@@ -215,6 +265,25 @@ def _summary_line(res: dict) -> str:
              "calendar events updated")):
         if n:
             bits.append(f"{n} {one if n == 1 else many}")
+    # What didn't happen (#126, #135): courses that didn't answer, and
+    # calendar writes — all of them (error) or some (failed).
+    notes = []
+    courses = int(res.get("failed_courses") or 0)
+    if courses:
+        notes.append(f"{courses} course{'' if courses == 1 else 's'} "
+                     "didn't answer")
+    cal_failed = int(cal.get("failed") or 0)
+    if cal.get("error"):
+        notes.append("calendar updates couldn't go through")
+    elif cal_failed:
+        noun = "calendar update" if cal_failed == 1 else "calendar updates"
+        notes.append(f"{cal_failed} {noun} didn't go through")
+    if notes:
+        note = "; ".join(notes) + " — Lumen will retry next sync"
+        if bits:
+            return ("Synced: " + ", ".join(bits) + ". "
+                    + note[0].upper() + note[1:] + ".")
+        return "Synced, but " + note + "."
     if not bits:
         return "Up to date. Nothing needed changing."
     return "Synced: " + ", ".join(bits) + "."
@@ -354,10 +423,17 @@ class CanvasScreen(QWidget):
         self._policy = cl.AutoSubmitPolicy()
         self._creds_memo: tuple | None = None
         self._creds_loaded = False
+        # Keyring reads run on a worker (#136): one at a time, and a reset
+        # bumps the generation so a stale answer is dropped.
+        self._creds_loading = False
+        self._creds_gen = 0
+        self._fill_waiting = None       # what to run when that read lands
         self._pending_renders = 0
         self._narrow = False
         self._assign_data = None
         self._ann_data = None
+        self._cookie_send_timer: QTimer | None = None   # burst coalescer (#128)
+        self._alerts_data: list | None = None            # cached for #130
 
         outer = vbox(self, (0, 0, 0, 0), 0)
 
@@ -641,7 +717,10 @@ class CanvasScreen(QWidget):
         self._syncing = True
         self._sync_btn.set_busy(True, "Syncing…")
         self._set_badge("warn", "Syncing…")
-        self.state.canvas_reconcile_now(self._on_synced)
+        # on_error settles the busy state so "Syncing…" never hangs (#132).
+        self.state.canvas_reconcile_now(
+            self._on_synced,
+            on_error=lambda msg: self._on_synced({"ok": False, "error": msg}))
 
     def _on_synced(self, res):
         self._syncing = False
@@ -650,6 +729,8 @@ class CanvasScreen(QWidget):
         except RuntimeError:
             return
         res = res if isinstance(res, dict) else {}
+        # "already syncing" from an old daemon is harmless: the daemon is busy;
+        # a new-daemon "already syncing" wait is reflected in `ok=True` instead.
         if res.get("ok") is False and res.get("reason") not in (
                 "already syncing", "paused"):
             self._set_badge("danger", "Sync failed")
@@ -1064,17 +1145,85 @@ class CanvasScreen(QWidget):
         self._prop_box.addSpacing(T.S4)
 
     def _render_alert_strip(self, n: int):
+        """Strip + "See changes" button for unseen calendar alerts (#130)."""
         clear_layout(self._alert_box)
+        self._alerts_data = None
         if not n or not self._connected:
             return
-        p = Panel(padding=T.S4, spacing=0)
-        row = hbox(s=T.S3)
-        row.addWidget(IconLabel("bell", "muted"))
-        row.addWidget(Label(f"{n} calendar change{'' if n == 1 else 's'} since "
-                            "you last looked", "small"), 1)
-        p.lay.addLayout(row)
+        self._alert_box.addWidget(self._strip(
+            "bell", "fg2",
+            f"{n} calendar change{'' if n == 1 else 's'} since you last looked",
+            "See changes", self._open_alerts))
+        self._alert_box.addSpacing(T.S4)
+
+    def _open_alerts(self):
+        """Fetch the alert items and expand inline (#130)."""
+        clear_layout(self._alert_box)
+        self._alert_box.addWidget(SkeletonRow(2, height=48))
+        self._alert_box.addSpacing(T.S4)
+        self.state.canvas_alerts(self._render_alerts_expanded,
+                                 on_error=self._render_alerts_failed)
+
+    def _render_alerts_failed(self, _msg=None):
+        """No list, so no "Got it": it would mark unseen changes seen (#130)."""
+        clear_layout(self._alert_box)
+        self._alerts_data = None
+        self._alert_box.addWidget(self._strip(
+            "alert", "danger", "Couldn't load the calendar changes.",
+            "Try again", self._open_alerts))
+        self._alert_box.addSpacing(T.S4)
+
+    def _render_alerts_expanded(self, res):
+        """Show the alert list with a 'Got it' button that marks them seen."""
+        clear_layout(self._alert_box)
+        try:
+            items = (res or {}).get("items", [])
+        except (RuntimeError, AttributeError):
+            return
+        self._alerts_data = items
+        p = Panel(padding=T.S4, spacing=T.S3)
+        head = hbox(s=T.S3)
+        head.addWidget(Label("Calendar changes", "small"), 1)
+        head.addWidget(Button("Got it", "secondary", size="sm",
+                              on_click=self._mark_alerts_seen))
+        p.lay.addLayout(head)
+        if items:
+            p.lay.addWidget(Divider())
+            for item in items:
+                r = hbox(s=T.S3)
+                r.addWidget(IconLabel("bell", "fg2"), 0,
+                             Qt.AlignmentFlag.AlignTop)
+                col = vbox(s=2)
+                col.addWidget(Label(item.get("detail", ""), "small", wrap=True))
+                when = _ago(item.get("created_at", ""))
+                if when:
+                    col.addWidget(Label(when, "meta"))
+                r.addLayout(col, 1)
+                p.lay.addLayout(r)
+        else:
+            p.lay.addWidget(Label("No recent changes.", "muted"))
         self._alert_box.addWidget(p)
         self._alert_box.addSpacing(T.S4)
+
+    def _mark_alerts_seen(self):
+        """'Got it': mark the shown alerts seen and clear the strip (#130).
+        Only those shown — one that arrived since stays for next time."""
+        ids = [a["id"] for a in (self._alerts_data or []) if a.get("id")]
+        if not ids:
+            # Nothing shown, nothing to mark: no ids would mean "all".
+            clear_layout(self._alert_box)
+            self._refresh_calendar()
+            return
+        self.state.canvas_alerts_seen(ids, self._on_alerts_seen)
+
+    def _on_alerts_seen(self, r):
+        n = int((r or {}).get("alerts", 0))
+        if n > 0:
+            self._render_alert_strip(n)     # new ones arrived meanwhile
+        else:
+            clear_layout(self._alert_box)
+        # Refresh the calendar status to sync the badge count.
+        self._refresh_calendar()
 
     def _toggle_calendar_sync(self, on: bool):
         self.state.canvas_set_calendar_sync(bool(on), self._after_calendar_toggle)
@@ -1084,7 +1233,10 @@ class CanvasScreen(QWidget):
 
     def _after_calendar_toggle(self, res):
         self._apply_calendar_status({**self._cal_state, **(res or {})})
-        self.state.canvas_sync_now(lambda _r: self._refresh_calendar())
+        # on_error prevents "Syncing…" from hanging if the daemon drops (#132).
+        self.state.canvas_sync_now(
+            lambda _r: self._refresh_calendar(),
+            on_error=lambda _m: self._refresh_calendar())
 
     # ---- browser + login ------------------------------------------------------------------
     def _ensure_web(self):
@@ -1171,12 +1323,39 @@ class CanvasScreen(QWidget):
     def _start_login(self):
         self._pending_creds = {"u": "", "p": ""}
         self._reset_autofill()
+        # Read the saved login on a worker thread while the page loads, so
+        # the autofill never waits on the keyring on this thread (#136).
+        self._preload_creds()
         self._start_cred_poll()
         self._open_in_browser(_CANVAS_BASE + "/login", login=True)
+
+    def _preload_creds(self):
+        if self._creds_loading:
+            return
+        self._creds_loading = True
+        gen = self._creds_gen
+
+        def landed(creds):
+            if gen != self._creds_gen:
+                return          # forgotten or reset meanwhile: stale answer
+            self._creds_loading = False
+            self._creds_loaded = True
+            self._creds_memo = creds
+            try:
+                self._sync_fill_button()
+                # A sign-in form, or a Fill press, came before the answer.
+                waiting, self._fill_waiting = self._fill_waiting, None
+                if waiting is not None:
+                    waiting()
+            except RuntimeError:
+                pass        # screen destroyed before the thread came back
+        _run_keyring(canvas_creds.load, landed)
 
     def _start_browse(self):
         self._pending_creds = {"u": "", "p": ""}
         self._start_cred_poll()
+        if not self._creds_loaded:
+            self._preload_creds()       # for the Fill-login button (#136)
         self._open_in_browser(_CANVAS_BASE)
 
     def _nav_back(self):
@@ -1193,6 +1372,12 @@ class CanvasScreen(QWidget):
 
     def _done_browsing(self):
         self._stop_cred_poll()
+        # A jar still waiting out the debounce is the newest session: send
+        # it now rather than drop it (#128).
+        if (self._cookie_send_timer is not None
+                and self._cookie_send_timer.isActive()):
+            self._cookie_send_timer.stop()
+            self._flush_cookie_send()
         self._dismiss_save_card()
         self._login_mode = False
         self._stack.setCurrentIndex(self._CONTENT_IDX)
@@ -1255,12 +1440,36 @@ class CanvasScreen(QWidget):
         if not cl.is_canvas_cookie(domain, _CANVAS_HOST):
             return
         self._cookies[name] = value
-        if cl.is_authenticated(self._cookies) and self._cookies != self._last_sent:
-            self._last_sent = dict(self._cookies)
-            log.info("canvas session cookie captured — handing off to daemon")
-            self._policy.done()
-            self._maybe_save_login()
-            self.state.canvas_set_session(dict(self._cookies), self._on_connected)
+        if not cl.is_authenticated(self._cookies):
+            return
+        if self._last_sent is None:
+            # First authenticated jar: hand it off right away (the sign-in
+            # hand-off must be prompt — Duo is still loading).
+            self._flush_cookie_send()
+        elif self._cookies != self._last_sent:
+            # Subsequent changes: coalesce the burst so a rotating _csrf_token
+            # on every page navigation doesn't kick off a full sync each time
+            # (#128). The timer restarts on each cookie in the burst; the send
+            # fires once, 300 ms after the last change settles.
+            self._arm_cookie_timer()
+
+    def _arm_cookie_timer(self):
+        if self._cookie_send_timer is None:
+            self._cookie_send_timer = QTimer(self)
+            self._cookie_send_timer.setSingleShot(True)
+            self._cookie_send_timer.timeout.connect(self._flush_cookie_send)
+        self._cookie_send_timer.start(300)   # restart on each cookie in the burst
+
+    def _flush_cookie_send(self):
+        """Send the current jar to the daemon — called immediately on the
+        first login and after each burst settles (#128)."""
+        if self._cookies == self._last_sent:
+            return
+        self._last_sent = dict(self._cookies)
+        log.info("canvas session cookie captured — handing off to daemon")
+        self._policy.done()
+        self._maybe_save_login()
+        self.state.canvas_set_session(dict(self._cookies), self._on_connected)
 
     def _on_connected(self, st):
         self._apply_status(st)
@@ -1271,8 +1480,11 @@ class CanvasScreen(QWidget):
                 self._stack.setCurrentIndex(self._CONTENT_IDX)
                 self._set_lifecycle("Discarded")     # signed in: drop the page
             self.win.show_toast("Canvas connected")
-            self._auto_sync_armed = True
             self._refresh_status()
+            # Start a sync immediately so the lists populate right after login
+            # instead of waiting for the next auto-sync cycle (#129). The
+            # _on_synced callback reloads content when it finishes.
+            self._sync_now()
         self._refresh_content()
 
     # ---- load progress --------------------------------------------------------------------
@@ -1327,11 +1539,21 @@ class CanvasScreen(QWidget):
                 self.win.show_toast("This sign-in form is in a protected frame, "
                                     "so Lumen can't fill it. Type it yourself.")
             return
-        creds = self._saved_creds()
-        if creds is None:
+        if not self._creds_loaded:
+            # The keyring hasn't answered yet; fill when it does (#136).
+            self._fill_waiting = self._fill_form
+            self._preload_creds()
+            return
+        if self._creds_memo is None:
             log.info("canvas autofill: no saved login — user types it "
                      "(fields user=%d pass=%d frames=%d blocked=%d)",
                      st["user"], st["pass"], st["frames"], st["blocked"])
+            return
+        self._fill_form()
+
+    def _fill_form(self):
+        creds = self._creds_memo
+        if self._web is None or creds is None:
             return
         self._web.page().runJavaScript(cl.fill_on_focus_js(*creds),
                                        lambda _r: None)
@@ -1349,6 +1571,9 @@ class CanvasScreen(QWidget):
 
     def _fill_now(self):
         creds = self._saved_creds()
+        if self._web is not None and creds is None and self._creds_loading:
+            self._fill_waiting = self._fill_now     # again, once it answers
+            return
         if self._web is None or creds is None:
             self.win.show_toast("No saved login to fill in.")
             return
@@ -1359,9 +1584,10 @@ class CanvasScreen(QWidget):
             self._on_autofill_result)
 
     def _saved_creds(self):
+        """The cached saved login, or None. Never reads the keyring on this
+        thread (#136): until the worker answers there is nothing to fill yet."""
         if not self._creds_loaded:
-            self._creds_loaded = True
-            self._creds_memo = canvas_creds.load()
+            self._preload_creds()
         return self._creds_memo
 
     def _inject_autofill(self):
@@ -1420,6 +1646,9 @@ class CanvasScreen(QWidget):
         self._policy.reset()
         self._creds_memo = None
         self._creds_loaded = False
+        self._creds_loading = False
+        self._fill_waiting = None
+        self._creds_gen += 1        # a read still out answers nobody
 
     # ---- save-login card -------------------------------------------------------------------
     def _maybe_save_login(self):
@@ -1437,7 +1666,14 @@ class CanvasScreen(QWidget):
             # Nothing was typed this time: the session came back from the
             # stored cookies, so there's no login to offer to save (L11).
             return
-        if canvas_creds.has_saved() or canvas_creds.load():
+        # Cached answers only — never a keyring call on the GUI thread (#136).
+        # Not known yet (the probe is still out) counts as saved: an offer
+        # with a login already saved is the #67 complaint, and Canvas
+        # settings can always save one on purpose.
+        saved = canvas_creds.has_saved(default=None)
+        if saved is None and self._creds_loaded:
+            saved = self._creds_memo is not None
+        if saved is not False or self._creds_memo is not None:
             # Once a login is saved, never ask on our own (#67) — changing it
             # is the Canvas settings button's job. A captured password that
             # "differs" is no signal: the 1 Hz poll often holds a half-typed
@@ -1448,14 +1684,16 @@ class CanvasScreen(QWidget):
         self._show_save_card(u, pw, note=note)
 
     def _edit_saved_login(self):
-        """Save or change the login on purpose, from Canvas settings."""
-        existing = None
+        """Save or change the login on purpose, from Canvas settings.
+        Loads from the keyring on a worker thread to avoid blocking (#136)."""
+        _run_keyring(canvas_creds.load, self._show_edit_save_card)
+
+    def _show_edit_save_card(self, existing):
         try:
-            existing = canvas_creds.load()
-        except Exception:
-            log.exception("canvas keyring read failed")
-        self._show_save_card(existing[0] if existing else "", "",
-                             updating=bool(existing), offer_never=False)
+            self._show_save_card(existing[0] if existing else "", "",
+                                 updating=bool(existing), offer_never=False)
+        except RuntimeError:
+            pass   # screen was destroyed before the thread came back
 
     def _show_save_card(self, unid, password, *, updating=False, note="",
                         offer_never=True):
@@ -1502,21 +1740,37 @@ class CanvasScreen(QWidget):
             self._set_lifecycle("Discarded")
 
     def _save_login_from_card(self, unid: str, password: str):
-        ok = False
+        # Disable the Save button while the keyring op is in flight (#136).
+        if self._save_card is not None:
+            try:
+                self._save_card._save_btn.setEnabled(False)
+            except RuntimeError:
+                pass
+        _run_keyring(
+            lambda: canvas_creds.save(unid, password),
+            lambda ok: self._on_keyring_saved(ok, (unid, password)))
+
+    def _on_keyring_saved(self, ok, creds=None):
+        """Called on the GUI thread after the background save finishes (#136)."""
+        if ok and creds:
+            # What Fill uses from now on — a cached "nothing saved" from
+            # earlier in the session would otherwise outlive the save.
+            self._creds_gen += 1
+            self._creds_loading = False
+            self._creds_loaded, self._creds_memo = True, creds
         try:
-            ok = canvas_creds.save(unid, password)
-        except Exception:
-            log.exception("canvas keyring save failed")
-        self._dismiss_save_card()
-        self._pending_creds = {"u": "", "p": ""}
-        self._sync_fill_button()
-        log.info("canvas login %s to keyring", "saved" if ok else "NOT saved")
-        self.win.show_toast("Login saved to your keyring" if ok
-                            else "Couldn't save the login to your keyring")
-        self._after_save_card()
-        if self._stack.currentIndex() == self._MANAGE_IDX:
-            self._render_login_prefs()
-        self._refresh_content()
+            self._dismiss_save_card()
+            self._pending_creds = {"u": "", "p": ""}
+            self._sync_fill_button()
+            log.info("canvas login %s to keyring", "saved" if ok else "NOT saved")
+            self.win.show_toast("Login saved to your keyring" if ok
+                                else "Couldn't save the login to your keyring")
+            self._after_save_card()
+            if self._stack.currentIndex() == self._MANAGE_IDX:
+                self._render_login_prefs()
+            self._refresh_content()
+        except RuntimeError:
+            pass   # screen was destroyed before the thread came back
 
     def _on_save_card_dismissed(self, how: str):
         if how == "never":
@@ -1558,6 +1812,9 @@ class CanvasScreen(QWidget):
     def forget_browser_session(self):
         """Clear the sign-in browser's cookies, now if it's built, else the
         next time it is (L11). Settings → Disconnect calls this too."""
+        # Stop any pending burst send so the now-stale jar can't go out (#128).
+        if self._cookie_send_timer is not None:
+            self._cookie_send_timer.stop()
         self._cookies.clear()
         self._last_sent = None
         if self._profile is not None:
@@ -1566,12 +1823,29 @@ class CanvasScreen(QWidget):
             mark_browser_session_stale()
 
     def _forget(self):
-        canvas_creds.forget()
+        # Clear the local memo + cache immediately so the fill button disables
+        # without waiting for the worker thread (#136).
         self._reset_autofill()
+        canvas_creds._has_saved = False    # optimistic UI — thread confirms it
         self._sync_fill_button()
-        self.win.show_toast("Saved Canvas login forgotten")
+        _run_keyring(canvas_creds.forget, self._on_forgotten)
         if not self._connected:
             self._render_assignments(self._assign_raw())
+
+    def _on_forgotten(self, ok):
+        try:
+            if ok:
+                self.win.show_toast("Saved Canvas login forgotten")
+                return
+            # Possibly still stored: re-probe rather than claim it's gone, so
+            # the save card isn't offered over a login that's there (#67).
+            canvas_creds._has_saved = None
+            canvas_creds.prime()
+            self._sync_fill_button()
+            self.win.show_toast("Couldn't forget the saved login — your "
+                                "keyring didn't answer")
+        except RuntimeError:
+            pass        # screen destroyed before the thread came back
 
     # ---- Canvas settings page ------------------------------------------------------------------
     def _open_manage(self):

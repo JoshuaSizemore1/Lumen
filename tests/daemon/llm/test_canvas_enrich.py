@@ -178,21 +178,27 @@ def test_exam_span_with_no_time_is_a_bare_date():
         "2026-09-10", None)
 
 
+def _recent() -> str:
+    """Posted two days ago. Older announcements never reach the model
+    (#137), so a fixed date here would rot."""
+    return f"{(date.today() - timedelta(days=2)).isoformat()}T00:00:00Z"
+
+
 async def test_find_exam_dates_writes_a_proposal_and_never_an_event(tmp_path, store):
     conn = db.connect(tmp_path / "p.db")
     proposals = CanvasProposals(conn)
+    exam = (date.today() + timedelta(days=16)).isoformat()
     store.upsert_announcements([{"id": 5, "course_id": 1, "title": "Midterm",
-                                 "posted_at": "2026-08-20T00:00:00Z",
-                                 "message": "Midterm on Sept 10 at 10am",
+                                 "posted_at": _recent(),
+                                 "message": "Midterm in two weeks at 10am",
                                  "html_url": "a"}])
-    llm = FakeLLM('{"exam": true, "title": "Midterm 1", "date": "2026-09-10", '
+    llm = FakeLLM(f'{{"exam": true, "title": "Midterm 1", "date": "{exam}", '
                   '"start": "10:00", "end": "11:30"}')
-    out = await en.find_exam_dates(store, llm, proposals,
-                                   now=datetime(2026, 8, 25))
+    out = await en.find_exam_dates(store, llm, proposals, now=datetime.now())
     assert out == {"proposed": 1}
     item = proposals.pending()[0]
     assert item["title"] == "CS 3505 — Midterm 1"
-    assert item["start_at"] == "2026-09-10T10:00:00"
+    assert item["start_at"] == f"{exam}T10:00:00"
     assert item["status"] == "pending"          # NOT on the calendar
 
 
@@ -200,25 +206,25 @@ async def test_an_exam_canvas_already_knows_about_is_not_proposed(tmp_path, stor
     """No point proposing a date that is already a due-dated assignment."""
     conn = db.connect(tmp_path / "p.db")
     proposals = CanvasProposals(conn)
+    exam = date.today() + timedelta(days=16)
     seed(store, id=20, name="Midterm",
-         due_at=datetime(2026, 9, 10, 16, 0).astimezone().isoformat())
+         due_at=datetime.combine(exam, datetime.min.time()).replace(
+             hour=16).astimezone().isoformat())
     store.upsert_announcements([{"id": 5, "course_id": 1, "title": "Midterm",
-                                 "posted_at": "2026-08-20T00:00:00Z",
+                                 "posted_at": _recent(),
                                  "message": "m", "html_url": "a"}])
-    llm = FakeLLM('{"exam": true, "title": "Midterm", "date": "2026-09-10"}')
-    out = await en.find_exam_dates(store, llm, proposals,
-                                   now=datetime(2026, 8, 25))
+    llm = FakeLLM(f'{{"exam": true, "title": "Midterm", "date": "{exam.isoformat()}"}}')
+    out = await en.find_exam_dates(store, llm, proposals, now=datetime.now())
     assert out == {"proposed": 0}
 
 
 async def test_exam_scan_survives_a_raising_model(tmp_path, store):
     conn = db.connect(tmp_path / "p.db")
     store.upsert_announcements([{"id": 5, "course_id": 1, "title": "T",
-                                 "posted_at": "2026-08-20T00:00:00Z",
+                                 "posted_at": _recent(),
                                  "message": "m", "html_url": "a"}])
     out = await en.find_exam_dates(store, FakeLLM(RuntimeError("down")),
-                                   CanvasProposals(conn),
-                                   now=datetime(2026, 8, 25))
+                                   CanvasProposals(conn), now=datetime.now())
     assert out == {"proposed": 0}
 
 
@@ -323,3 +329,74 @@ def test_a_dismissed_exam_still_keys_on_its_date(tmp_path):
                          source_kind="announcement", source_id=5) is None
     assert proposals.add("exam", "Midterm", "2026-09-12T10:00:00",
                          source_kind="announcement", source_id=5) is not None
+
+
+# --- exam prompt includes dates (todo-fixes #133) ----------------------------
+
+async def test_exam_scan_prompt_includes_today_and_posted_dates(tmp_path, store):
+    """Year-less dates in announcement text need context to resolve correctly.
+    Use a recent posted_at so canvas_store's ANNOUNCEMENT_CUTOFF_DAYS doesn't
+    auto-classify it before find_exam_dates sees it."""
+    conn = db.connect(tmp_path / "pd.db")
+    proposals = CanvasProposals(conn)
+    # Within the 14-day cutoff window so it isn't auto-marked non-actionable.
+    recent_ts = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent_date = recent_ts[:10]
+    store.upsert_announcements([{"id": 10, "course_id": 1, "title": "Midterm notice",
+                                 "posted_at": recent_ts,
+                                 "message": "Midterm is on Oct 16",
+                                 "html_url": "h"}])
+
+    captured_system = []
+
+    class CaptureLLM(FakeLLM):
+        async def chat(self, messages, **kw):
+            captured_system.append(messages[0]["content"])
+            yield '{"exam": false}'
+
+    await en.find_exam_dates(store, CaptureLLM(), proposals)
+    assert captured_system, "no model call"
+    sys_msg = captured_system[0]
+    assert recent_date in sys_msg     # posted_at date
+    assert str(datetime.now().year) in sys_msg   # today's year
+
+
+# --- rescan after AI mode enable (todo-fixes #134) ----------------------------
+
+async def test_find_exam_dates_rescan_sees_already_classified_announcements(
+        tmp_path, store):
+    """find_exam_dates uses unclassified_announcements (actionable IS NULL),
+    so once an announcement is flagged it's invisible.  rescan bypasses that
+    filter and queries by recency, so a pre-existing announcement is still
+    scanned when AI mode is first enabled."""
+    conn = db.connect(tmp_path / "rs.db")
+    proposals = CanvasProposals(conn)
+    # Classify the announcement first (simulates a sync that ran before AI mode)
+    store.upsert_announcements([{"id": 20, "course_id": 1, "title": "Midterm",
+                                 "posted_at": datetime.now().isoformat()[:19] + "Z",
+                                 "message": "Exam next week", "html_url": "u"}])
+    store.set_announcement_flag(20, 0, None)    # mark not-actionable (classified)
+    assert store.unclassified_announcements(10) == []   # invisible to normal path
+
+    llm = FakeLLM('{"exam": true, "title": "Midterm", "date": "2026-10-16", '
+                  '"start": "10:00", "end": ""}')
+    now = datetime(2026, 10, 11)
+    out = await en.find_exam_dates_rescan(store, llm, proposals, now=now)
+    assert out["proposed"] == 1
+
+
+async def test_find_exam_dates_rescan_is_bounded_to_recent(tmp_path, store):
+    """Announcements older than RESCAN_DAYS are outside the window — don't
+    flood the model with a whole term's worth on first enable."""
+    conn = db.connect(tmp_path / "rso.db")
+    proposals = CanvasProposals(conn)
+    from datetime import timedelta
+    old_ts = (datetime.now() - timedelta(days=en.RESCAN_DAYS + 5)).isoformat()[:19] + "Z"
+    store.upsert_announcements([{"id": 30, "course_id": 1, "title": "Old",
+                                 "posted_at": old_ts,
+                                 "message": "Exam on Oct 1", "html_url": "u"}])
+    store.set_announcement_flag(30, 0, None)
+    llm = FakeLLM('{"exam": true, "title": "Old exam", "date": "2026-10-01"}')
+    out = await en.find_exam_dates_rescan(store, llm, proposals,
+                                          now=datetime(2026, 10, 11))
+    assert out["proposed"] == 0   # too old, not rescanned

@@ -120,12 +120,56 @@ any v4 screen, and update it when you add or change behaviour.
   calendar's); the legend uses calendar colours. Out-of-month days are muted
   text on the same ground. The edit dialog accepts 24:00 and reads an end at
   or before the start as the next day.
+  - **Multi-day / past-midnight events (#113):** the daemon returns every
+    event overlapping the asked range; v4's Calendar and Today split them per
+    local day with `state.expand_events` (all-day by Google's exclusive end;
+    timed: start→24:00, whole middle days, 00:00→end, judged on the real
+    length, not the 15-minute drawing floor). Each piece is a complete event
+    for its day — `date`, `start`, `start_min`, `dur` are that day's part — so
+    grids, labels and sorting need no special case. The whole event rides
+    along as `_event_date` / `_event_start_min` / `_event_dur`; the edit
+    dialog reads them through `calendar._whole()`, so editing any piece
+    changes the real event. The seam (`_calendar_handler`) hands events over
+    whole: ui_v3 files them by `date` and would draw every piece on day 1.
+  - **Declined / free events (#125):** `_norm_event` derives `declined`
+    (True when the user's own `response_status` == "declined"; checked from
+    the self-attendee first) and `free` (True when `transparency` ==
+    "transparent"). Declined events are muted in all grid views (EventBlock,
+    agenda_row, MonthCell dot and label, Today all-day strip) using the
+    "muted" theme token only — never inline colours. Today's Up Next and
+    countdown exclude declined events entirely.
+  - **Out-of-sync-window empty state (#116):** `_sync_window` is stored
+    from the daemon's `window` field. Day and week views outside it show
+    "Outside what Lumen keeps — Lumen keeps your calendar from Sep 11 to
+    Dec 10" with Go to today, instead of "Nothing scheduled".
+    `ask_context()` also reports that the range isn't synced. Month view
+    shows whatever is cached (no out-of-window block). Fetching those days
+    on demand is open product question #191.
+  - **Sync status (#117):** `last_sync`, `sync_failed`, `sync_paused` are
+    forwarded through `_calendar_handler` and stored in `CalendarScreen`.
+    Only a `calendar.refresh` reply carries the two flags (always both); a
+    cache read sends None and the screen keeps the last word, so a failure
+    doesn't vanish on navigation. `_sync_status_text()` returns a compact
+    status line ("Updated 3 min ago", "Couldn't reach Google Calendar —
+    showing events as of 9:41", "Sync paused"). It appears in the Calendar
+    header subtitle, replacing the normal subtitle only when non-empty.
+    Recomputed on show/refresh, never polled.
+  - **Midnight (#115):** `CalendarScreen._roll_day()` is the only place
+    `today` changes: a view on the old today moves to the new one and
+    fetches its range; a view you navigated to stays put.
   - **New event (#99):** times read like the edit dialog's
     (`overlays.parse_clock`: "9:30", "930", "14:00", "2pm"); a blank End takes
     the daemon's default length; "All day" hides the times. The form stays
     open until the daemon answers: success closes it with a toast and
     refreshes Today/Calendar, a failure shows in the form with everything
     still typed, and a cancelled confirm returns to it quietly.
+- **Today screen live updates (#114/#115):** `on_shown` always fires
+  `refresh_todos()` so Canvas-created todos and newly-due items appear on
+  every switch. The per-minute `_now_timer` (stopped in hideEvent) redraws
+  only the time-bound parts — now line, greeting, sync badge and the Up next
+  card (swapped in place). Never a full `rebuild()` per tick: that drops
+  keyboard focus and half-done clicks in the columns. On a date change the
+  tick re-runs `on_shown`, and the fetched day's answer rebuilds the page.
 - **Canvas:** once a login is saved, the "Save this login?" card never opens
   on its own — not even for a captured password that differs, which the 1 Hz
   poll often half-reads (#67). With nothing saved it is offered once per typed
@@ -134,6 +178,43 @@ any v4 screen, and update it when you add or change behaviour.
   empty, no "Never"). Paused in Settings, the badge reads "Sync paused", the
   tab doesn't sync on open, and Sync now explains the pause (with Open
   Settings) instead of "Sync failed" (#83).
+  - **Cookie bursts (#128):** The in-app browser fires a cookie event on almost
+    every page navigation. Only the first authenticated jar triggers an immediate
+    hand-off to the daemon; subsequent changed jars are coalesced by a 300 ms
+    single-shot `_cookie_send_timer`. Done sends a jar still waiting (it's the
+    newest session); Disconnect / forget-browser-session drops it.
+  - **Post-login refresh (#129):** `_on_connected` calls `_sync_now()` directly
+    when login completes (`_login_mode` was True and the result is connected).
+    No separate `_auto_sync_armed` chain needed.
+  - **Calendar alerts strip (#130):** When `canvas.alerts` returns items, a strip
+    appears above the assignments list with a "See changes" button. Clicking it
+    expands the list inline; "Got it" marks exactly the ids shown as seen
+    (never "all" — one that arrived meanwhile stays) and clears the strip. A
+    failed load shows "Couldn't load the calendar changes. [Try again]" with
+    no Got it. The strip is hidden when there are no unseen alerts.
+  - **Sync busy settles on error (#132):** Both `canvas_reconcile_now` and
+    `canvas_sync_now` pass `on_error` callbacks. Errors route through
+    `_on_synced({"ok": False, "error": msg})` so the busy scrim and button
+    always settle. Calendar toggle errors use `_refresh_calendar()` as the
+    error path.
+  - **Sync summary reports failures (#135, #126):** `_summary_line` checks
+    `res["failed_courses"]`, `cal.get("failed")` and `cal.get("error")`. If a
+    course didn't answer or calendar writes failed, the summary says so and
+    promises a retry ("Synced, but 2 courses didn't answer — Lumen will retry
+    next sync."). "Up to date" is never shown alongside a failure.
+  - **Keyring calls off the GUI thread (#136):** `canvas_creds.save`,
+    `.load`, `.forget`, and `.prime` are blocking keyring operations. All calls
+    from the Canvas screen go through `_run_keyring(fn, done)`, which runs `fn`
+    on a daemon thread and delivers the result to `done` via the module-level
+    `_KeyringBus` signal (queued connection — the Qt signal crosses threads
+    correctly even without an event loop on the worker). Reads go through
+    `_preload_creds` (one at a time; `_reset_autofill` bumps `_creds_gen` so a
+    stale answer is dropped). A sign-in form or a Fill press that comes before
+    the answer parks in `_fill_waiting` and runs when it lands — nothing
+    reads the keyring on the GUI thread, not even `_saved_creds()`. A save
+    updates the cached login; a failed forget re-probes and says so.
+    `_maybe_save_login` uses only cached answers, and "not known yet" counts
+    as saved: the #67 offer must never come from a guess.
 - **Settings:** all three answer modes are explained; Canvas Connect starts
   the sign-in from Accounts; Advanced shows only keys the daemon reports.
 - **Model naming:** plain words ("On this computer", "Claude · Haiku"); the

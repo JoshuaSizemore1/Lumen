@@ -4,6 +4,14 @@ the synced fields, leaving reconciliation columns (todo_id, calendar_event_id,
 first_seen, handled, seen, actionable, suggested_todo) untouched."""
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
+
+from lumen.daemon.connectors.canvas_events import GONE_STREAK
+
+# Only announcements posted within this window are offered to the classifier.
+# Older ones are stored as non-actionable on insert so they never queue a model
+# call — prevents 100+ cold loads on first connect (todo-fixes #137).
+ANNOUNCEMENT_CUTOFF_DAYS = 14
 
 
 class CanvasStore:
@@ -90,15 +98,25 @@ class CanvasStore:
     def upsert_announcements(self, rows: list[dict]) -> None:
         if not rows:
             return
+        # Announcements older than ANNOUNCEMENT_CUTOFF_DAYS are stored as
+        # actionable=0 (non-actionable) on first insert so they never queue
+        # a model call (todo-fixes #137). ON CONFLICT preserves any existing
+        # classification — only the synced text fields are updated.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=ANNOUNCEMENT_CUTOFF_DAYS)
+                  ).date().isoformat()
+        augmented = []
+        for r in rows:
+            posted = (r.get("posted_at") or "")[:10]  # YYYY-MM-DD
+            augmented.append({**r, "_act": 0 if (posted and posted < cutoff) else None})
         with self._conn:
             self._conn.executemany(
                 "INSERT INTO canvas_announcements "
-                "(id, course_id, title, posted_at, message, html_url) "
-                "VALUES (:id, :course_id, :title, :posted_at, :message, :html_url) "
+                "(id, course_id, title, posted_at, message, html_url, actionable) "
+                "VALUES (:id, :course_id, :title, :posted_at, :message, :html_url, :_act) "
                 "ON CONFLICT(id) DO UPDATE SET "
                 "title=excluded.title, posted_at=excluded.posted_at, "
                 "message=excluded.message, html_url=excluded.html_url",
-                rows)
+                augmented)
 
     def active_courses(self) -> list[dict]:
         return [dict(r) for r in self._conn.execute(
@@ -164,14 +182,41 @@ class CanvasStore:
         return {c["id"]: c for c in self.active_courses()}
 
     def active_assignments(self) -> list[dict]:
-        # Enrolled AND not archived (#28) AND not dismissed — scopes the summary
-        # list, reconcile, and pending calendar markers all at once, so a
-        # dismissed item declutters the tab and drops out of the pending count.
+        # Enrolled AND not archived (#28) AND not dismissed AND not gone — scopes
+        # the summary list, reconcile, and pending calendar markers all at once.
+        # Assignments absent from GONE_STREAK consecutive successful fetches are
+        # excluded here; the calendar sync path uses calendar_candidates() which
+        # is deliberately unfiltered so it can detect those as "gone" (#127).
         return [dict(r) for r in self._conn.execute(
             "SELECT a.* FROM canvas_assignments a "
             "JOIN canvas_courses c ON c.id = a.course_id "
             "WHERE c.active = 1 AND c.included = 1 AND a.dismissed = 0 "
-            "ORDER BY a.due_at IS NULL, a.due_at, a.id")]
+            "AND a.missing_syncs < ? "
+            "ORDER BY a.due_at IS NULL, a.due_at, a.id", (GONE_STREAK,))]
+
+    def gone_linked_assignments(self) -> list[dict]:
+        """Assignments presumed deleted/unpublished on Canvas (missing_syncs has
+        reached the streak threshold) that still have an open todo link.
+        Used by cleanup_gone_todos to unlink or delete stale todos (#127)."""
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM canvas_assignments "
+            "WHERE missing_syncs >= ? AND todo_id IS NOT NULL AND handled = 0",
+            (GONE_STREAK,))]
+
+    def unlink_todo(self, assignment_id: int) -> None:
+        """Clear the todo link WITHOUT marking handled. The assignment can gain a
+        new todo link if it reappears in a later sync (todo-fixes #127)."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET todo_id = NULL WHERE id = ?",
+                (assignment_id,))
+
+    def get_todo(self, todo_id: int) -> dict | None:
+        """Read one todo by id — shared connection; used by gone-assignment
+        cleanup to check whether the todo was user-edited (todo-fixes #127)."""
+        row = self._conn.execute(
+            "SELECT * FROM todos WHERE id = ?", (todo_id,)).fetchone()
+        return dict(row) if row else None
 
     def link_todo(self, assignment_id: int, todo_id: int, first_seen: str) -> None:
         with self._conn:
@@ -296,7 +341,9 @@ class CanvasStore:
         sync-created timed event reads as an "update" here (NULL marker_due
         never equals the due date) and "Add to calendar" would patch_all_day it
         into a flat all-day block behind the sync's back."""
+        from datetime import date as _date
         from lumen.daemon.connectors.canvas_reconcile import local_day
+        today = _date.today().isoformat()
         out: list[dict] = []
         for a in self.active_assignments():
             if active_ids is not None and a["course_id"] not in active_ids:
@@ -305,6 +352,11 @@ class CanvasStore:
                 continue
             due = local_day(a["due_at"])
             if due is None:
+                continue
+            # todo-fixes #135: "Add to calendar" should never offer or write a
+            # marker for an assignment whose deadline is already past — it would
+            # only clutter the calendar with events the user can't act on.
+            if due < today:
                 continue
             if a["calendar_event_id"] is not None and a.get("event_kind"):
                 continue                    # owned by the calendar sync
@@ -317,9 +369,26 @@ class CanvasStore:
 
     # --- announcement classification (Part 4/5) ---
     def unclassified_announcements(self, limit: int) -> list[dict]:
+        # Only announcements within the cutoff window — old ones were already
+        # stored as non-actionable on insert (todo-fixes #137).
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=ANNOUNCEMENT_CUTOFF_DAYS)
+                  ).date().isoformat()
         return [dict(r) for r in self._conn.execute(
             "SELECT * FROM canvas_announcements WHERE actionable IS NULL "
-            "ORDER BY posted_at DESC, id DESC LIMIT ?", (limit,))]
+            "AND (posted_at IS NULL OR substr(posted_at, 1, 10) >= ?) "
+            "ORDER BY posted_at DESC, id DESC LIMIT ?", (cutoff, limit))]
+
+    def recent_announcements(self, days: int, limit: int) -> list[dict]:
+        """Announcements from pulled courses posted in the last `days`,
+        classified or not — the exam re-scan after AI mode is switched on
+        (todo-fixes #134)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        return [dict(r) for r in self._conn.execute(
+            "SELECT n.* FROM canvas_announcements n "
+            "JOIN canvas_courses c ON c.id = n.course_id "
+            "WHERE c.active = 1 AND c.included = 1 "
+            "AND substr(n.posted_at, 1, 10) >= ? "
+            "ORDER BY n.posted_at DESC, n.id DESC LIMIT ?", (cutoff, limit))]
 
     def set_announcement_flag(self, ann_id: int, actionable: int,
                               suggested_todo: str | None) -> None:

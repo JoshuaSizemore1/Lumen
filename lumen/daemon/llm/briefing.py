@@ -15,15 +15,24 @@ SYSTEM = (
 )
 
 
-def _event_line(e: dict) -> str:
+def _event_line(e: dict, today: date | None = None) -> str:
     loc = f" at {e['location']}" if e.get("location") else ""
     cal = f" [{e['calendar_name']}]" if e.get("calendar_name") else ""
     if e.get("all_day"):
         return f"- all day: {e.get('title') or 'Untitled'}{cal}{loc}"
     s = datetime.fromisoformat(e["start_at"]).astimezone()
-    when = s.strftime("%H:%M")
-    if e.get("end_at"):
-        when += f"–{datetime.fromisoformat(e['end_at']).astimezone().strftime('%H:%M')}"
+    end = (datetime.fromisoformat(e["end_at"]).astimezone()
+           if e.get("end_at") else None)
+    if today is not None and s.date() < today:
+        # Began on an earlier day and still running (#113): not a start today.
+        began = f"started {s.strftime('%a %H:%M')}"
+        when = (f"until {end.strftime('%H:%M')} ({began})"
+                if end is not None and end.date() == today
+                else f"all day ({began})")
+    else:
+        when = s.strftime("%H:%M")
+        if end is not None:
+            when += f"–{end.strftime('%H:%M')}"
     return f"- {when}: {e.get('title') or 'Untitled'}{cal}{loc}"
 
 
@@ -49,7 +58,7 @@ def build_sections(events: list[dict], todos: list[dict], unread: list[dict],
     elif not events:
         lines.append("No events today.")
     else:
-        lines.extend(_event_line(e) for e in events)
+        lines.extend(_event_line(e, today) for e in events)
 
     due = [t for t in todos
            if t.get("due_date") and date.fromisoformat(t["due_date"]) <= today]

@@ -16,7 +16,7 @@ import copy
 import html
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -104,7 +104,14 @@ def _norm_event(e: dict, tz=None) -> dict:
 
     Time grids paint by `color` (real Google-calendar colors don't map to the
     mock's four categories), and `cal` (calendar name) is the day-view meta.
-    `tz` None — the live path — is local time at each event's own instant."""
+    `tz` None — the live path — is local time at each event's own instant.
+
+    Extra fields for multi-day expansion (todo-fixes #113):
+      _end_date  — exclusive end date for all-day events (Google format)
+    For RSVP / free-busy display (todo-fixes #125):
+      declined   — user's own responseStatus == "declined"
+      free       — transparency == "transparent"
+    """
     # The event's own colour wins over its calendar's (set in Google or the
     # edit dialog); `cal_color` keeps the calendar's for legends.
     color = e.get("event_color") or e.get("color") or T.TEXT_DIM
@@ -113,20 +120,94 @@ def _norm_event(e: dict, tz=None) -> dict:
     # neither, which is what hides delete in sample mode.
     ident = {"id": e.get("id"), "calendar_id": e.get("calendar_id"),
              "cal_color": e.get("color") or color}
+    # Declined / free — from daemon fields added by todo-fixes #125.
+    # "self" attendee's responseStatus wins; fall back to event-level status.
+    resp = e.get("response_status")
+    if resp is None:
+        for att in (e.get("attendees") or []):
+            if att.get("self"):
+                resp = att.get("response_status") or att.get("responseStatus")
+                break
+    declined = resp == "declined"
+    free = e.get("transparency") == "transparent"
+    extra = {"declined": declined, "free": free}
     if e.get("all_day"):
-        return {**ident, "date": e["start_at"][:10], "start": "", "start_min": 0,
+        # _end_date is Google's exclusive end (may be None for sample events).
+        end_date = None
+        if e.get("end_at"):
+            try:
+                end_date = e["end_at"][:10]
+            except (TypeError, IndexError):
+                pass
+        return {**ident, **extra, "date": e["start_at"][:10],
+                "_end_date": end_date,
+                "start": "", "start_min": 0,
                 "dur": 0, "title": e.get("title") or "Untitled", "cal": cal,
                 "color": color, "all_day": True}
     s = datetime.fromisoformat(e["start_at"]).astimezone(tz)
     if e.get("end_at"):
-        dur = max(int((datetime.fromisoformat(e["end_at"]).astimezone(tz)
-                       - s).total_seconds() // 60), 15)
+        true_dur = int((datetime.fromisoformat(e["end_at"]).astimezone(tz)
+                        - s).total_seconds() // 60)
     else:
-        dur = 30
-    return {**ident, "date": s.date().isoformat(), "start": s.strftime("%H:%M"),
-            "start_min": s.hour * 60 + s.minute, "dur": dur,
+        true_dur = 30
+    # `dur` is floored for drawing; `_true_dur` decides whether it really
+    # runs past midnight (a 23:50 ten-minute call doesn't, #113).
+    return {**ident, **extra, "date": s.date().isoformat(),
+            "start": s.strftime("%H:%M"),
+            "start_min": s.hour * 60 + s.minute, "dur": max(true_dur, 15),
+            "_true_dur": true_dur,
             "title": e.get("title") or "Untitled", "cal": cal, "color": color,
             "all_day": False}
+
+
+def _expand_event(ev: dict) -> list[dict]:
+    """One normalized event as one piece per local day it covers (#113).
+
+    * All-day: a piece per day from `date` up to Google's exclusive
+      `_end_date` (Oct 10 → Oct 13 is the 10th, 11th and 12th).
+    * Timed across midnight: day 1 runs to 24:00, middle days are whole, the
+      last day runs from 00:00 to the real end.
+    * Anything inside one day comes back as it is.
+
+    Each piece is a complete event for its own day: `date`, `start`,
+    `start_min` and `dur` describe that day's part, so grids, labels and
+    sorting need no special case. The whole event's values ride along as
+    `_event_date` / `_event_start_min` / `_event_dur` for the edit dialog,
+    which changes the real event, never one day's piece. Delete goes by id."""
+    whole = {"_event_date": ev["date"], "_event_start_min": ev.get("start_min", 0),
+             "_event_dur": ev.get("_true_dur", ev.get("dur", 0))}
+    if ev.get("all_day"):
+        try:
+            start_d = date.fromisoformat(ev["date"])
+            end_d = date.fromisoformat(ev.get("_end_date") or "")
+        except ValueError:
+            return [ev]         # no end (sample events): one day
+        n_days = (end_d - start_d).days
+        if n_days <= 1:
+            return [ev]
+        return [{**ev, **whole,
+                 "date": (start_d + timedelta(days=k)).isoformat()}
+                for k in range(n_days)]
+    start_min = ev.get("start_min", 0)
+    total_end = start_min + ev.get("_true_dur", ev.get("dur", 30))
+    if total_end <= 1440:
+        return [ev]             # ends by midnight: one day
+    start_d = date.fromisoformat(ev["date"])
+    pieces = []
+    for k in range(-(-total_end // 1440)):
+        seg_start = start_min if k == 0 else 0
+        seg_end = min(1440, total_end - k * 1440)
+        pieces.append({**ev, **whole,
+                       "date": (start_d + timedelta(days=k)).isoformat(),
+                       "start": f"{seg_start // 60:02d}:{seg_start % 60:02d}",
+                       "start_min": seg_start,
+                       "dur": max(seg_end - seg_start, 15)})
+    return pieces
+
+
+def expand_events(events: list[dict]) -> list[dict]:
+    """Every event, split into its per-day segments (#113)."""
+    return [seg for e in events for seg in _expand_event(e)]
 
 
 def _sample_events() -> list[dict]:
@@ -412,14 +493,15 @@ class AppState(QObject):
                            {"id": pid, "approve": bool(approve)},
                            cb or (lambda _r: None))
 
-    def canvas_sync_now(self, cb=None) -> None:
+    def canvas_sync_now(self, cb=None, on_error=None) -> None:
         if self._data is None:
             if cb:
                 cb({"started": False})
             return
-        self._data.request("canvas.sync_now", {}, cb or (lambda _r: None))
+        self._data.request("canvas.sync_now", {}, cb or (lambda _r: None),
+                           on_error=on_error)
 
-    def canvas_reconcile_now(self, cb=None) -> None:
+    def canvas_reconcile_now(self, cb=None, on_error=None) -> None:
         """#66 — pull from Canvas AND apply it: create/update todos, write
         calendar events, and surface anything Canvas removed for review."""
         if self._data is None:
@@ -427,6 +509,24 @@ class AppState(QObject):
                 cb({"ok": False})
             return
         self._data.request("canvas.reconcile_now", {},
+                           cb or (lambda _r: None), on_error=on_error)
+
+    def canvas_alerts(self, cb, on_error=None) -> None:
+        """#130 — unseen calendar alerts (due moved, conflicts), newest first,
+        ≤20. cb({"items": [{"id","kind","detail","created_at","assignment_id"}]})"""
+        if self._data is None:
+            cb({"items": []}); return
+        self._data.request("canvas.alerts", {}, cb, on_error=on_error)
+
+    def canvas_alerts_seen(self, ids=None, cb=None) -> None:
+        """#130 — mark alerts seen. ids=None marks all.
+        cb({"alerts": remaining_count})."""
+        if self._data is None:
+            if cb:
+                cb({"alerts": 0})
+            return
+        payload = {} if ids is None else {"ids": list(ids)}
+        self._data.request("canvas.alerts_seen", payload,
                            cb or (lambda _r: None))
 
     def canvas_courses(self, cb) -> None:
@@ -1359,11 +1459,20 @@ class AppState(QObject):
         same shape, so the caller never has to know which one ran. Events are
         converted at their own UTC offset, never today's: across a DST change
         that showed November an hour late, and the edit dialog then moved an
-        event whose end time alone was changed (#73)."""
+        event whose end time alone was changed (#73).
+
+        Events stay whole here: ui_v4 splits multi-day ones per day itself
+        (`expand_events`, #113) — ui_v3 files events by `date` alone and would
+        draw every segment on the first day. Sync status rides along (#117)."""
         def handle(result):
-            cb({"events": [_norm_event(e) for e in result.get("events", [])],
+            events = [_norm_event(e) for e in result.get("events", [])]
+            cb({"events": events,
                 "connected": result.get("connected", True),
                 "window": result.get("window"),
+                "last_sync": result.get("last_sync"),
+                # None from a cache read: only a refresh knows how a pull went.
+                "sync_failed": result.get("sync_failed"),
+                "sync_paused": result.get("sync_paused"),
                 "error": result.get("error")})
         return handle
 
@@ -1372,17 +1481,22 @@ class AppState(QObject):
         shape, with `error` set, so callers keep what they had and a loading
         skeleton gives way."""
         def fail(msg):
-            cb({"events": [], "connected": True, "window": None, "error": msg})
+            cb({"events": [], "connected": True, "window": None,
+                "last_sync": None, "sync_failed": True,
+                "sync_paused": False, "error": msg})
         self._data.request(type_, {"from": frm, "to": to},
                            self._calendar_handler(cb), on_error=fail)
 
     def fetch_calendar(self, frm: str, to: str, cb) -> None:
-        """cb(result) with result = {events(normalized), connected, window, error}."""
+        """cb(result) with result = {events(normalized), connected, window,
+        last_sync, sync_failed, sync_paused, error}."""
         if self._data is not None:
             self._calendar_request("calendar.list", frm, to, cb)
         else:
             evs = [e for e in _sample_events() if frm <= e["date"] <= to]
-            cb({"events": evs, "connected": True, "window": None, "error": None})
+            cb({"events": evs, "connected": True, "window": None,
+                "last_sync": None, "sync_failed": False,
+                "sync_paused": False, "error": None})
 
     def refresh_calendar(self, frm: str, to: str, cb) -> None:
         """Manual ↻: make the daemon sync against Google, then answer with the

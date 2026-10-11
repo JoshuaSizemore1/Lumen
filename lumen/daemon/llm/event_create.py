@@ -62,21 +62,61 @@ def _parse_local(value: str) -> datetime | None:
     return dt.replace(tzinfo=None).astimezone()
 
 
+def _coerce_datetime_field(v) -> str | None:
+    """Google Calendar returns start/end as {'dateTime': '...', 'timeZone': '...'}
+    or {'date': '...'}; coerce to the bare string the gate expects (todo-fixes #119)."""
+    if isinstance(v, dict):
+        return v.get("dateTime") or v.get("date") or None
+    return v
+
+
+def _coerce_location(v) -> str | None:
+    """Google Calendar returns location as a dict; extract its display text
+    (todo-fixes #119). None if the dict has no usable string."""
+    if isinstance(v, dict):
+        return (v.get("displayName") or v.get("description")
+                or v.get("text") or v.get("name") or None)
+    return v
+
+
+def _coerce_recurrence(v) -> tuple[str | None, str | None]:
+    """Coerce a model-returned recurrence to (rrule_str_or_None, error_or_None).
+    Handles Google's list format ['RRULE:...']; multiple/non-RRULE entries are
+    rejected with a clear message (todo-fixes #119)."""
+    if isinstance(v, list):
+        rrules = [s for s in v if isinstance(s, str) and s.startswith("RRULE:")]
+        non_rrules = [s for s in v if isinstance(s, str) and not s.startswith("RRULE:")]
+        if len(rrules) == 1 and not non_rrules:
+            return rrules[0], None
+        if len(rrules) > 1 or non_rrules:
+            return None, ("That recurrence has multiple or unsupported rules — "
+                          "say it like 'every Monday' and I'll create one rule.")
+        return None, None   # empty list
+    if isinstance(v, dict):
+        return None, ("I couldn't turn that recurrence into a rule — "
+                      "say it like 'every Monday'.")
+    return v, None
+
+
 def validate_proposal(p: dict, *, now: datetime, user_message: str,
                       context: str = "") -> tuple[dict | None, str | None]:
     """Normalized proposal or (None, honest reason the user can act on).
     `context` is the daemon-authored slot-proposal block (plus the user's
     originating ask) for booking follow-ups — addresses typed there count
     as user-typed."""
-    title = (p.get("title") or "").strip()
+    title = str(p.get("title") or "").strip()
     if not title:
         return None, "I couldn't work out a title for the event — try rephrasing."
+
+    # Coerce Google-shaped start/end dicts before parsing (todo-fixes #119).
+    start_raw = _coerce_datetime_field(p.get("start"))
+    end_raw = _coerce_datetime_field(p.get("end"))
 
     all_day = bool(p.get("all_day"))
     if all_day:
         try:
-            start_d = date.fromisoformat(str(p.get("start")))
-            end_d = date.fromisoformat(str(p["end"])) if p.get("end") else start_d
+            start_d = date.fromisoformat(str(start_raw))
+            end_d = date.fromisoformat(str(end_raw)) if end_raw else start_d
         except (TypeError, ValueError):
             return None, "I couldn't pin down the date — say it like 'July 20'."
         if end_d < start_d:
@@ -85,10 +125,10 @@ def validate_proposal(p: dict, *, now: datetime, user_message: str,
             return None, "That date is in the past."
         start_s, end_s = start_d.isoformat(), end_d.isoformat()
     else:
-        start = _parse_local(p.get("start"))
+        start = _parse_local(start_raw)
         if start is None:
             return None, "I couldn't pin down the time — say it like 'Friday 2pm'."
-        end = _parse_local(p.get("end")) if p.get("end") else (
+        end = _parse_local(end_raw) if end_raw else (
             start + timedelta(minutes=DEFAULT_DURATION_MIN))
         if end is None:
             return None, "I couldn't pin down the end time."
@@ -109,11 +149,20 @@ def validate_proposal(p: dict, *, now: datetime, user_message: str,
     attendees = []
     haystack = f"{user_message or ''}\n{context or ''}".casefold()
     for a in p.get("attendees") or []:
-        a = str(a).strip()
+        # Google Calendar sends attendees as objects; extract the email (todo-fixes #119).
+        if isinstance(a, dict):
+            a = str(a.get("email") or "").strip()
+        else:
+            a = str(a).strip()
         if EMAIL.match(a) and a.casefold() in haystack:
             attendees.append(a)
 
-    recurrence = (p.get("recurrence") or "").strip() or None
+    # Coerce recurrence (handles Google's list format; todo-fixes #119).
+    raw_rec = p.get("recurrence")
+    recurrence, rec_err = _coerce_recurrence(raw_rec)
+    if rec_err:
+        return None, rec_err
+    recurrence = (recurrence or "").strip() or None
     if recurrence:
         from dateutil.rrule import rrulestr
         try:
@@ -122,9 +171,10 @@ def validate_proposal(p: dict, *, now: datetime, user_message: str,
             return None, ("I couldn't turn that into a valid recurrence rule — "
                           "say it like 'every Monday'.")
 
+    location = _coerce_location(p.get("location"))
     return {"title": title, "start": start_s, "end": end_s, "all_day": all_day,
-            "location": (p.get("location") or "").strip() or None,
-            "description": (p.get("description") or "").strip() or None,
+            "location": (str(location or "")).strip() or None,
+            "description": str(p.get("description") or "").strip() or None,
             "attendees": attendees, "recurrence": recurrence}, None
 
 
@@ -231,10 +281,33 @@ async def propose_event(llm, message: str, *, now: datetime, model=None,
     # second-guess those; otherwise resolve the relative date in code and
     # hand the model the concrete answer (todo-fixes #8).
     resolved = None if context else resolve_relative_phrase(message, now.date())
+    # Detect multi-date messages: after removing the resolved phrase, does
+    # another resolvable date remain? If so, provide references for each but
+    # skip the mechanical override — the model must pick the right one
+    # (todo-fixes #118: "dinner tomorrow before the recital on friday").
+    residual_resolved = None
     if resolved is not None:
+        residual = re.sub(
+            r"\b" + re.escape(resolved[1]) + r"\b", "",
+            message, count=1, flags=re.IGNORECASE)
+        residual = re.sub(r"\s+", " ", residual).strip()
+        residual_resolved = resolve_relative_phrase(residual, now.date())
+    # Two phrases naming the same day ("friday … this friday") are one date.
+    multi_date = (residual_resolved is not None
+                  and residual_resolved[0] != resolved[0])
+
+    if resolved is not None and not multi_date:
         system += (f'\nIn this request, "{resolved[1]}" means '
                    f"{resolved[0].isoformat()} "
                    f"({resolved[0].strftime('%A')}) — use exactly this date.")
+    elif multi_date:
+        # Multiple date phrases — give each as a reference; the model decides
+        # which one the event falls on (todo-fixes #118).
+        refs = (f'"{resolved[1]}" = {resolved[0].isoformat()}'
+                f' ({resolved[0].strftime("%A")}); '
+                f'"{residual_resolved[1]}" = {residual_resolved[0].isoformat()}'
+                f' ({residual_resolved[0].strftime("%A")})')
+        system += f"\nDate reference for this request: {refs}."
     if context:
         system += ("\nYou just proposed these times to the user; they are "
                    f"choosing one of them:\n{context}\n"
@@ -248,12 +321,12 @@ async def propose_event(llm, message: str, *, now: datetime, model=None,
     if raw is None:
         return None, ("I couldn't turn that into an event — try including a "
                       "day and a time, like 'call with Sam Friday 2pm'.")
-    if resolved is not None:
+    if resolved is not None and not multi_date:
+        # Single resolved date — mechanically pin it (todo-fixes #8).
         raw = apply_resolved_date(raw, resolved[0])
     elif not context:
-        # No exact date to pin, but the words may still pin the year — the 4B
-        # answers "March next year" with the CURRENT year, which then dies at
-        # the gate as "that date is in the past".
+        # No pinned date (multi-date or no date) — still correct the year if
+        # the words demand it (the 4B answers "March next year" with CURRENT year).
         raw = apply_year_correction(raw, message, now.date())
     return validate_proposal(raw, now=now, user_message=message,
                              context=context or "")

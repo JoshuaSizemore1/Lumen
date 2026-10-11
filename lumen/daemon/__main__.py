@@ -148,6 +148,10 @@ async def run() -> None:
         t.cancel()
     await asyncio.gather(*bg_tasks, return_exceptions=True)
     await server.stop()
+    # Their syncs outlive the poll tasks (shared, shielded): end them while
+    # the database is still open.
+    await canvas.aclose()
+    await calendar.aclose()
     # Detached writes (an open-as-read receipt, say) get a short grace period to
     # land rather than being dropped on the floor mid-shutdown.
     try:

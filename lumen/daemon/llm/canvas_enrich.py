@@ -53,14 +53,19 @@ CLASSIFY_SYSTEM = (
     'If the text says nothing useful, use {"summary": "", "type": "other"}.'
 )
 
-EXAM_SYSTEM = (
-    "You read one course announcement and decide whether it states the date of an "
-    "EXAM, midterm, final, or quiz. Reply with ONLY a JSON object: "
-    '{"exam": true|false, "title": a short name for it, '
-    '"date": YYYY-MM-DD, "start": HH:MM 24-hour or "", "end": HH:MM or ""}. '
-    'Only true when an actual date is stated. A reminder about an exam whose '
-    'date is not given is {"exam": false}.'
+_EXAM_SYSTEM_TMPL = (
+    "Today is {today}. This announcement was posted on {posted}. "
+    "You read it and decide whether it states the date of an EXAM, midterm, "
+    "final, or quiz. Reply with ONLY a JSON object: "
+    '{{"exam": true|false, "title": a short name for it, '
+    '"date": YYYY-MM-DD, "start": HH:MM 24-hour or "", "end": HH:MM or ""}}. '
+    "Only true when an actual date is stated. A reminder about an exam whose "
+    'date is not given is {{"exam": false}}.'
 )
+
+# todo-fixes #134: how far back to look when re-scanning for exam dates after
+# AI mode is enabled.  Bounded so it doesn't flood the model on first enable.
+RESCAN_DAYS = 14
 
 
 def _parse_obj(text: str) -> dict | None:
@@ -167,23 +172,26 @@ def exam_span(found: dict) -> tuple[str, str | None]:
     return start, later.isoformat()
 
 
-async def find_exam_dates(store, llm, proposals, *, cap: int = EXAM_CAP,
-                          now: datetime | None = None,
-                          budget: float = BUDGET_SECONDS) -> dict:
-    """Mine announcements for exam dates. NEVER creates — writes a proposal."""
-    now = now or datetime.now()
-    started = time.monotonic()
-    courses = store.courses_by_id()
+async def _scan_announcements(anns, store, llm, proposals, *, now, started,
+                              budget, courses) -> int:
+    """Inner loop shared by find_exam_dates and find_exam_dates_rescan."""
     found = 0
-    for ann in store.unclassified_announcements(cap):
+    for ann in anns:
         if time.monotonic() - started > budget:
             break
         try:
+            # todo-fixes #133: include today's date and the announcement's
+            # posted date so a year-less "Thursday Oct 16" resolves correctly.
+            posted_raw = (ann.get("posted_at") or "")[:10]
+            system = _EXAM_SYSTEM_TMPL.format(
+                today=now.date().strftime("%A %Y-%m-%d"),
+                posted=posted_raw or "unknown date",
+            )
             reply = ""
             user = (f"Title: {ann.get('title') or '(none)'}\n\n"
                     f"{ce.strip_html(ann.get('message'), BODY_CAP)}")
             async for chunk in llm.chat(
-                    [{"role": "system", "content": EXAM_SYSTEM},
+                    [{"role": "system", "content": system},
                      {"role": "user", "content": user}]):
                 reply += chunk
             got = validate_exam(_parse_obj(reply), today=now.date())
@@ -206,6 +214,40 @@ async def find_exam_dates(store, llm, proposals, *, cap: int = EXAM_CAP,
                          detail=f"From an announcement in {label}.",
                          source_kind="announcement", source_id=ann["id"]):
             found += 1
+    return found
+
+
+async def find_exam_dates(store, llm, proposals, *, cap: int = EXAM_CAP,
+                          now: datetime | None = None,
+                          budget: float = BUDGET_SECONDS) -> dict:
+    """Mine announcements for exam dates. NEVER creates — writes a proposal."""
+    now = now or datetime.now()
+    courses = store.courses_by_id()
+    found = await _scan_announcements(
+        store.unclassified_announcements(cap), store, llm, proposals,
+        now=now, started=time.monotonic(), budget=budget, courses=courses)
+    return {"proposed": found}
+
+
+async def find_exam_dates_rescan(store, llm, proposals, *,
+                                 cap: int = EXAM_CAP,
+                                 now: datetime | None = None,
+                                 budget: float = BUDGET_SECONDS) -> dict:
+    """Re-scan recent announcements for exam dates after AI mode is enabled.
+
+    `find_exam_dates` only looks at announcements where `actionable IS NULL`
+    (new/unprocessed by flag_announcements).  When the AI switch is first
+    turned on, all announcements have already been classified (actionable 0/1),
+    so `find_exam_dates` sees nothing.  This function queries by recency
+    instead, bounded to RESCAN_DAYS, so it never floods the model
+    (todo-fixes #134). Run from the sync's enrichment pass, so the model-off
+    switch and LLMUnavailable handling apply as for every other AI pass."""
+    now = now or datetime.now()
+    anns = store.recent_announcements(RESCAN_DAYS, cap)
+    courses = store.courses_by_id()
+    found = await _scan_announcements(
+        anns, store, llm, proposals,
+        now=now, started=time.monotonic(), budget=budget, courses=courses)
     return {"proposed": found}
 
 

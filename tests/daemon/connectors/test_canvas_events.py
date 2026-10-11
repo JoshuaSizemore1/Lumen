@@ -361,6 +361,38 @@ def test_conflicts_tolerate_unparseable_rows():
                                    {}]) == []
 
 
+def test_conflicts_skips_the_actions_own_linked_event():
+    """todo-fixes #130: an update action's linked event is in the existing list;
+    comparing it against itself flagged every Canvas deadline as a conflict."""
+    r = linked()          # already has calendar_event_id = "evt_1"
+    r["due_at"] = "2026-09-03T05:59:59Z"     # due date moved → update action
+    action = ce.plan([r], NOW)[0]
+    assert action.op == "update" and action.event_id == "evt_1"
+    # The linked event is in the existing list — must not conflict with itself.
+    existing = [{"id": "evt_1", "start_at": "2026-09-01T23:44:59-06:00",
+                 "end_at": "2026-09-01T23:59:59-06:00", "all_day": False,
+                 "description": ce.FOOTER}]
+    assert ce.conflicts([action], existing) == []
+
+
+def test_conflicts_skips_lumen_created_canvas_events():
+    """todo-fixes #130: multiple 11:59-PM Canvas deadlines on the same night
+    overlap each other.  All Canvas events have FOOTER in their description,
+    so they must not flag each other."""
+    action = ce.plan([row()], NOW)[0]   # 23:44–23:59 on 2026-09-01
+    # Another Canvas event at the same time (different assignment).
+    other_canvas = {"id": "evt_other", "start_at": "2026-09-01T23:30:00-06:00",
+                    "end_at": "2026-09-01T23:59:59-06:00", "all_day": False,
+                    "description": ce.FOOTER + "\nextra text"}
+    # A real external event at the same time (should still conflict).
+    external = {"id": "evt_ext", "start_at": "2026-09-01T23:30:00-06:00",
+                "end_at": "2026-09-01T23:59:59-06:00", "all_day": False,
+                "description": "Study group meeting"}
+    pairs = ce.conflicts([action], [other_canvas, external])
+    assert len(pairs) == 1
+    assert pairs[0][1]["id"] == "evt_ext"
+
+
 def _utc(local_iso: str) -> str:
     """Local ISO -> the RFC3339 UTC string Canvas would have sent."""
     from datetime import timezone

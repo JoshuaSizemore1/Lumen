@@ -1,7 +1,7 @@
 """Local-time helpers for calendar events: the UTC offset stamped onto an
 edited event's times, and the local day an event belongs to. Its own module,
 like gcal_colors, so both UIs share one copy without importing the router."""
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 
 def local_day(start_at: str) -> str:
@@ -17,6 +17,37 @@ def local_day(start_at: str) -> str:
     except ValueError:
         return text[:10]
     return (dt.astimezone() if dt.tzinfo else dt).date().isoformat()
+
+
+def local_end_day(end_at: str | None, all_day: bool) -> str | None:
+    """The last local date the event occupies (todo-fixes #113).
+
+    All-day: Google's end date is EXCLUSIVE ("2026-07-11" for a one-day PTO on
+    the 10th), so subtract one day. Timed: convert to local; an end exactly at
+    midnight has no presence on that new day, so it belongs to the previous one
+    (e.g. a 10 PM–midnight party ends on the same day it started)."""
+    if not end_at:
+        return None
+    text = str(end_at)
+    if all_day:
+        if len(text) == 10:
+            try:
+                return (date.fromisoformat(text) - timedelta(days=1)).isoformat()
+            except ValueError:
+                return None
+        return None
+    if len(text) == 10:
+        return text
+    try:
+        dt = datetime.fromisoformat(text)
+        local = dt.astimezone() if dt.tzinfo else dt
+        # End at exact midnight = start of the next day; the event has no
+        # presence on that day, so the last day is the one before.
+        if local.hour == 0 and local.minute == 0 and local.second == 0:
+            return (local.date() - timedelta(days=1)).isoformat()
+        return local.date().isoformat()
+    except ValueError:
+        return text[:10]
 
 
 def tz_offset(day: date | None = None, h: int = 12, m: int = 0) -> str:

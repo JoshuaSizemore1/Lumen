@@ -329,7 +329,14 @@ def _parse(value: str):
 def conflicts(actions: list[Action], existing: list[dict]) -> list[tuple]:
     """(action, event) pairs whose times overlap an event already on the
     calendar. Timed events only — an all-day marker overlaps everything, which
-    would make the flag useless."""
+    would make the flag useless.
+
+    Two classes of false positives are excluded (todo-fixes #130):
+    * Self-overlap: an update action's own linked event is in the existing list;
+      comparing it against itself would flag every Canvas deadline as a conflict.
+    * Canvas-vs-Canvas: multiple 11:59 PM deadlines on the same day overlap each
+      other. Every Lumen-created Canvas event has FOOTER in its description, so
+      we skip existing events that carry it."""
     out = []
     for action in actions:
         if action.op == "remove" or action.kind != "timed":
@@ -339,6 +346,13 @@ def conflicts(actions: list[Action], existing: list[dict]) -> list[tuple]:
             continue
         for event in existing:
             if event.get("all_day"):
+                continue
+            # Skip the event this action is replacing (update/recreate).
+            if action.event_id and event.get("id") == action.event_id:
+                continue
+            # Skip other Lumen-made Canvas deadline events — they legitimately
+            # cluster at 11:59 PM and flagging them as conflicts is noise.
+            if FOOTER in (event.get("description") or ""):
                 continue
             e_start = _parse(event.get("start_at"))
             e_end = _parse(event.get("end_at")) or e_start

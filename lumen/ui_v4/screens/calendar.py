@@ -44,6 +44,7 @@ from ..overlays import (
 
 from ...daemon.connectors.gcal_colors import GCAL_COLOR_NAMES
 from ...daemon.connectors.gcal_time import tz_offset
+from ...ui_v2.state import expand_events
 
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 WD_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
@@ -62,6 +63,15 @@ NARROW_W = 900
 # ---- helpers ----------------------------------------------------------------
 def monday_of(d: date) -> date:
     return d - timedelta(days=d.weekday())
+
+
+def _short_day(iso: str) -> str:
+    """"Sep 11" from an ISO date; the text unchanged if it isn't one."""
+    try:
+        d = date.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return str(iso)
+    return f"{d.strftime('%b')} {d.day}"
 
 
 def event_color(ev: dict) -> str:
@@ -86,11 +96,21 @@ def hhmm(minutes: int) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
+def _whole(ev: dict) -> tuple[str, int, int]:
+    """(start date, start minute, length) of the whole event. One day's piece
+    of a multi-day event carries them as `_event_*` (#113); the edit dialog
+    must change the real event, never the piece."""
+    return (ev.get("_event_date") or ev["date"],
+            ev.get("_event_start_min", ev.get("start_min", 0)),
+            ev.get("_event_dur", ev.get("dur", 30)))
+
+
 def _end_hhmm(ev: dict) -> str:
     """The end time as the edit dialog shows it: "24:00" for midnight, and
     the clock time for an event that runs past it (the dialog reads an end
     at or before the start as the next day)."""
-    end = ev.get("start_min", 0) + ev.get("dur", 30)
+    _day, start, dur = _whole(ev)
+    end = start + dur
     return "24:00" if end == 24 * 60 else hhmm(end % (24 * 60))
 
 
@@ -174,7 +194,8 @@ class _Painted(QWidget):
 
 # ---- time grid pieces -------------------------------------------------------
 class EventBlock(_Painted):
-    """One timed event: a tinted rounded block, title plus time."""
+    """One timed event: a tinted rounded block, title plus time.
+    Declined events (#125) are shown with greatly reduced opacity."""
 
     def __init__(self, ev: dict, on_click=None):
         super().__init__()
@@ -183,8 +204,13 @@ class EventBlock(_Painted):
         if on_click is not None:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         cal = f" · {ev['cal']}" if ev.get("cal") else ""
-        self.setToolTip(f"{ev.get('title', 'Untitled')}\n{time_range(ev)}{cal}")
-        self.setAccessibleName(f"{ev.get('title', 'Untitled')}, {time_range(ev)}")
+        tip = f"{ev.get('title', 'Untitled')}\n{time_range(ev)}{cal}"
+        if ev.get("declined"):
+            tip += "\n(You declined this)"
+        self.setToolTip(tip)
+        self.setAccessibleName(
+            f"{ev.get('title', 'Untitled')}, {time_range(ev)}"
+            + (" (declined)" if ev.get("declined") else ""))
 
     def mousePressEvent(self, e):
         if self._on_click and e.button() == Qt.MouseButton.LeftButton:
@@ -198,11 +224,17 @@ class EventBlock(_Painted):
         t = T.current()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        declined = bool(self.ev.get("declined"))
         c = QColor(event_color(self.ev))
+        # Declined events use the "muted" theme token colour so they recede
+        # visually without inline colour hacks. (#125)
+        if declined:
+            c = t.color("muted")
         fill = QColor(c)
-        fill.setAlpha(70 if t.dark else 44)
+        fill.setAlpha((30 if t.dark else 20) if declined
+                      else (70 if t.dark else 44))
         edge = QColor(c)
-        edge.setAlpha(170)
+        edge.setAlpha(90 if declined else 170)
         p.setPen(QPen(edge, 1))
         p.setBrush(fill)
         p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
@@ -212,7 +244,7 @@ class EventBlock(_Painted):
             return
         tf = _font(T.FONT_SANS, 12, QFont.Weight.DemiBold)
         p.setFont(tf)
-        p.setPen(t.color("fg"))
+        p.setPen(t.color("muted" if declined else "fg"))
         fm = p.fontMetrics()
         p.drawText(QRectF(7, 3, w, fm.height()),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -221,7 +253,7 @@ class EventBlock(_Painted):
         if self.height() >= 36:
             mf = _font(T.FONT_MONO, 11)
             p.setFont(mf)
-            p.setPen(t.color("fg2"))
+            p.setPen(t.color("muted"))
             fm2 = p.fontMetrics()
             p.drawText(QRectF(7, 4 + fm.height(), w, fm2.height()),
                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -367,18 +399,25 @@ class MonthCell(_Painted):
                                               e.get("start_min", 0)))
         for ev in shown[:self.MAX_SHOWN]:
             row = hbox(s=6)
-            row.addWidget(Dot(lambda c=event_color(ev): c, 6), 0,
+            declined = bool(ev.get("declined"))
+            # Declined events use the "muted" token for the dot (#125).
+            dot_fn = "muted" if declined else (lambda c=event_color(ev): c)
+            row.addWidget(Dot(dot_fn, 6), 0,
                           Qt.AlignmentFlag.AlignVCenter)
             if not ev.get("all_day"):
                 row.addWidget(Label(ev.get("start", ""), "meta"))
             row.addWidget(ElideLabel(ev.get("title", ""),
-                                     "small" if in_month else "muted"), 1)
+                                     "muted" if declined
+                                     else ("small" if in_month else "muted")),
+                          1)
             v.addLayout(row)
         more = n - min(n, self.MAX_SHOWN)
         if more > 0:
             v.addWidget(Label(f"+{more} more", "caption"))
         v.addStretch(1)
-        tip = "\n".join(f"{time_range(e)}  {e.get('title', '')}" for e in shown)
+        tip = "\n".join(f"{time_range(e)}  {e.get('title', '')}"
+                        + (" (declined)" if e.get("declined") else "")
+                        for e in shown)
         if tip:
             self.setToolTip(tip)
 
@@ -509,14 +548,15 @@ class EventEditOverlay(_Overlay):
         for f in (self.title_f, self.start_f, self.end_f):
             f.clear_error()
         self.title_f.set_text(ev.get("title", ""))
+        _day, start, dur = _whole(ev)
         # A timed event a day or longer can't be expressed as two clock times
         # on one date; editing them would cut it short. Title, place and
         # colour still edit; times are left alone.
-        timed = not ev.get("all_day") and ev.get("dur", 30) < 24 * 60
+        timed = not ev.get("all_day") and dur < 24 * 60
         self._timed = timed
         self.times.setVisible(timed)
         if timed:
-            self.start_f.set_text(hhmm(ev.get("start_min", 0)))
+            self.start_f.set_text(hhmm(start))
             self.end_f.set_text(_end_hhmm(ev))
         self.loc_f.set_text("")
         self.color.setCurrentIndex(0)
@@ -524,7 +564,7 @@ class EventEditOverlay(_Overlay):
         self.title_f.input.setFocus()
 
     def _iso(self, value: str, next_day: bool = False) -> str:
-        day = date.fromisoformat(self.ev["date"])
+        day = date.fromisoformat(_whole(self.ev)[0])
         if value == "24:00":
             value, next_day = "00:00", True
         if next_day:
@@ -559,7 +599,7 @@ class EventEditOverlay(_Overlay):
                 self.end_f.input.setFocus()
                 return
             s, e = hhmm(s_min), hhmm(e_min)
-            orig_s = hhmm(ev.get("start_min", 0))
+            orig_s = hhmm(_whole(ev)[1])
             if (s, e) != (orig_s, _end_hhmm(ev)):
                 changes["start"] = self._iso(s)
                 # An end at or before the start runs past midnight (L5).
@@ -601,6 +641,11 @@ class CalendarScreen(QWidget):
         self._narrow = False
         self._editor: EventEditOverlay | None = None
         self._splitter: QSplitter | None = None
+        # Sync window and status — forwarded from the daemon response (#116/#117).
+        self._sync_window: tuple[str, str] | None = None
+        self._last_sync: str | None = None
+        self._sync_failed = False
+        self._sync_paused = False
         # Day columns showing today; the minute timer moves their now-line.
         self._now_cols: list[DayColumn] = []
         self._now_timer = QTimer(self)
@@ -652,8 +697,7 @@ class CalendarScreen(QWidget):
 
     # ---- hooks --------------------------------------------------------------
     def on_shown(self, date=None, view=None, new=False):  # noqa: A002
-        self.today = datetime.now().date()
-        moved = False
+        moved = self._roll_day()
         if view in ("month", "week", "day") and view != self.view:
             self.view = view
             self.seg.set_value(view)
@@ -680,16 +724,35 @@ class CalendarScreen(QWidget):
         if not self._connected:
             lines.append("Google Calendar is not connected.")
             return "\n".join(lines)
-        evs = sorted((e for e in self._events
-                      if frm.isoformat() <= e["date"] <= to.isoformat()),
-                     key=lambda e: (e["date"], e.get("start_min", 0)))
+        # If the current view is outside the sync window, say so clearly so
+        # the model doesn't make free-time claims about unsynced dates (#116).
+        if self._outside_window(frm, to):
+            win = self._sync_window
+            if win:
+                lines.append(
+                    f"This date range is outside Lumen's synced window "
+                    f"({win[0]} to {win[1]}). Event data is not available.")
+            else:
+                lines.append("This date range may be outside the synced window.")
+            return "\n".join(lines)
+        evs = sorted(
+            (e for e in self._events
+             if frm.isoformat() <= (e.get("date", "")) <= to.isoformat()),
+            key=lambda e: ((e.get("date", "")),
+                           e.get("start_min", 0)))
         if not evs:
             lines.append("No events in this range.")
         for e in evs[:60]:
-            d = datetime.fromisoformat(e["date"]).date()
+            day_iso = e.get("date", "")
+            try:
+                d = date.fromisoformat(day_iso)
+            except ValueError:
+                continue
             cal = f" ({e['cal']})" if e.get("cal") else ""
+            declined = " [declined]" if e.get("declined") else ""
             lines.append(f"- {WEEKDAYS[d.weekday()]} {MON3[d.month - 1]} "
-                         f"{d.day} {time_range(e)}: {e.get('title', '')}{cal}")
+                         f"{d.day} {time_range(e)}: "
+                         f"{e.get('title', '')}{cal}{declined}")
         return "\n".join(lines)
 
     def apply_theme(self):
@@ -744,16 +807,35 @@ class CalendarScreen(QWidget):
 
     def _loaded_result(self, result: dict):
         self._loaded = True
+        # Sync status (#117) — update regardless of error so the header
+        # reflects the most recent attempt.
+        win = result.get("window")
+        if win and len(win) == 2:
+            self._sync_window = (win[0], win[1])
+        ls = result.get("last_sync")
+        if ls is not None:
+            self._last_sync = ls
+        # Only a refresh says how a Google pull went; a cache read (None)
+        # keeps the last word, so a failure doesn't vanish on navigation.
+        if result.get("sync_failed") is not None:
+            self._sync_failed = bool(result["sync_failed"])
+        if result.get("sync_paused") is not None:
+            self._sync_paused = bool(result["sync_paused"])
+
         if result.get("error"):
             if not self._events:
                 self._load_error = True
                 self.rebuild()
             else:
-                self.win.show_toast("Couldn't refresh the calendar. Showing "
-                                    "what Lumen already had.")
+                # Show the error in the header too (failed manual ↻).
+                self._sync_failed = True
+                self.win.show_toast(
+                    self._sync_status_text() or
+                    "Couldn't refresh the calendar. Showing what Lumen already had.")
+                self._sync_chrome()   # update the status label without full rebuild
             return
         self._load_error = False
-        self._events = result.get("events", [])
+        self._events = expand_events(result.get("events", []))
         self._connected = result.get("connected", True)
         self.rebuild()
 
@@ -833,9 +915,25 @@ class CalendarScreen(QWidget):
         self._now_timer.stop()
         super().hideEvent(ev)
 
+    def _roll_day(self) -> bool:
+        """A new day since `today` was set (#115): a view that was on the old
+        today moves to the new one — one you navigated to stays. The only
+        place `today` changes, so the two can't drift apart. True when the
+        view moved: its events are another range's, so the caller fetches."""
+        real = datetime.now().date()
+        if real == self.today:
+            return False
+        moved = self.anchor == self.today
+        if moved:
+            self.anchor = real
+        self.today = real
+        return moved
+
     def _tick_now(self):
         if datetime.now().date() != self.today:
-            self.rebuild()              # midnight passed: move "today"
+            if self._roll_day():
+                self.sync()             # its answer rebuilds
+            self.rebuild()
             return
         m = self._now_minute()
         for col in list(self._now_cols):
@@ -880,7 +978,42 @@ class CalendarScreen(QWidget):
             first = self.anchor.replace(day=1)
             nxt = (first + timedelta(days=32)).replace(day=1)
             lo, hi = first.isoformat(), (nxt - timedelta(days=1)).isoformat()
-        return [e for e in self._events if lo <= e["date"] <= hi]
+        return [e for e in self._events
+                if lo <= (e.get("date", "")) <= hi]
+
+    def _outside_window(self, frm: date, to: date) -> bool:
+        """True when the requested range is entirely outside the sync window."""
+        if not self._sync_window:
+            return False
+        w_from, w_to = self._sync_window
+        return to.isoformat() < w_from or frm.isoformat() > w_to
+
+    def _sync_status_text(self) -> str:
+        """One-line status for the calendar header (shown on show/refresh)."""
+        if self._sync_paused:
+            return "Sync paused"
+        if self._sync_failed:
+            if self._last_sync:
+                try:
+                    dt = datetime.fromisoformat(self._last_sync).astimezone()
+                    t = dt.strftime("%-H:%M")
+                except (ValueError, TypeError):
+                    t = self._last_sync
+                return f"Couldn't reach Google Calendar — showing events as of {t}"
+            return "Couldn't reach Google Calendar"
+        if self._last_sync:
+            try:
+                delta = (datetime.now().astimezone()
+                         - datetime.fromisoformat(self._last_sync).astimezone())
+                mins = int(delta.total_seconds() // 60)
+                if mins < 1:
+                    return "Updated just now"
+                if mins < 60:
+                    return f"Updated {mins} min ago"
+                return f"Updated {mins // 60} h ago"
+            except (ValueError, TypeError):
+                pass
+        return ""
 
     def _sync_chrome(self):
         self.header.set_title(self._title())
@@ -890,12 +1023,25 @@ class CalendarScreen(QWidget):
         if not self._loaded or not self._connected:
             self.count_label.setText("")
         else:
-            n = len(self._in_range())
-            this = {"month": "this month", "week": "this week",
-                    "day": "on this day"}[self.view]
-            self.count_label.setText(
-                f"{n} event{'s' if n != 1 else ''} {this}" if n
-                else f"Nothing scheduled {this}")
+            frm, to = self._range()
+            if self._outside_window(frm, to):
+                self.count_label.setText("")
+            else:
+                # Events, not day pieces: a weekend trip is one (#113).
+                # Sample events have no id; each counts once.
+                n = len({(e.get("calendar_id"), e.get("id")) if e.get("id")
+                         else idx for idx, e in enumerate(self._in_range())})
+                this = {"month": "this month", "week": "this week",
+                        "day": "on this day"}[self.view]
+                self.count_label.setText(
+                    f"{n} event{'s' if n != 1 else ''} {this}" if n
+                    else f"Nothing scheduled {this}")
+        # Sync-status label under the title (#117) — recomputed on show/refresh,
+        # never on a polling timer.
+        status = self._sync_status_text() if self._loaded else ""
+        self.header.set_subtitle(status if status
+                                 else "Your Google Calendar. Lumen asks "
+                                      "before it changes anything.")
         clear_layout(self.legend_lay)
         cals: dict[str, str] = {}
         for e in self._in_range():
@@ -911,7 +1057,8 @@ class CalendarScreen(QWidget):
         self.legend.setVisible(bool(cals) and not self._narrow)
 
     def rebuild(self):
-        self.today = datetime.now().date()
+        if self._roll_day():
+            self.sync()                 # the view moved to a new day (#115)
         self._splitter = None
         self._now_cols = []
         clear_layout(self.body_lay)
@@ -937,6 +1084,20 @@ class CalendarScreen(QWidget):
                 "connected. You can connect it in Settings.",
                 "Open Settings", lambda: self.win.switch_to("settings")))
             return
+        # Out-of-sync-window empty state (#116) — only for day/week view where
+        # the empty state would mislead. Month shows what's cached with context.
+        if self.view in ("day", "week"):
+            frm, to = self._range()
+            if self._outside_window(frm, to):
+                win = self._sync_window
+                sub = ("Lumen keeps your calendar "
+                       f"from {_short_day(win[0])} to {_short_day(win[1])}. "
+                       "This period is outside that range." if win
+                       else "This period is outside what Lumen keeps.")
+                self.body_lay.addWidget(EmptyState(
+                    "calendar", "Outside what Lumen keeps", sub,
+                    "Go to today", self._go_today))
+                return
         if self.view == "month":
             self.body_lay.addWidget(self._month())
         elif self.view == "week":
@@ -1016,8 +1177,9 @@ class CalendarScreen(QWidget):
         if strip is not None:
             v.addWidget(strip)
 
+        lo_iso, hi_iso = days[0].isoformat(), days[-1].isoformat()
         week_events = [e for e in self._events
-                       if days[0].isoformat() <= e["date"] <= days[-1].isoformat()]
+                       if lo_iso <= (e.get("date", "")) <= hi_iso]
         start_h, end_h = day_hours(week_events)
         grid = QWidget()
         g = hbox(grid, (0, 0, 0, 0), 0)
@@ -1037,7 +1199,9 @@ class CalendarScreen(QWidget):
         return w
 
     def _day(self) -> QWidget:
-        todays = [e for e in self._events if e["date"] == self.anchor.isoformat()]
+        anchor_iso = self.anchor.isoformat()
+        todays = [e for e in self._events
+                  if e.get("date") == anchor_iso]
         start_h, end_h = day_hours(todays)
 
         grid = QWidget()
@@ -1091,10 +1255,14 @@ class CalendarScreen(QWidget):
         row = QWidget()
         row.setMinimumHeight(T.ROW_H)
         h = hbox(row, (0, T.S2, 0, T.S2), T.S3)
-        h.addWidget(Dot(lambda c=event_color(ev): c, 8), 0,
-                    Qt.AlignmentFlag.AlignTop)
+        declined = bool(ev.get("declined"))
+        # Declined events use the "muted" theme token for the dot (#125).
+        dot_color = "muted" if declined else (lambda c=event_color(ev): c)
+        h.addWidget(Dot(dot_color, 8), 0, Qt.AlignmentFlag.AlignTop)
         col = vbox(s=2)
-        col.addWidget(Label(ev.get("title", "Untitled"), "body", wrap=True))
+        # Title in muted role when declined; "body" otherwise.
+        title_role = "muted" if declined else "body"
+        col.addWidget(Label(ev.get("title", "Untitled"), title_role, wrap=True))
         meta = hbox(s=T.S2)
         if ev.get("all_day"):
             meta.addWidget(Badge("neutral", "All day"))
@@ -1102,17 +1270,20 @@ class CalendarScreen(QWidget):
             meta.addWidget(Label(time_range(ev), "mono"))
         if ev.get("cal"):
             meta.addWidget(Label(ev["cal"], "muted"))
+        if declined:
+            meta.addWidget(Badge("neutral", "Declined"))
         meta.addStretch(1)
         col.addLayout(meta)
         h.addLayout(col, 1)
         # Edit and delete live only in the agenda, never on grid blocks where
         # a stray click on a dense week would fire them (ui_v3).
         if ev.get("id"):
-            h.addWidget(IconButton("edit", f"Edit “{ev.get('title', '')}”",
+            _t = ev.get("title", "")
+            h.addWidget(IconButton("edit", f"Edit “{_t}”",
                                    size=32, icon_size=16,
                                    on_click=lambda e=ev: self._edit_event(e)),
                         0, Qt.AlignmentFlag.AlignTop)
-            h.addWidget(IconButton("trash", f"Delete “{ev.get('title', '')}”",
+            h.addWidget(IconButton("trash", f"Delete “{_t}”",
                                    size=32, icon_size=16,
                                    on_click=lambda e=ev: self._delete_event(e)),
                         0, Qt.AlignmentFlag.AlignTop)

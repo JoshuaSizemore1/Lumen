@@ -4,7 +4,7 @@ deterministic daemon-side — the model summarizes what it was handed, with
 subjects/dates so every claim is checkable (book-recs grounding pattern)."""
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from lumen.daemon.connectors.email_menu import local_received
 
@@ -27,6 +27,35 @@ _STOP = frozenset(
     "prep prepare me for my our the a an this that these meeting meetings "
     "call calls event events appointment appointments sync with on at in "
     "today tomorrow next week am pm and of to about".split())
+
+# Possessive day anchor: "tomorrow's", "friday's", "next monday's" (todo-fixes #124).
+_POSS_DAY = re.compile(
+    r"\b(tomorrow|today|(?:next\s+)?"
+    r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))"
+    r"[\x27’]s\b",
+    re.IGNORECASE)
+
+
+def parse_prep_day(message: str, today: date) -> date | None:
+    """Parse an explicit target day from a prep request (todo-fixes #124).
+    Handles possessive ('tomorrow's standup', 'friday's review') and plain
+    ('on friday', 'next tuesday', 'tomorrow') forms. Returns None when no
+    day is named — the caller keeps the current any-upcoming-event behaviour."""
+    from lumen.daemon.connectors.todo_parse import resolve_relative_phrase
+    t = message.lower()
+    # Possessive: extract the anchor word(s) and resolve them without the "'s".
+    if m := _POSS_DAY.search(t):
+        anchor = m.group(1).strip()
+        r = resolve_relative_phrase(anchor, today)
+        if r:
+            return r[0]
+        if "tomorrow" in anchor:
+            return today + timedelta(days=1)
+        if anchor in ("today",):
+            return today
+    # Non-possessive: delegate entirely to the shared resolver.
+    r = resolve_relative_phrase(t, today)
+    return r[0] if r else None
 
 
 def _times_wanted(message: str) -> list[tuple[int, int | None]]:
@@ -66,15 +95,23 @@ def _start(e: dict, now: datetime) -> datetime:
     return datetime.fromisoformat(s).astimezone()
 
 
-def find_event(events: list[dict], message: str, now: datetime) -> dict | None:
+def find_event(events: list[dict], message: str, now: datetime,
+               target_date: date | None = None) -> dict | None:
     """Deterministic fuzzy lookup: clock times filter, title/attendee word
     overlap ranks, the soonest upcoming candidate wins. None means 'I don't
-    see that meeting' — never a guess."""
+    see that meeting' — never a guess.
+
+    `target_date` restricts the search to events on that calendar day —
+    used when the user explicitly names a day ('tomorrow's standup',
+    'prep for friday's call'; todo-fixes #124)."""
     times = _times_wanted(message)
     query = _words(message) - _STOP
     candidates = []
     for e in events:
         start = _start(e, now)
+        # Filter to the target day when one was named explicitly (#124).
+        if target_date is not None and start.date() != target_date:
+            continue
         if times and not e.get("all_day"):
             if not any(start.hour == h and (mi is None or start.minute == mi)
                        for h, mi in times):

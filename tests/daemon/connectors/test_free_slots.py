@@ -5,9 +5,9 @@ from datetime import date, datetime
 
 import pytest
 
-from lumen.daemon.connectors.free_slots import (SLOT_HEADER, find_slots,
-                                                parse_duration, parse_window,
-                                                render_slots)
+from lumen.daemon.connectors.free_slots import (SLOT_HEADER, _busy_intervals,
+                                                find_slots, parse_duration,
+                                                parse_window, render_slots)
 
 NOW = datetime.fromisoformat("2026-07-13T09:10:00-06:00")   # Monday morning
 
@@ -20,7 +20,8 @@ def mountain_time(set_tz):
 def ev(start, end, **over):
     base = {"id": "e", "calendar_id": "primary", "title": "Busy",
             "start_at": start, "end_at": end, "all_day": False,
-            "status": "confirmed", "attendees": []}
+            "status": "confirmed", "attendees": [],
+            "transparency": None, "response_status": None}
     base.update(over)
     return base
 
@@ -140,3 +141,129 @@ def test_slots_after_dst_ends_use_that_days_offset():
                        now=now)
     assert slots[0][0].isoformat() == "2026-11-02T09:00:00-07:00"
     assert "1. Mon 2026-11-02 09:00–09:30" in render_slots(slots, 30)
+
+
+# ---- #121: duration parsing fixes -------------------------------------------
+
+def test_duration_fractional_hours():
+    """'1.5 hours' was returning 300 min (matched '5 hours'); '2.5 hrs' gave
+    300 as well — the integer pattern matched the trailing digit (todo-fixes #121)."""
+    assert parse_duration("1.5 hours") == 90
+    assert parse_duration("2.5 hrs") == 150
+    assert parse_duration("0.5 hours") == 30
+
+
+def test_duration_an_hour_and_a_half():
+    """'an hour and a half' returned 60 — fell through to _AN_HOUR without
+    matching the compound pattern (todo-fixes #121)."""
+    assert parse_duration("an hour and a half") == 90
+    assert parse_duration("a hour and a half") == 90
+
+
+def test_duration_hours_and_minutes_compound():
+    """'1 hour 30 minutes' must parse as 90 (todo-fixes #121)."""
+    assert parse_duration("1 hour 30 minutes") == 90
+    assert parse_duration("1 hour and 30 minutes") == 90
+    assert parse_duration("2 hours and 15 minutes") == 135
+
+
+def test_duration_plain_cases_still_correct():
+    """Existing cases must not regress after the #121 regex reorder."""
+    assert parse_duration("30 minutes") == 30
+    assert parse_duration("90 minutes") == 90
+    assert parse_duration("half an hour") == 30
+    assert parse_duration("2 hours") == 120
+    assert parse_duration("an hour") == 60
+
+
+def test_duration_is_the_first_length_named():
+    """#121: a later span ("in the next 2 hours") isn't the meeting's length."""
+    assert parse_duration("find a 30 minute slot in the next 2 hours") == 30
+    assert parse_duration("an hour with Sam, sometime in the next 3 days") == 60
+
+
+# ---- #121: weekend window parsing --------------------------------------------
+
+def test_this_weekend_on_saturday(set_tz):
+    """On Saturday 'this weekend' = Sat+Sun (todo-fixes #121)."""
+    set_tz("America/Denver")
+    sat = datetime.fromisoformat("2026-10-10T09:00:00-06:00")  # Saturday
+    assert sat.weekday() == 5
+    assert parse_window("find time this weekend", sat) == (date(2026, 10, 10),
+                                                          date(2026, 10, 11))
+
+
+def test_this_weekend_on_sunday(set_tz):
+    """On Sunday 'this weekend' = just Sunday (todo-fixes #121)."""
+    set_tz("America/Denver")
+    sun = datetime.fromisoformat("2026-10-11T09:00:00-06:00")  # Sunday
+    assert sun.weekday() == 6
+    assert parse_window("find time this weekend", sun) == (date(2026, 10, 11),
+                                                          date(2026, 10, 11))
+
+
+def test_this_weekend_on_weekday(set_tz):
+    """Mon–Fri 'this weekend' = coming Sat+Sun (todo-fixes #121)."""
+    set_tz("America/Denver")
+    mon = datetime.fromisoformat("2026-10-12T09:00:00-06:00")  # Monday
+    assert mon.weekday() == 0
+    assert parse_window("this weekend", mon) == (date(2026, 10, 17),
+                                                 date(2026, 10, 18))
+
+
+def test_next_weekend_is_the_one_after_this_weekend(set_tz):
+    """'next weekend' = the Sat+Sun after this weekend (todo-fixes #121)."""
+    set_tz("America/Denver")
+    # Monday — this weekend = Oct 17–18, next weekend = Oct 24–25
+    mon = datetime.fromisoformat("2026-10-12T09:00:00-06:00")
+    assert parse_window("next weekend", mon) == (date(2026, 10, 24),
+                                                 date(2026, 10, 25))
+    # Saturday — this weekend = Oct 10–11, next weekend = Oct 17–18
+    sat = datetime.fromisoformat("2026-10-10T09:00:00-06:00")
+    assert parse_window("next weekend", sat) == (date(2026, 10, 17),
+                                                 date(2026, 10, 18))
+
+
+def test_this_weekend_with_next_elsewhere_stays_this_weekend(set_tz):
+    """Only "next weekend" moves it a week — not a stray "next" (#121)."""
+    set_tz("America/Denver")
+    mon = datetime.fromisoformat("2026-10-12T09:00:00-06:00")
+    assert parse_window("an hour this weekend for the next project", mon) == (
+        date(2026, 10, 17), date(2026, 10, 18))
+
+
+# ---- #125: declined + transparent events don't block free slots -------------
+
+def test_busy_intervals_skips_declined_events():
+    """Declined invites must not block slots (todo-fixes #125)."""
+    events = [
+        ev("2026-07-14T10:00:00-06:00", "2026-07-14T11:00:00-06:00",
+           response_status="declined"),
+        ev("2026-07-14T12:00:00-06:00", "2026-07-14T13:00:00-06:00"),
+    ]
+    intervals = _busy_intervals(events)
+    assert len(intervals) == 1
+    assert intervals[0][0].hour == 12    # only the non-declined event
+
+
+def test_busy_intervals_skips_transparent_events():
+    """Events marked 'show as free' (transparent) must not block slots
+    (todo-fixes #125)."""
+    events = [
+        ev("2026-07-14T10:00:00-06:00", "2026-07-14T11:00:00-06:00",
+           transparency="transparent"),
+        ev("2026-07-14T12:00:00-06:00", "2026-07-14T13:00:00-06:00"),
+    ]
+    intervals = _busy_intervals(events)
+    assert len(intervals) == 1
+    assert intervals[0][0].hour == 12
+
+
+def test_declined_event_does_not_block_slot():
+    """End-to-end: a declined all-morning invite must not prevent an 08:30
+    slot from being proposed (todo-fixes #125)."""
+    busy = [ev("2026-07-14T08:00:00-06:00", "2026-07-14T12:00:00-06:00",
+               response_status="declined")]
+    slots = find_slots(busy, duration_min=30, start_date=date(2026, 7, 14),
+                       end_date=date(2026, 7, 14), now=NOW)
+    assert slots[0][0].hour == 8    # starts at 08:00, not blocked

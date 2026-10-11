@@ -5,9 +5,11 @@ calendar markers are handled by the daemon, not the model).
 Run: python -m lumen.mcp_servers.canvas"""
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from mcp.server.fastmcp import FastMCP
+
+from lumen.daemon.connectors.canvas_events import GONE_STREAK, strip_html
 
 mcp = FastMCP("canvas")
 
@@ -33,18 +35,37 @@ def _local_day(utc_iso: str | None) -> str:
         return utc_iso[:10]
 
 
+def _due(r) -> datetime | None:
+    """The due instant, aware (Canvas sends UTC)."""
+    try:
+        d = datetime.fromisoformat(r["due_at"]) if r["due_at"] else None
+    except ValueError:
+        return None
+    return d.replace(tzinfo=timezone.utc) if d and d.tzinfo is None else d
+
+
 def _list_assignments(conn, course: str, limit: int) -> str:
     limit = max(1, min(int(limit), 50))
+    # What the Canvas tab shows: archived courses, dismissed and gone
+    # assignments stay out (#127, #131).
     rows = conn.execute(
         "SELECT a.*, c.name AS cname, c.course_code AS ccode "
         "FROM canvas_assignments a JOIN canvas_courses c ON c.id = a.course_id "
-        "WHERE c.active = 1 ORDER BY a.due_at IS NULL, a.due_at, a.id").fetchall()
+        "WHERE c.active = 1 AND c.included = 1 AND a.dismissed = 0 "
+        "AND a.missing_syncs < ?", (GONE_STREAK,)).fetchall()
     needle = (course or "").strip().lower()
     if needle:
         rows = [r for r in rows
                 if needle in (r["ccode"] or "").lower()
                 or needle in (r["cname"] or "").lower()]
-    rows = rows[:limit]
+    # Upcoming first, soonest due; then past ones, latest first. Oldest-first
+    # filled the list with the term's long-done work (#131).
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    upcoming = [r for r in rows if _due(r) is None or _due(r) >= cutoff]
+    past = [r for r in rows if r not in upcoming]
+    upcoming.sort(key=lambda r: (_due(r) is None, _due(r) or cutoff, r["id"]))
+    past.sort(key=lambda r: _due(r), reverse=True)
+    rows = (upcoming + past)[:limit]
     if not rows:
         return ("No assignments matched. Canvas may be between terms, or the "
                 "course filter was too narrow — try an empty course filter.")
@@ -85,14 +106,15 @@ def _list_announcements(conn, limit: int) -> str:
     rows = conn.execute(
         "SELECT n.*, c.name AS cname, c.course_code AS ccode "
         "FROM canvas_announcements n JOIN canvas_courses c ON c.id = n.course_id "
-        "WHERE c.active = 1 ORDER BY n.posted_at DESC, n.id DESC "
+        "WHERE c.active = 1 AND c.included = 1 AND n.dismissed = 0 "
+        "ORDER BY n.posted_at DESC, n.id DESC "
         "LIMIT ?", (limit,)).fetchall()
     if not rows:
         return "No course announcements in the mirror yet."
     out = []
     for r in rows:
         label = r["ccode"] or r["cname"] or "?"
-        snippet = (r["message"] or "").strip().replace("\n", " ")[:160]
+        snippet = strip_html(r["message"], 160).replace("\n", " ")
         out.append(f"- {_local_day(r['posted_at'])} {label}: {r['title']} :: {snippet}")
     return "\n".join(out)
 

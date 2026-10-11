@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timedelta
 
 from lumen.daemon.connectors import google_auth
 from lumen.daemon.connectors.gcal_colors import GCAL_COLOR_HEX
-from lumen.daemon.connectors.gcal_time import local_day
+from lumen.daemon.connectors.gcal_time import local_day, local_end_day
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def _status(exc) -> int | None:
 
 COLUMNS = ("id", "calendar_id", "calendar_name", "color", "event_color",
            "title", "start_at", "end_at", "all_day", "location", "description",
-           "attendees", "status")
+           "attendees", "status", "transparency", "response_status")
 
 
 class EventStore:
@@ -38,26 +38,40 @@ class EventStore:
     def replace_window(self, events: list[dict], start_iso: str, end_iso: str) -> None:
         """Whole-window refresh in one transaction — small dataset, no diffing.
         Days are the user's local days (start_day), never SQLite's date(),
-        which reads an offset stamp as UTC (#72)."""
+        which reads an offset stamp as UTC (#72).
+
+        Delete by OVERLAP (todo-fixes #113): events whose Google window
+        includes [start_iso, end_iso] but whose start_day predates start_iso
+        (multi-day trips, past-midnight spans) must be removed when Google
+        no longer returns them for that window — otherwise a deleted event
+        that started just outside the window lingers forever."""
         with self._conn:
+            # MAX(): a zero-length event at midnight has end_day < start_day.
             self._conn.execute(
-                "DELETE FROM events WHERE start_day >= ? AND start_day <= ?",
-                (start_iso, end_iso))
+                "DELETE FROM events WHERE "
+                "start_day <= ? AND MAX(start_day, COALESCE(end_day, start_day)) >= ?",
+                (end_iso, start_iso))
             self._conn.executemany(
-                f"INSERT OR REPLACE INTO events ({', '.join(COLUMNS)}, start_day) "
-                f"VALUES ({', '.join('?' * (len(COLUMNS) + 1))})",
+                f"INSERT OR REPLACE INTO events ({', '.join(COLUMNS)}, start_day, end_day) "
+                f"VALUES ({', '.join('?' * (len(COLUMNS) + 2))})",
                 [tuple(
                     json.dumps(e["attendees"]) if c == "attendees"
                     else int(bool(e["all_day"])) if c == "all_day"
                     else e.get(c)
-                    for c in COLUMNS) + (local_day(e["start_at"]),)
+                    for c in COLUMNS) + (local_day(e["start_at"]),
+                                         local_end_day(e.get("end_at"),
+                                                        bool(e.get("all_day"))))
                  for e in events])
 
     def list_range(self, start_iso: str, end_iso: str) -> list[dict]:
+        # Overlap: events that started before start_iso but are still running
+        # (multi-day trips, past-midnight spans) appear on every day they
+        # cover, not just their first day (todo-fixes #113).
         rows = self._conn.execute(
-            "SELECT * FROM events WHERE start_day >= ? AND start_day <= ? "
+            "SELECT * FROM events WHERE "
+            "start_day <= ? AND MAX(start_day, COALESCE(end_day, start_day)) >= ? "
             "ORDER BY start_day, all_day DESC, start_at, id",
-            (start_iso, end_iso)).fetchall()
+            (end_iso, start_iso)).fetchall()
         return [self._to_dict(r) for r in rows]
 
     def get(self, calendar_id: str, event_id: str) -> dict | None:
@@ -81,6 +95,7 @@ class EventStore:
     def _to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
         d.pop("start_day", None)        # an index, not part of the event
+        d.pop("end_day", None)          # ditto; callers use start_at/end_at (#113)
         d["all_day"] = bool(d["all_day"])
         d["attendees"] = json.loads(d["attendees"])
         return d
@@ -148,6 +163,14 @@ class CalendarSync:
             self._inflight = asyncio.create_task(self._fetch_and_store())
         return await asyncio.shield(self._inflight)
 
+    async def aclose(self) -> None:
+        """Shutdown. A running sync is its own shielded task, so cancelling
+        the poller leaves it going: stop it before the database closes."""
+        task, self._inflight = self._inflight, None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _fetch_and_store(self) -> bool:
         fetched = await asyncio.to_thread(self._fetch_blocking)
         if fetched is None:
@@ -195,6 +218,10 @@ class CalendarSync:
     @staticmethod
     def _normalize(item: dict, cal: dict) -> dict:
         start, end = item.get("start", {}), item.get("end", {})
+        attendees = item.get("attendees", [])
+        # self attendee's RSVP — None when no attendees list (todo-fixes #125)
+        self_rsvp = next((a.get("responseStatus") for a in attendees
+                          if a.get("self")), None)
         return {
             "id": item.get("id"),
             "calendar_id": cal["id"],
@@ -211,8 +238,11 @@ class CalendarSync:
             "description": item.get("description"),
             "attendees": [{"email": a.get("email"), "name": a.get("displayName"),
                            "self": a.get("self", False)}
-                          for a in item.get("attendees", [])],
+                          for a in attendees],
             "status": item.get("status"),
+            # 'transparent' = show as free; omitted = default 'opaque' (#125)
+            "transparency": item.get("transparency"),
+            "response_status": self_rsvp,
         }
 
     async def poll_forever(self) -> None:

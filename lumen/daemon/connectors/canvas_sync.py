@@ -54,7 +54,10 @@ class CanvasSync:
         self._events = events            # EventStore, for conflict detection
         self._calendar = calendar        # CalendarSync, to re-read what we wrote
         self._proposals = proposals      # CanvasProposals (AI, never auto-created)
-        self._sync_lock = asyncio.Lock()
+        # Set when the AI switch is turned on: the next enrichment pass also
+        # re-reads recent, already-classified announcements for exam dates (#134).
+        self._exam_rescan = False
+        self._inflight: asyncio.Task | None = None  # coalescing (#129)
         # Runtime Disable switch (#38); __main__ wires it to ConnectionState.
         self.paused = lambda: False
         # Google Calendar's own switch: paused, the Canvas→Calendar writes stop
@@ -118,7 +121,7 @@ class CanvasSync:
 
     @property
     def busy(self) -> bool:
-        return self._sync_lock.locked()
+        return self._inflight is not None and not self._inflight.done()
 
     def last_sync(self) -> str | None:
         return self._last_sync
@@ -132,90 +135,117 @@ class CanvasSync:
         """True on a successful refresh; False keeps the stale mirror untouched
         (not connected, session dead, or a transient error).
 
-        Two phases so archived courses cost zero network (#28): fetch the course
-        list, decide the pull set on the loop thread (which respects the user's
-        archive flags), then fetch items only for that set. All Canvas HTTP runs
-        in worker threads; all SQLite stays on the loop thread.
+        Coalesced: a caller arriving mid-sync awaits the fetch already running
+        rather than starting a second one (todo-fixes #129). Shielded so one
+        caller disconnecting cannot cancel the fetch other callers await.
 
         Paused means every caller, not just the poll timer: tab-open, Sync
         now and the sign-in hand-off all land here (todo-fixes #83)."""
         if self.paused():
             return False
-        async with self._sync_lock:
-            if not self.connected:
-                return False                   # no session yet — a normal tick
-            try:
-                client = self._client_factory()
-            except Exception:
-                log.exception("could not build canvas client")
+        if self._inflight is None or self._inflight.done():
+            self._inflight = asyncio.create_task(self._do_sync())
+        return await asyncio.shield(self._inflight)
+
+    async def aclose(self) -> None:
+        """Shutdown. A running sync is its own shielded task, so cancelling
+        the poller leaves it going: stop it before the database closes."""
+        task, self._inflight = self._inflight, None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _do_sync(self) -> bool:
+        """Core sync body. Called once per pass; sync_once coalesces callers.
+
+        Two phases so archived courses cost zero network (#28): fetch the course
+        list, decide the pull set on the loop thread (which respects the user's
+        archive flags), then fetch items only for that set. All Canvas HTTP runs
+        in worker threads; all SQLite stays on the loop thread."""
+        self._report = {}       # fresh slate; reconcile_now reads this after await
+        if not self.connected:
+            return False                   # no session yet — a normal tick
+        try:
+            client = self._client_factory()
+        except Exception:
+            log.exception("could not build canvas client")
+            return False
+        if client is None:
+            return False
+        try:
+            courses = await asyncio.to_thread(self._fetch_courses, client)
+            if courses is None:
+                self._drop_dead_session()
                 return False
-            if client is None:
-                return False
+            # SQLite on the loop thread — the daemon's single-writer rule.
+            self._store.upsert_courses(courses)
+            self._store.deactivate_courses_except([c["id"] for c in courses])
+            pull_ids = set(self._store.pull_course_ids())
+            pull = [c for c in courses if c["id"] in pull_ids]
+            assignments, announcements, fetched_ids = await asyncio.to_thread(
+                self._fetch_items, client, pull)
+        finally:
+            client.close()
+        if pull and not fetched_ids:
+            # Not one course answered: this pass pulled nothing, so it must
+            # not read as "Synced, up to date" (#126). The mirror is untouched.
+            log.warning("canvas: every course failed this pass")
+            return False
+        # Microsecond precision on purpose: this is the identity of one
+        # sync pass, and mark_missing compares against it. At second
+        # granularity two syncs inside the same second are indistinguishable,
+        # so a vanished assignment would never accrue its streak — which a
+        # manual sync_now right after a poll hits routinely.
+        report = self._report = {"courses": len(courses),
+                                 "assignments": len(assignments),
+                                 "announcements": len(announcements)}
+        if len(fetched_ids) < len(pull):
+            report["failed_courses"] = len(pull) - len(fetched_ids)
+        stamp = datetime.now().isoformat()
+        self._store.upsert_assignments(assignments, stamp)
+        self._store.upsert_announcements(announcements)
+        # Only courses we SUCCESSFULLY fetched may accuse their assignments of
+        # having vanished — otherwise an errored course would make its whole
+        # assignment list look deleted (todo-fixes #126).
+        self._store.mark_missing(fetched_ids, stamp)
+        self._last_sync = datetime.now().isoformat(timespec="seconds")
+        # Calendar sync is independent of todo reconciliation — nesting it
+        # under `todos` would silently disable it wherever todos aren't
+        # wired. Never fails the sync: the mirror is the valuable part.
+        try:
+            await self._enrich()          # AI passes, before the diff runs
+        except LLMUnavailable as e:
+            # The model went Off (or away) mid-pass: nothing was marked
+            # done, the next sync picks it up (#97).
+            log.info("canvas enrichment stopped: %s", e)
+        except Exception:
+            log.exception("canvas enrichment failed — mirror kept")
+        try:
+            report["calendar"] = await self._sync_calendar()
+        except Exception as e:
+            # todo-fixes #135: don't leave report["calendar"] unset —
+            # callers checking counts would see "Up to date" even when
+            # every write failed.  Short reason in the value; full
+            # traceback already in the log.
+            log.exception("canvas calendar sync failed — mirror kept")
+            report["calendar"] = {"error": str(e)[:120]}
+        if self._todos is not None:
+            # Ungated: local todos are not an external write. Failures here
+            # keep the fresh mirror — the next sync retries reconciliation.
             try:
-                courses = await asyncio.to_thread(self._fetch_courses, client)
-                if courses is None:
-                    self._drop_dead_session()
-                    return False
-                # SQLite on the loop thread — the daemon's single-writer rule.
-                self._store.upsert_courses(courses)
-                self._store.deactivate_courses_except([c["id"] for c in courses])
-                pull_ids = set(self._store.pull_course_ids())
-                pull = [c for c in courses if c["id"] in pull_ids]
-                items = await asyncio.to_thread(self._fetch_items, client, pull)
-                if items is None:
-                    self._drop_dead_session()
-                    return False
-                assignments, announcements = items
-            finally:
-                client.close()
-            # Microsecond precision on purpose: this is the identity of one
-            # sync pass, and mark_missing compares against it. At second
-            # granularity two syncs inside the same second are indistinguishable,
-            # so a vanished assignment would never accrue its streak — which a
-            # manual sync_now right after a poll hits routinely.
-            report = self._report = {"courses": len(courses),
-                                     "assignments": len(assignments),
-                                     "announcements": len(announcements)}
-            stamp = datetime.now().isoformat()
-            self._store.upsert_assignments(assignments, stamp)
-            self._store.upsert_announcements(announcements)
-            # Only courses we actually fetched may accuse their assignments of
-            # having vanished — otherwise an archived or errored course would
-            # make its whole assignment list look deleted.
-            self._store.mark_missing([c["id"] for c in pull], stamp)
-            self._last_sync = datetime.now().isoformat(timespec="seconds")
-            # Calendar sync is independent of todo reconciliation — nesting it
-            # under `todos` would silently disable it wherever todos aren't
-            # wired. Never fails the sync: the mirror is the valuable part.
-            try:
-                await self._enrich()          # AI passes, before the diff runs
-            except LLMUnavailable as e:
-                # The model went Off (or away) mid-pass: nothing was marked
-                # done, the next sync picks it up (#97).
-                log.info("canvas enrichment stopped: %s", e)
+                report["todos"] = reconcile_todos(self._store, self._todos)
             except Exception:
-                log.exception("canvas enrichment failed — mirror kept")
-            try:
-                report["calendar"] = await self._sync_calendar()
-            except Exception:
-                log.exception("canvas calendar sync failed — mirror kept")
-            if self._todos is not None:
-                # Ungated: local todos are not an external write. Failures here
-                # keep the fresh mirror — the next sync retries reconciliation.
+                log.exception("canvas reconcile failed — mirror kept")
+            if self._llm is not None and not self.model_paused():
+                # The one allowed model touch: bounded classification of the
+                # NEW announcements only (spec). Never fails the sync.
                 try:
-                    report["todos"] = reconcile_todos(self._store, self._todos)
+                    await flag_announcements(self._store, self._llm)
+                except LLMUnavailable as e:
+                    log.info("canvas announcement flagging stopped: %s", e)
                 except Exception:
-                    log.exception("canvas reconcile failed — mirror kept")
-                if self._llm is not None and not self.model_paused():
-                    # The one allowed model touch: bounded classification of the
-                    # NEW announcements only (spec). Never fails the sync.
-                    try:
-                        await flag_announcements(self._store, self._llm)
-                    except LLMUnavailable as e:
-                        log.info("canvas announcement flagging stopped: %s", e)
-                    except Exception:
-                        log.exception("canvas announcement flag failed")
-            return True
+                    log.exception("canvas announcement flag failed")
+        return True
 
     # ---- #66: one deliberate "bring everything up to date" -----------------
     async def reconcile_now(self) -> dict:
@@ -225,14 +255,23 @@ class CanvasSync:
         press and then see the result of. Removals are the reason it matters:
         they are never applied silently, they are queued for review, and until
         now nothing brought that queue to the user's attention at the moment it
-        grew."""
-        self._report = {}
+        grew.
+
+        Coalesced: if a sync is already running, awaits it and returns its
+        report (todo-fixes #129). _do_sync always resets _report at the start,
+        so we never read stale data from a prior pass."""
         ok = await self.sync_once()
         return {"ok": bool(ok), "last_sync": self.last_sync(),
                 **(self._report or {}),
                 "queued_removals": self._queue.count() if self._queue else 0,
                 "proposals": (self._proposals.count()
                               if self._proposals else 0)}
+
+    def request_exam_rescan(self) -> None:
+        """The AI switch went on (#134). Runs inside the next sync's
+        enrichment pass, under its model-off and error handling — not as a
+        loose task beside a chat."""
+        self._exam_rescan = True
 
     async def _enrich(self) -> dict:
         """The 'Lumen powered' passes. Off unless the AI switch is on, so the
@@ -246,6 +285,12 @@ class CanvasSync:
         if self._proposals is not None:
             out |= await canvas_enrich.find_exam_dates(
                 self._store, self._llm, self._proposals)
+            if self._exam_rescan:
+                # Cleared only once it finishes: a model that went away
+                # mid-pass raises, and the next sync tries again (#134).
+                await canvas_enrich.find_exam_dates_rescan(
+                    self._store, self._llm, self._proposals)
+                self._exam_rescan = False
             if self._events is not None:
                 out |= canvas_enrich.propose_study_blocks(
                     self._store, self._proposals, self._events)
@@ -397,24 +442,32 @@ class CanvasSync:
                 out[state] = []
         return out
 
-    def _fetch_items(self, client, courses):
+    def _fetch_items(self, client, courses) -> tuple[list, list, list]:
         """Phase 2 (worker thread): assignments + announcements for exactly the
-        courses handed in (the archive-filtered pull set). Returns
-        (assignments, announcements) or None on a dead session / error."""
-        try:
-            assignments: list[dict] = []
-            announcements: list[dict] = []
-            for c in courses:
+        courses handed in (the archive-filtered pull set). Always returns a
+        3-tuple (assignments, announcements, fetched_ids); never None.
+
+        Per-course 401 is a Canvas permission error, NOT a session expiry —
+        one restricted course must not kill the session or abort the whole sync
+        (todo-fixes #126). The errored course is omitted from fetched_ids so
+        mark_missing won't accuse its assignments of having vanished."""
+        assignments: list[dict] = []
+        announcements: list[dict] = []
+        fetched_ids: list[int] = []
+        for c in courses:
+            try:
                 assignments.extend(client.assignments(c["id"]))
                 announcements.extend(client.announcements(c["id"]))
-            return assignments, announcements
-        except CanvasSessionExpired:
-            log.info("canvas session expired — UI must re-login")
-            self._session_alive = False
-            return None
-        except Exception:
-            log.exception("canvas sync failed — keeping stale mirror")
-            return None
+                fetched_ids.append(c["id"])
+            except CanvasSessionExpired:
+                # Per-course 401: Canvas permission/access error — NOT an expiry.
+                # Skip this course silently; other courses still sync.
+                log.warning("canvas: course %s returned 401 (access error, not expiry)"
+                            " — skipping this pass", c["id"])
+            except Exception:
+                log.warning("canvas: course %s fetch failed — skipping this pass",
+                            c["id"], exc_info=True)
+        return assignments, announcements, fetched_ids
 
     async def poll_forever(self) -> None:
         """Daemon background task; cancellation is the shutdown path."""

@@ -43,3 +43,23 @@ def test_get_assignment_missing(tmp_path):
 def test_list_announcements(tmp_path):
     out = srv._list_announcements(_conn(tmp_path), 10)
     assert "Welcome" in out and "CS3505" in out
+
+
+def test_list_assignments_puts_upcoming_first_and_hides_gone_ones(tmp_path):
+    """#131 made this reachable from chat: "what's due this week?" must not
+    get the term's oldest work, nor what the Canvas tab hides (#127)."""
+    from datetime import datetime, timedelta, timezone
+    conn = _conn(tmp_path)                       # HW1: long past
+
+    def due(days):
+        return (datetime.now(timezone.utc) + timedelta(days=days)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.executemany(
+        "INSERT INTO canvas_assignments (id, course_id, name, due_at, submitted, "
+        "dismissed, missing_syncs) VALUES (?, 1, ?, ?, 0, ?, ?)",
+        [(11, "Soon", due(2), 0, 0), (12, "Later", due(9), 0, 0),
+         (13, "Dismissed", due(3), 1, 0), (14, "Gone", due(4), 0, 9)])
+    conn.commit()
+    names = [line.split(": ", 1)[1] for line in
+             srv._list_assignments(conn, "", 20).splitlines()]
+    assert names == ["Soon", "Later", "HW1"]

@@ -652,107 +652,283 @@ without a click), loses something typed, or makes a feature not work at all.
 
 ### Calendar, todos, Today
 
-113. **Multi-day and past-midnight events only show on their first day** (review #42) [probe]
+113. **Multi-day and past-midnight events only show on their first day** (review #42) [probe] — ✔ fixed (2026-10-11)
      - A three-day trip appears on day 1 only.
      - **Where:** `ui_v2/state.py:115-118`, `daemon/connectors/gcal.py:52-57`.
-114. **Today never refreshes todos** (review #43) [traced]
+     - **Done:**
+       - The events cache records each event's last local day (`end_day`,
+         `gcal_time.local_end_day`). Reading a day returns every event that
+         overlaps it, not just the ones that start on it. An all-day end is
+         Google's exclusive date; an end at exactly midnight belongs to the
+         day before.
+       - A resync also drops events that started before the window, so one
+         deleted in Google can't linger.
+       - v4 Today and Calendar split these events per day
+         (`state.expand_events`): all-day ones on every day, timed ones
+         clipped at midnight. Editing or deleting any piece acts on the whole
+         event with its real times.
+       - v3 still shows them on the first day only. The seam hands events
+         over whole, because v3 files them by start date and would draw
+         every piece on day 1.
+       - The briefing says "until 02:00 (started Sun 22:00)" for an event
+         that began before today. The chat's calendar context gives a
+         multi-day event's end date, so it isn't read as starting today.
+114. **Today never refreshes todos** (review #43) [traced] — ✔ fixed (2026-10-11)
      - After restoring from the tray in the morning, items that became due today
        sit in "upcoming", and Canvas-created todos never appear until another
        screen refreshes.
      - **Where:** `ui_v4/screens/today.py:139-153`, `ui_v2/state.py:40-52`.
-115. **Today doesn't update while you look at it** (review #44) [traced]
+     - **Done:** Today asks for todos every time it's shown, and the
+       today/upcoming grouping is worked out against the date of that load.
+115. **Today doesn't update while you look at it** (review #44) [traced] — ✔ fixed (2026-10-11)
      - "Standup in 12 min" never counts down, and at midnight it keeps showing
        yesterday. Calendar has a midnight rollover; Today doesn't. The Calendar
        view also reopens on yesterday the next day.
      - **Where:** `ui_v4/screens/today.py:233-240`,
        `ui_v4/screens/calendar.py:592,652-671`.
-116. **Outside the 30-days-back / 60-days-ahead sync window, Calendar shows "Nothing scheduled"** (review #45) [traced]
+     - **Done:**
+       - While Today is on screen, a once-a-minute tick redraws the now line,
+         the greeting and Up next's countdown. Only those parts: a full
+         rebuild every minute would drop keyboard focus. The timer stops
+         whenever Today is hidden.
+       - On a new day, Today reloads its calendar and todos.
+       - Calendar, open at midnight or shown on a new day, moves to the new
+         today and loads it if you were on the old one. A day you navigated
+         to is left alone.
+116. **Outside the 30-days-back / 60-days-ahead sync window, Calendar shows "Nothing scheduled"** (review #45) [traced] — ✔ fixed (2026-10-11)
      - The Ask bar then tells the model you're free.
      - **Where:** `ui_v4/screens/calendar.py:675-715`,
        `daemon/connectors/gcal.py:115-118`. See also #191.
-117. **↻ on Calendar looks successful even when Google sync failed** (review #46) [traced]
+     - **Done:** day and week views outside the range say "Outside what
+       Lumen keeps — Lumen keeps your calendar from Sep 11 to Dec 10" with a
+       Go to today button. The Ask context says the range isn't synced
+       instead of listing nothing. Fetching those days on demand is still
+       #191.
+117. **↻ on Calendar looks successful even when Google sync failed** (review #46) [traced] — ✔ fixed (2026-10-11)
      - It keeps showing stale events, and there's no "last synced" time.
      - **Where:** `daemon/router.py:1789-1790`.
-118. **Some relative dates resolve wrong, and override a correct model answer** (review #47) [probe]
+     - **Done:** `calendar.refresh` answers `sync_failed` when Google didn't
+       answer and `sync_paused` when Calendar sync is turned off. The
+       Calendar header reads "Updated 3 min ago", "Couldn't reach Google
+       Calendar — showing events as of 9:41" or "Sync paused". It's worked
+       out on show and refresh, with no timer. A failure stays up until a
+       later refresh succeeds, not just until you navigate.
+118. **Some relative dates resolve wrong, and override a correct model answer** (review #47) [probe] — ✔ fixed (2026-10-11)
      - "a week from today" → today; "the friday after next" → this Friday;
        "dinner tomorrow before the recital on friday" → Friday.
      - **Where:** `daemon/connectors/todo_parse.py:197-215`,
        `daemon/llm/event_create.py:246-247`.
-119. **Event proposals in Google's own format crash the turn** (review #48) [probe]
+     - **Done:**
+       - The resolver knows "a week from today / tomorrow / Friday", "N days
+         or weeks from …" and "the Friday after next" (next Friday + 7).
+       - Quick-add takes the leftmost date: "dinner tomorrow before the
+         recital on friday" is due tomorrow.
+       - Event creation: when a message names two different dates, the model
+         gets both as a reference ("tomorrow" = Mon 2026-10-12; "on friday" =
+         …) and its answer isn't overridden. A single date still pins the
+         answer as before.
+119. **Event proposals in Google's own format crash the turn** (review #48) [probe] — ✔ fixed (2026-10-11)
      - A recurrence list or a location object gives "internal error".
      - **Where:** `daemon/llm/event_create.py:111,121`; `daemon/router.py:2862`
        catches only `LLMUnavailable`.
-120. **The update-event confirm is hard to read** (review #49) [traced]
+     - **Done:**
+       - The gate accepts Google's shapes: `{"dateTime" | "date": …}`
+         start/end, a one-rule `["RRULE:…"]` recurrence, a location object,
+         and attendee objects. More than one rule is refused with a reason.
+         Title and description are read as text.
+       - Any other failure in the chat's event path is logged with a
+         traceback and answered in plain words.
+120. **The update-event confirm is hard to read** (review #49) [traced] — ✔ fixed (2026-10-11)
      - Raw ISO times; colour/location-only changes don't name the event; it
        doesn't say attendees aren't notified.
      - **Where:** `daemon/router.py:2975-2995`.
-121. **Free-slot parsing gets some phrasings wrong** (review #50) [probe]
+     - **Done:** the confirm always names the event and shows its time the
+       way the create and delete confirms do ("Wed Oct 14, 2026 · 15:00 –
+       16:00"). A changed title or time shows old → new. With other
+       attendees it says they won't be notified, which is true: updates send
+       `sendUpdates=none`.
+121. **Free-slot parsing gets some phrasings wrong** (review #50) [probe] — ✔ fixed (2026-10-11)
      - "1.5 hours" → 300 min; "an hour and a half" → 60; "this weekend" said on a
        Sunday gives next weekend.
      - **Where:** `daemon/connectors/free_slots.py:28-60`.
-122. **Accepting a commitment suggestion re-parses its text** (review #51) [probe]
+     - **Done:**
+       - "1.5 hours", "2.5 hrs", "an hour and a half" and "1 hour 30
+         minutes" all parse right. The first length named wins: "a 30 minute
+         slot in the next 2 hours" is 30 minutes.
+       - "this weekend" is Sat–Sun on a weekday or a Saturday, and just today
+         on a Sunday.
+       - Only the words "next weekend" together move it a week on, not a
+         stray "next" elsewhere in the message.
+122. **Accepting a commitment suggestion re-parses its text** (review #51) [probe] — ✔ fixed (2026-10-11)
      - "Send invoice #4471 to Chris" becomes a todo tagged "4471".
      - **Where:** `daemon/router.py:1873-1874`.
-123. **Quick-add lowercases tags** ("#AbellCRM" → "abellcrm") (review #52) [probe]
+     - **Done:** accepting stores the suggestion's text word for word with
+       its own due date (`add_structured`). There's no quick-add parsing.
+123. **Quick-add lowercases tags** ("#AbellCRM" → "abellcrm") (review #52) [probe] — ✔ fixed (2026-10-11)
      - Only the edit path got archived Josh's Finds #48's fix.
      - **Where:** `daemon/connectors/todo_parse.py:258`.
-124. **Meeting prep ignores the day you name** (review #53) [probe]
+     - **Done:** quick-add keeps a tag as typed. Duplicates are matched
+       ignoring case and the first spelling wins, as on the edit path.
+124. **Meeting prep ignores the day you name** (review #53) [probe] — ✔ fixed (2026-10-11)
      - "prep me for tomorrow's standup" returns today's.
      - **Where:** `daemon/llm/meeting_prep.py:116-120,158-184`.
-125. **Declined invites and "free" events show as busy** and block free slots (review #54) [traced]
+     - **Done:** `meeting_prep.parse_prep_day` reads "tomorrow's", "friday's"
+       (straight or curly apostrophe), "on friday", "next tuesday" and "in
+       two days". The lookup then only considers that day. With no day
+       named, it works as before.
+125. **Declined invites and "free" events show as busy** and block free slots (review #54) [traced] — ✔ fixed (2026-10-11)
      - **Where:** `daemon/connectors/gcal.py:191-211`.
+     - **Done:**
+       - The cache stores `transparency` and your own RSVP
+         (`response_status`).
+       - Free slots skip declined and "show as free" events. The model sees
+         them marked "(declined)" or "(marked free)".
+       - v4 draws declined events muted and leaves them out of Today's Up
+         next.
 
 ### Canvas
 
-126. **One course returning 401 is treated as "session expired"** (review #55) [traced; Canvas behaviour assumed]
+126. **One course returning 401 is treated as "session expired"** (review #55) [traced; Canvas behaviour assumed] — ✔ fixed (2026-10-11)
      - That deletes the session and starts a sign-in loop if the course keeps
        401ing; Canvas also uses 401 for per-course permission errors. Any single
        course error aborts the whole sync.
      - **Where:** `daemon/connectors/canvas_client.py:55,65`,
        `daemon/connectors/canvas_sync.py:382-399`.
-127. **Deleted or unpublished assignments stay in the Canvas tab, and their todos stay open forever** (review #56) [probe]
+     - **Done:**
+       - Only a failed course list means the session expired.
+       - A course that errors (401, 403, 404, 5xx, timeout) is logged and
+         skipped for that pass, and the other courses still sync. Its rows
+         don't count as missing.
+       - Every course 401ing while the course list worked is not treated as
+         expiry either: the next pass's course list decides.
+       - A pass where no course answered at all is a failed sync, not "Up to
+         date". When only some fail, the summary says "2 courses didn't
+         answer — Lumen will retry next sync."
+127. **Deleted or unpublished assignments stay in the Canvas tab, and their todos stay open forever** (review #56) [probe] — ✔ fixed (2026-10-11)
      - **Where:** `daemon/connectors/canvas_store.py:166-174`.
-128. **Browsing Canvas in the in-app browser starts a full sync on almost every page** (review #57) [probe; token rotation assumed]
+     - **Done:**
+       - An assignment missing from its course's fetch for the existing
+         `GONE_STREAK` leaves the tab, reconcile and pending markers.
+       - Its todo is deleted if it's still open and untouched (text,
+         description and due date as Lumen made them). One you edited or
+         ticked off is kept, and is no longer linked to the assignment.
+       - If the assignment comes back on Canvas, it's picked up again. Its
+         calendar event goes through the existing removal review.
+128. **Browsing Canvas in the in-app browser starts a full sync on almost every page** (review #57) [probe; token rotation assumed] — ✔ fixed (2026-10-11)
      - Every cookie change (e.g. a rotating `_csrf_token`) is handed to the daemon.
      - **Where:** `ui_v4/screens/canvas.py:1228-1243`,
        `daemon/connectors/canvas_sync.py:68-85`.
-129. **After first connect or re-login the list doesn't update** until you leave and come back (review #58) [traced]
+     - **Done:**
+       - The daemon takes every new cookie jar but only starts a sync when it
+         wasn't connected before (first connect, or a re-login).
+       - The tab sends the first signed-in jar at once. Later cookie changes
+         go as one send, 300 ms after they settle. Done sends one that's
+         still waiting; Disconnect drops it.
+129. **After first connect or re-login the list doesn't update** until you leave and come back (review #58) [traced] — ✔ fixed (2026-10-11)
      - The follow-up sync gets "already syncing" and gives up.
      - **Where:** `ui_v4/screens/canvas.py:640-660`.
-130. **Calendar alerts are never shown or cleared** (review #59) [probe]
+     - **Done:** a sync asked for while one is running now waits for it and
+       gets its result (`CanvasSync.sync_once` shares the running task, like
+       `CalendarSync`). `sync_now` and `reconcile_now` never answer "already
+       syncing". The tab syncs right after connecting and reloads the lists
+       when that answers.
+130. **Calendar alerts are never shown or cleared** (review #59) [probe] — ✔ fixed (2026-10-11)
      - "N calendar changes since you last looked" only grows, and the conflict
        scan flags an event as overlapping itself or another 11:59 PM deadline.
      - **Where:** `daemon/connectors/canvas_alerts.py`,
        `daemon/connectors/canvas_events.py:312`.
-131. **Canvas chat tools are never given to the model** (review #60) [traced]
+     - **Done:**
+       - New `canvas.alerts` and `canvas.alerts_seen` routes. The strip's
+         "See changes" opens the list (what changed, and when). "Got it" marks
+         exactly the ones shown as seen. If the list fails to load, there's
+         Try again and no Got it.
+       - The conflict scan skips the assignment's own event and Lumen's other
+         Canvas events. An unseen conflict alert isn't added again on every
+         sync.
+131. **Canvas chat tools are never given to the model** (review #60) [traced] — ✔ fixed (2026-10-11)
      - The Canvas MCP server is spawned and sits idle. "Any new Canvas
        announcements?" in chat has no data path.
      - **Where:** `daemon/router.py:467,3448`.
-132. **A daemon error during Sync now leaves "Syncing…" up forever** (review #61) [probe]
+     - **Done:**
+       - A `canvas` tool group (`CANVAS_HINT`). Canvas-shaped asks get
+         `list_assignments`, `get_assignment` and `list_announcements`, but
+         only when Canvas is set up. That covers Canvas, assignments,
+         homework, announcements, "my / next class", courses, exams, grades,
+         "what's due", and "this / it" asked on the Canvas screen (which
+         keeps its todo tools too, for "mark this done").
+       - Whole words only: "for example", "of course", "finally", "python
+         classes" and "submit the form" don't trigger it.
+       - `list_assignments` now lists upcoming work first (soonest due), then
+         past work (latest first). It leaves out what the tab hides: archived
+         courses, dismissed and gone assignments. `list_announcements` sends
+         plain text, not HTML.
+       - `lumen/config.toml` already lists the three tools.
+132. **A daemon error during Sync now leaves "Syncing…" up forever** (review #61) [probe] — ✔ fixed (2026-10-11)
      - **Where:** `ui_v2/state.py:406-414`.
-133. **The announcement flagger sends raw HTML cut at 2,500 characters** (review #62) [probe]
+     - **Done:** `canvas_sync_now` and `canvas_reconcile_now` take `on_error`.
+       A daemon error settles the button and badge as "Sync failed".
+133. **The announcement flagger sends raw HTML cut at 2,500 characters** (review #62) [probe] — ✔ fixed (2026-10-11)
      - A due date near the end never reaches the model, and the "not actionable"
        verdict is permanent. Neither prompt includes today's date, so a year-less
        "Thursday Oct 16" can come out as the wrong year.
      - **Where:** `daemon/llm/canvas_flag.py:281-289,321-323`,
        `daemon/llm/canvas_enrich.py:55-62,180-181`.
-134. **Turning on Lumen-written details never mines exam dates from existing announcements** (review #63) [probe]
+     - **Done:** the flagger and the exam scan strip HTML before the length
+       cap. Both tell the model today's date and the date the announcement
+       was posted. A due date that has already passed is dropped from the
+       suggestion.
+134. **Turning on Lumen-written details never mines exam dates from existing announcements** (review #63) [probe] — ✔ fixed (2026-10-11)
      - **Where:** `daemon/llm/canvas_enrich.py` (`find_exam_dates`),
        `daemon/router.py:1534-1544`.
-135. **Sync now says "Up to date" even when every calendar write failed** (review #64) [traced]
+     - **Done:**
+       - Turning the switch on asks for one exam re-scan of the last 14 days
+         of announcements, including ones already classified
+         (`CanvasSync.request_exam_rescan`).
+       - It runs in the next sync's enrichment pass, and the tab syncs right
+         after the toggle. So the model-off switch and errors are handled as
+         for every other AI pass, and an interrupted re-scan is retried on
+         the next sync.
+135. **Sync now says "Up to date" even when every calendar write failed** (review #64) [traced] — ✔ fixed (2026-10-11)
      - The manual "Add to calendar" strip also counts and writes past-due items.
      - **Where:** `ui_v4/screens/canvas.py:200-217`,
        `daemon/connectors/canvas_store.py` (`pending_markers`).
-136. **Saved-login keyring calls still run on the UI thread** (review #65) [traced]
+     - **Done:**
+       - A calendar pass that fails outright is now reported
+         (`calendar: {error}`).
+       - The summary says e.g. "Synced, but 3 calendar updates didn't go
+         through — Lumen will retry next sync.", never "Up to date" when
+         something failed.
+       - Past-due assignments are no longer pending markers, so the Add to
+         calendar strip, its count and the write all skip them.
+136. **Saved-login keyring calls still run on the UI thread** (review #65) [traced] — ✔ fixed (2026-10-11)
      - On save, change, forget, and on login pages. A locked keyring freezes the
        window.
      - **Where:** `ui_v4/screens/canvas.py:1341,1420`.
-137. **On first connect, every old announcement in the term gets classified** (review #66) [traced]
+     - **Done:**
+       - Every keyring read, save and forget in the v4 Canvas tab runs on a
+         worker thread. The result comes back to the window through a queued
+         signal (`_run_keyring`).
+       - A sign-in form, or a Fill press, that comes before the keyring
+         answers waits, and is filled when the answer lands.
+       - Forgetting or resetting drops a read that's still out, so a
+         forgotten login can't come back. A forget the keyring refused says
+         so, instead of claiming it worked.
+       - The save-login offer treats "not known yet" as saved, so #67 can't
+         return through a slow keyring.
+137. **On first connect, every old announcement in the term gets classified** (review #66) [traced] — ✔ fixed (2026-10-11)
      - 8 per 20 minutes. That cold-loads the model for hours, or uses 100+ Claude
        calls.
      - **Where:** `daemon/connectors/canvas_store.py:292-295`.
-138. **`canvas.push_due_dates` blocks the whole daemon while it writes to Google** (review #67) [traced]
+     - **Done:** an announcement posted more than 14 days ago is stored as
+       not actionable and never offered to the classifier
+       (`ANNOUNCEMENT_CUTOFF_DAYS`).
+138. **`canvas.push_due_dates` blocks the whole daemon while it writes to Google** (review #67) [traced] — ✔ fixed (2026-10-11)
      - **Where:** `daemon/router.py:3444-3457`.
+     - **Done:** the Google writes run on a worker thread, and SQLite stays
+       on the daemon's loop thread.
+     - **Also from this batch's review:** at shutdown the daemon now stops a
+       Canvas or Calendar sync still running before it closes the database
+       (`CanvasSync.aclose`, `CalendarSync.aclose`).
 
 ### LLM layer and daemon
 

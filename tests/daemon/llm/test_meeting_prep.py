@@ -156,3 +156,58 @@ def test_prep_history_dates_are_local():
           "subject": "Late note", "received_at": "2026-10-09T03:15:00+00:00"}]}
     data = build_prep_data(STANDUP, hist, NOW)
     assert "2026-10-08: from them" in data
+
+
+# ---- todo-fixes #124: parse_prep_day ----------------------------------------
+
+from datetime import date as _date
+
+from lumen.daemon.llm.meeting_prep import parse_prep_day
+
+_TODAY = _date(2026, 7, 13)   # matches NOW (a Monday)
+
+
+def test_parse_prep_day_possessive_tomorrow():
+    assert parse_prep_day("prep me for tomorrow's standup", _TODAY) == _date(2026, 7, 14)
+
+
+def test_parse_prep_day_possessive_weekday():
+    # "friday's review" from Monday July 13 → next Friday = July 17
+    assert parse_prep_day("prep me for friday's review", _TODAY) == _date(2026, 7, 17)
+
+
+def test_parse_prep_day_plain_tomorrow():
+    assert parse_prep_day("prep for the standup tomorrow", _TODAY) == _date(2026, 7, 14)
+
+
+def test_parse_prep_day_plain_on_friday():
+    assert parse_prep_day("prep me for the call on friday", _TODAY) == _date(2026, 7, 17)
+
+
+def test_parse_prep_day_next_tuesday():
+    # "next tuesday" from Monday July 13: formula 7 - 0 + 1 = 8 → July 21
+    assert parse_prep_day("prepare me for next tuesday's call", _TODAY) == _date(2026, 7, 21)
+
+
+def test_parse_prep_day_no_day_returns_none():
+    assert parse_prep_day("prep me for the standup", _TODAY) is None
+    assert parse_prep_day("prepare me for the budget review", _TODAY) is None
+
+
+# ---- todo-fixes #124: find_event respects target_date -----------------------
+
+def test_find_event_target_date_filters_to_that_day():
+    """target_date=tomorrow should exclude today's standup."""
+    assert find_event(EVENTS, "prep me for the standup",
+                      NOW, target_date=_date(2026, 7, 14)) is None
+
+
+def test_find_event_target_date_finds_tomorrows_event():
+    """TOMORROW is the Budget review at 2pm on July 14."""
+    assert find_event(EVENTS, "prep me for the budget review",
+                      NOW, target_date=_date(2026, 7, 14)) is TOMORROW
+
+
+def test_find_event_no_target_date_unchanged():
+    """No regression: without target_date behaviour is unchanged."""
+    assert find_event(EVENTS, "prep me for the standup", NOW) is STANDUP

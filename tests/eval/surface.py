@@ -39,13 +39,17 @@ from lumen.daemon import local_tools
 from lumen.daemon.config import load_config
 from lumen.daemon.llm.mcp_bridge import tool_to_ollama_schema
 from lumen.daemon.router import IDENTITY, WRITE_TOOLS
+from lumen.mcp_servers import canvas as canvas_mcp
 from lumen.mcp_servers import gcal, mail, openlibrary
 
 __all__ = ["IDENTITY", "LOCAL_SERVERS", "EXTERNAL_GROUPS", "owned_descriptions",
            "allowlists", "tool_schemas", "tool_names"]
 
 # group name (= MCP server name in config.toml) -> module exposing `mcp`
-LOCAL_SERVERS = {"gcal": gcal, "mail": mail, "books": openlibrary}
+# todo-fixes #131: added canvas so its tool descriptions are graded in the
+# same eval pass that keeps gcal/mail/books honest.
+LOCAL_SERVERS = {"gcal": gcal, "mail": mail, "books": openlibrary,
+                 "canvas": canvas_mcp}
 
 # Groups whose descriptions are third-party. Named so a reader knows the
 # omission is deliberate, not an oversight.

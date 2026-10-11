@@ -15,6 +15,18 @@ class CanvasAlerts:
         self._conn = conn
 
     def add(self, kind: str, detail: str, assignment_id: int | None = None) -> int:
+        # todo-fixes #130: don't accumulate duplicate unseen conflict alerts.
+        # A conflict that isn't resolved before the next sync would otherwise
+        # grow the list by one entry every poll tick. due_moved fires at most
+        # once per date change (commit_calendar calls add only when ce.moved()
+        # is true), so the dedup only applies to conflicts.
+        if kind == CONFLICT and assignment_id is not None:
+            already = self._conn.execute(
+                "SELECT COUNT(*) FROM canvas_alerts "
+                "WHERE kind = ? AND assignment_id = ? AND seen = 0",
+                (kind, assignment_id)).fetchone()[0]
+            if already:
+                return -1
         with self._conn:
             cur = self._conn.execute(
                 "INSERT INTO canvas_alerts (assignment_id, kind, detail, created_at) "

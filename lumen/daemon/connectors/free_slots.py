@@ -16,47 +16,84 @@ STEP_MIN = 30
 LEAD_MIN = 15           # today's first option is never sooner than this
 DEFAULT_COUNT = 3
 
+# todo-fixes #121: fractional hours ("1.5 hours", "2.5 hrs") — check before
+# the plain integer hour pattern, which matches the partial digit "5" in "1.5"
+_FRAC_HOURS = re.compile(r"\b(\d+\.\d+)\s*(?:hours?|hrs?)\b", re.IGNORECASE)
+# "1 hour 30 minutes" / "1 hour and 30 minutes"
+_HOURS_MINS = re.compile(
+    r"\b(\d+)\s*(?:hours?|hrs?)\s+(?:and\s+)?(\d+)\s*(?:min(?:ute)?s?)\b",
+    re.IGNORECASE)
 _MINUTES = re.compile(r"\b(\d{1,3})\s*(?:min(?:ute)?s?)\b", re.IGNORECASE)
 _HOURS = re.compile(r"\b(\d{1,2})\s*(?:hours?|hrs?)\b", re.IGNORECASE)
 _AN_HOUR = re.compile(r"\ban?\s+hour\b", re.IGNORECASE)
+# "an hour and a half" / "a hour and a half"
+_HOUR_HALF = re.compile(r"\ban?\s+hour\s+and\s+a\s+half\b", re.IGNORECASE)
 _HALF_HOUR = re.compile(r"\bhalf\s+(?:an\s+)?hour\b", re.IGNORECASE)
 
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday",
              "saturday", "sunday")
 
 
+_LENGTHS = (
+    (_HOURS_MINS, lambda m: int(m.group(1)) * 60 + int(m.group(2))),
+    (_HOUR_HALF, lambda m: 90),
+    (_HALF_HOUR, lambda m: 30),
+    (_FRAC_HOURS, lambda m: round(float(m.group(1)) * 60)),
+    (_HOURS, lambda m: int(m.group(1)) * 60),
+    (_MINUTES, lambda m: int(m.group(1))),
+    (_AN_HOUR, lambda m: 60),
+)
+
+
 def parse_duration(message: str) -> int:
-    if m := _MINUTES.search(message):
-        return int(m.group(1))
-    if _HALF_HOUR.search(message):
-        return 30
-    if m := _HOURS.search(message):
-        return int(m.group(1)) * 60
-    if _AN_HOUR.search(message):
-        return 60
-    return DEFAULT_DURATION_MIN
+    """The first length the message names (#121). Leftmost wins, not the
+    first pattern: "a 30 minute slot in the next 2 hours" is 30. At the same
+    spot the longest reading wins: "1 hour 30 minutes" over "1 hour", "an
+    hour and a half" over "an hour"; and "1.5 hours" starts before the "5
+    hours" inside it."""
+    found = [(m.start(), -len(m.group(0)), minutes(m))
+             for pat, minutes in _LENGTHS if (m := pat.search(message))]
+    return min(found)[2] if found else DEFAULT_DURATION_MIN
 
 
 def parse_window(message: str, now: datetime) -> tuple[date, date]:
     """(start_date, end_date) the request names; default is the next week."""
     low = message.lower()
     today = now.date()
-    # weekend first: "this weekend" contains the substring "this week"
+    wd = today.weekday()            # 0=Mon … 5=Sat, 6=Sun
+    # "weekend" must come before "next week" / "this week" (it contains "week")
     if re.search(r"\bweekend\b", low):
-        sat = today + timedelta(days=(5 - today.weekday()) % 7)
+        # "this weekend" semantics: on Sat → Sat+Sun, on Sun → Sun only,
+        # Mon–Fri → the coming Sat+Sun (todo-fixes #121).
+        # "next weekend" = the full Sat+Sun AFTER "this weekend".
+        if re.search(r"\bnext\s+weekend\b", low):
+            if wd == 5:             # Saturday → next Sat+Sun
+                sat = today + timedelta(days=7)
+            elif wd == 6:           # Sunday → next Sat is 6 days away
+                sat = today + timedelta(days=6)
+            else:                   # Mon–Fri → Sat after next
+                sat = today + timedelta(days=(5 - wd) + 7)
+            return sat, sat + timedelta(days=1)
+        # "this weekend"
+        if wd == 6:                 # Sunday — the weekend is almost done
+            return today, today     # only today remains
+        if wd == 5:                 # Saturday — full weekend ahead
+            return today, today + timedelta(days=1)
+        # Mon–Fri — upcoming Sat+Sun
+        sat = today + timedelta(days=(5 - wd))
         return sat, sat + timedelta(days=1)
     if "next week" in low:
-        start = today + timedelta(days=7 - today.weekday())
+        start = today + timedelta(days=7 - wd)
         return start, start + timedelta(days=6)
     if "this week" in low:
-        return today, today + timedelta(days=6 - today.weekday())
+        return today, today + timedelta(days=6 - wd)
     if "tomorrow" in low:
         return today + timedelta(days=1), today + timedelta(days=1)
     if "today" in low:
         return today, today
     for i, name in enumerate(_WEEKDAYS):
         if re.search(rf"\b{name}\b", low):
-            target = today + timedelta(days=(i - today.weekday()) % 7 or 7)
+            target = today + timedelta(days=(i - wd) % 7 or 7)
             return target, target
     return today, today + timedelta(days=DEFAULT_WINDOW_DAYS)
 
@@ -68,10 +105,16 @@ def _hhmm(value: str) -> time:
 
 def _busy_intervals(events: list[dict]) -> list[tuple[datetime, datetime]]:
     """Timed, non-cancelled events as aware local intervals. All-day rows
-    (holidays, PTO markers) don't block — they aren't appointments."""
+    (holidays, PTO markers) don't block — they aren't appointments. Declined
+    invites and transparent ('show as free') events also don't block
+    (todo-fixes #125)."""
     out = []
     for e in events:
         if e.get("all_day") or e.get("status") == "cancelled":
+            continue
+        if e.get("response_status") == "declined":
+            continue
+        if e.get("transparency") == "transparent":
             continue
         try:
             start = datetime.fromisoformat(e["start_at"]).astimezone()

@@ -50,8 +50,7 @@ class _Web:
 def canvas(qtbot, v4_settings, monkeypatch):
     win = make_window(qtbot)
     win.switch_to("canvas")
-    scr = win.screen("canvas")
-    return win, scr
+    return win, win.screen("canvas")
 
 
 def _browse(scr):
@@ -156,10 +155,13 @@ def test_not_now_doesnt_come_back_on_the_next_page(canvas, saved_login):
     assert scr._save_card is None
 
 
-def test_settings_can_change_the_saved_login_on_purpose(canvas, saved_login):
+def test_settings_can_change_the_saved_login_on_purpose(canvas, saved_login, qtbot):
     win, scr = canvas
     scr._open_manage()
     scr._edit_saved_login()
+    # _edit_saved_login runs canvas_creds.load on a worker thread (#136); wait
+    # for the timer that marshals the result back to show the card.
+    qtbot.wait(50)
     card = scr._save_card
     assert card is not None
     assert card.values() == ("u1234567", "")        # never prefills the password
@@ -167,6 +169,8 @@ def test_settings_can_change_the_saved_login_on_purpose(canvas, saved_login):
     assert not any("Never" in t for t in texts)     # asked for it: no "Never"
     card.password.set_text("new-one")
     card._save()
+    # _save_login_from_card also runs off the GUI thread (#136); wait for it.
+    qtbot.wait(50)
     assert saved_login["saves"] == [("u1234567", "new-one")]
     assert scr._save_card is None
 

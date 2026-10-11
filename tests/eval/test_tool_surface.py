@@ -103,11 +103,13 @@ def test_surface_matches_production_not_the_old_bench():
     """The bench graded four todo tools and a `lookup_book` that do not exist.
     Pin the real names so a future eval cannot drift back. Three todo tools DO
     exist as of 2026-07-19 (in-process, not MCP); `delete_todo` and
-    `lookup_book` never did."""
+    `lookup_book` never did. Canvas tools added todo-fixes #131."""
     assert surface.tool_names() == {"list_events", "search_events", "search_email",
                                     "get_email", "search_books", "get_book",
                                     "add_todo", "complete_todo", "list_todos",
-                                    "update_todo"}
+                                    "update_todo",
+                                    "list_assignments", "get_assignment",
+                                    "list_announcements"}
 
 
 def test_config_allowlist_matches_the_servers():

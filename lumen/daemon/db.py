@@ -43,11 +43,14 @@ CREATE TABLE IF NOT EXISTS events (
     start_at TEXT NOT NULL,                 -- RFC3339 as given; ISO date if all-day
     start_day TEXT,                         -- local date it starts on (#72); filter on this
     end_at TEXT,
+    end_day TEXT,                           -- last local date the event occupies (#113)
     all_day INTEGER NOT NULL DEFAULT 0,
     location TEXT,
     description TEXT,
     attendees TEXT NOT NULL DEFAULT '[]',   -- JSON [{email, name, self}]
     status TEXT,                            -- confirmed | tentative
+    transparency TEXT,                      -- Google's 'transparent' = show as free (#125)
+    response_status TEXT,                   -- self attendee's responseStatus (#125); NULL = no attendees
     PRIMARY KEY (calendar_id, id)
 );
 CREATE TABLE IF NOT EXISTS sync_state (     -- KV; email sync shares it in Phase 6
@@ -326,16 +329,31 @@ def connect(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE events ADD COLUMN event_color TEXT")
     if "start_day" not in ev_cols:
         conn.execute("ALTER TABLE events ADD COLUMN start_day TEXT")
+    if "end_day" not in ev_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN end_day TEXT")
+    if "transparency" not in ev_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN transparency TEXT")
+    if "response_status" not in ev_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN response_status TEXT")
     # Backfilled, not left for the next sync: the cache is read the moment the
     # daemon is up, and a NULL day hides the event. Runs on every start (it
     # touches only NULL rows), so a crash between the ALTER and here heals.
-    from lumen.daemon.connectors.gcal_time import local_day
+    from lumen.daemon.connectors.gcal_time import local_day, local_end_day
     with conn:
         conn.executemany(
             "UPDATE events SET start_day = ? WHERE calendar_id = ? AND id = ?",
             [(local_day(r["start_at"]), r["calendar_id"], r["id"])
              for r in conn.execute("SELECT calendar_id, id, start_at FROM events "
                                    "WHERE start_day IS NULL").fetchall()])
+    # Backfill end_day similarly; NULL rows are rows from before #113 (#113).
+    with conn:
+        conn.executemany(
+            "UPDATE events SET end_day = ? WHERE calendar_id = ? AND id = ?",
+            [(local_end_day(r["end_at"], bool(r["all_day"])),
+              r["calendar_id"], r["id"])
+             for r in conn.execute(
+                 "SELECT calendar_id, id, end_at, all_day FROM events "
+                 "WHERE end_day IS NULL").fetchall()])
     todo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(todos)")}
     if "description" not in todo_cols:
         conn.execute("ALTER TABLE todos ADD COLUMN description TEXT")

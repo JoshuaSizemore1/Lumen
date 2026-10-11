@@ -18,12 +18,16 @@ def make_store(tmp_path):
 
 
 def ev(id="e1", calendar_id="primary", title="Standup",
-       start_at="2026-07-10T09:30:00+02:00", end_at="2026-07-10T10:00:00+02:00",
+       start_at="2026-07-10T09:30:00+02:00", end_at=None,
        all_day=False, **kw):
+    # end_at defaults to None so single-day test events use start_day as their
+    # effective end — avoids overlap-query false-negatives from a stale
+    # hard-coded date that predated the event's start (#113).
     base = {"id": id, "calendar_id": calendar_id, "calendar_name": "Personal",
             "color": "#7986cb", "title": title, "start_at": start_at,
             "end_at": end_at, "all_day": all_day, "location": None,
-            "description": None, "attendees": [], "status": "confirmed"}
+            "description": None, "attendees": [], "status": "confirmed",
+            "transparency": None, "response_status": None}
     base.update(kw)
     return base
 
@@ -296,3 +300,131 @@ async def test_busy_reports_a_sync_in_flight(tmp_path):
     assert sync.busy is False
     await sync.sync_once()
     assert sync.busy is False
+
+
+# ---- #113: multi-day + past-midnight events appear on all their days --------
+
+def test_multiday_allday_appears_on_every_day(tmp_path, set_tz):
+    """A 3-day PTO block must show up on days 2 and 3, not just its first day
+    (todo-fixes #113). Google's all-day end is exclusive, so the 3-day PTO
+    '2026-10-12'→'2026-10-15' covers Mon 12, Tue 13, Wed 14."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window(
+        [ev(id="pto", start_at="2026-10-12", end_at="2026-10-15",
+            all_day=True, title="PTO")],
+        "2026-10-01", "2026-10-31")
+    for day in ("2026-10-12", "2026-10-13", "2026-10-14"):
+        ids = [e["id"] for e in store.list_range(day, day)]
+        assert ids == ["pto"], f"PTO missing on {day}"
+    # Google exclusive end: Oct 15 itself is NOT covered
+    assert store.list_range("2026-10-15", "2026-10-15") == []
+
+
+def test_past_midnight_event_appears_on_both_days(tmp_path, set_tz):
+    """A 10 PM party that ends at 1 AM the next day must show on both days
+    (todo-fixes #113)."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window(
+        [ev(id="party", start_at="2026-10-11T22:00:00-06:00",
+            end_at="2026-10-12T01:00:00-06:00")],
+        "2026-10-01", "2026-10-31")
+    assert [e["id"] for e in store.list_range("2026-10-11", "2026-10-11")] == ["party"]
+    assert [e["id"] for e in store.list_range("2026-10-12", "2026-10-12")] == ["party"]
+
+
+def test_zero_length_event_at_midnight_still_listed(tmp_path, set_tz):
+    """Its end_day comes out the day before its start_day; it must still show
+    on its own day (#113)."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window(
+        [ev(id="mark", start_at="2026-10-12T00:00:00-06:00",
+            end_at="2026-10-12T00:00:00-06:00")],
+        "2026-10-01", "2026-10-31")
+    assert [e["id"] for e in store.list_range("2026-10-12", "2026-10-12")] == ["mark"]
+    assert store.list_range("2026-10-11", "2026-10-11") == []
+    store.replace_window([], "2026-10-12", "2026-10-12")
+    assert store.list_range("2026-10-12", "2026-10-12") == []
+
+
+def test_end_exactly_midnight_belongs_to_previous_day(tmp_path, set_tz):
+    """A 10 PM–midnight event has no presence on the next day — an end
+    exactly at midnight is the start of that day, not an overlap (todo-fixes #113)."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window(
+        [ev(id="night", start_at="2026-10-11T22:00:00-06:00",
+            end_at="2026-10-12T00:00:00-06:00")],
+        "2026-10-01", "2026-10-31")
+    assert [e["id"] for e in store.list_range("2026-10-11", "2026-10-11")] == ["night"]
+    assert store.list_range("2026-10-12", "2026-10-12") == []
+
+
+def test_replace_window_removes_multiday_event_when_deleted(tmp_path, set_tz):
+    """If a 3-day event is deleted in Google, the overlap-based delete must
+    remove it even though its start_day predates the window start (todo-fixes #113).
+    Before #113 the start_day-only delete left orphaned rows for events that
+    started just outside the sync window."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    # Trip starts Oct 10 (before the window) and ends Oct 13 (inside the window)
+    store.replace_window(
+        [ev(id="trip", start_at="2026-10-10", end_at="2026-10-14", all_day=True)],
+        "2026-10-01", "2026-10-31")
+    # Google no longer returns it for the same window (deleted)
+    store.replace_window([], "2026-10-01", "2026-10-31")
+    assert store.list_range("2026-01-01", "2026-12-31") == []
+
+
+# ---- #125: transparency + response_status stored and returned ----------------
+
+def test_normalize_stores_transparency_and_response_status(tmp_path):
+    """CalendarSync._normalize must pick up Google's transparency field and the
+    self-attendee's responseStatus (todo-fixes #125)."""
+    transparent_item = {
+        "id": "fyi", "summary": "Company meeting",
+        "start": {"dateTime": "2026-10-12T10:00:00+02:00"},
+        "end": {"dateTime": "2026-10-12T11:00:00+02:00"},
+        "status": "confirmed",
+        "transparency": "transparent",
+        "attendees": [
+            {"email": "me@x.com", "self": True, "responseStatus": "accepted"},
+            {"email": "boss@x.com", "self": False, "responseStatus": "accepted"},
+        ],
+    }
+    declined_item = {
+        "id": "no", "summary": "Unwanted meeting",
+        "start": {"dateTime": "2026-10-12T14:00:00+02:00"},
+        "end": {"dateTime": "2026-10-12T15:00:00+02:00"},
+        "status": "confirmed",
+        "attendees": [
+            {"email": "me@x.com", "self": True, "responseStatus": "declined"},
+        ],
+    }
+    cal = {"id": "primary", "summary": "Personal", "backgroundColor": "#7986cb"}
+    t_ev = CalendarSync._normalize(transparent_item, cal)
+    d_ev = CalendarSync._normalize(declined_item, cal)
+    assert t_ev["transparency"] == "transparent"
+    assert t_ev["response_status"] == "accepted"
+    assert d_ev["transparency"] is None
+    assert d_ev["response_status"] == "declined"
+
+
+def test_transparency_and_response_status_round_trip_db(tmp_path, set_tz):
+    """Fields survive the store→list_range round-trip so the UI and free-slot
+    logic can filter on them (todo-fixes #125)."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window(
+        [ev(id="fyi", start_at="2026-10-12T10:00:00-06:00",
+            transparency="transparent", response_status="accepted"),
+         ev(id="no", start_at="2026-10-12T14:00:00-06:00",
+            response_status="declined")],
+        "2026-10-01", "2026-10-31")
+    rows = {r["id"]: r for r in store.list_range("2026-10-12", "2026-10-12")}
+    assert rows["fyi"]["transparency"] == "transparent"
+    assert rows["fyi"]["response_status"] == "accepted"
+    assert rows["no"]["response_status"] == "declined"
+    assert rows["no"]["transparency"] is None

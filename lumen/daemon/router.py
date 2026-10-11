@@ -102,6 +102,25 @@ CAL_HINT = re.compile(
     re.IGNORECASE,
 )
 
+# Liberal bias like TOOL_HINT and CAL_HINT: a false positive just injects a few
+# more tool schemas; a miss sends "any new Canvas announcements?" to a plain
+# chat with no Canvas tools attached.  "due" is here because "what's due in
+# CS 4150 this week?" has no other Canvas signal; it's wide but bounded by the
+# _subject_groups guard on self._canvas.  Class-code patterns (two-letter prefix
+# + digits) are intentionally absent — too likely to collide with email senders
+# or file names; the user can name the course by its full title instead.
+CANVAS_HINT = re.compile(
+    # Whole words: "exam\w*" took "for example", "final\w*" "finally", and
+    # "of course" is not a course. A bare "class" is as often Python's, and
+    # "submit" any form's, so those need a school-shaped neighbour.
+    r"\b(?:canvas|lms|assignments?|homework|announcements?|"
+    r"(?:my|next)\s+class(?:es)?|(?<!of )courses?|lectures?|syllabus|"
+    r"midterms?|finals?|quiz(?:zes)?|exams?|grades?|graded|submissions?|"
+    r"professor|instructor|office\s*hours?|"
+    r"due\s+in|what.{0,20}due)\b",
+    re.IGNORECASE,
+)
+
 # The briefing route must be checked ahead of every other chat path: "my day"
 # phrasings also match CAL_HINT, and the plain path with calendar context would
 # otherwise steal them and answer without todos/mail.
@@ -495,7 +514,7 @@ WRITE_TOOLS = frozenset({"create_event", "delete_event", "update_event"})
 # model role-played the search (live fabrication 2026-07-17). Liberal bias is
 # deliberate: a false positive costs a few schema tokens, a miss costs a
 # fabricated answer. "todos" is a context-only pseudo-group (no MCP server).
-SERVER_GROUPS = frozenset({"fs", "mail", "gcal", "books"})
+SERVER_GROUPS = frozenset({"fs", "mail", "gcal", "books", "canvas"})
 
 # todo-fixes #54: "if I am on the email screen anything I ask it to do is
 # probably going to be in the context of emails."
@@ -511,9 +530,10 @@ SERVER_GROUPS = frozenset({"fs", "mail", "gcal", "books"})
 SCREEN_GROUPS = {
     "mail": "mail", "calendar": "gcal", "todos": "todos",
     "books": "books", "files": "fs",
-    # Canvas assignments live as todos — that is the tool group that can act
-    # on what the Canvas screen shows.
-    "canvas": "todos",
+    # Canvas has its own MCP server (list_assignments / list_announcements).
+    # todo-fixes #131: was "todos" — wrong group, so canvas questions had no
+    # data path on the Canvas screen.
+    "canvas": "canvas",
 }
 
 # Budget for the page-context block injected into the system message (#68).
@@ -584,6 +604,30 @@ def _event_when(e: dict) -> str:
     if e.get("end_at"):
         when += f"–{datetime.fromisoformat(e['end_at']).astimezone().strftime('%H:%M')}"
     return when
+
+
+def _when_update(start: str, end: str, all_day: bool) -> str:
+    """Proposed new time for the update-confirm dialog (todo-fixes #120).
+    Uses the same human-readable style as the create confirm (_when in
+    event_create.py): 'Mon Oct 14, 2026 · 15:00 – 16:00'."""
+    try:
+        if all_day:
+            s = date.fromisoformat(start[:10])
+            if end:
+                e = date.fromisoformat(end[:10])
+                if s == e:
+                    return f"{s.strftime('%a %b %-d, %Y')} (all day)"
+                return (f"{s.strftime('%a %b %-d')} – "
+                        f"{e.strftime('%a %b %-d, %Y')} (all day)")
+            return f"{s.strftime('%a %b %-d, %Y')} (all day)"
+        s = datetime.fromisoformat(start).astimezone()
+        when = f"{s.strftime('%a %b %-d, %Y')} · {s.strftime('%H:%M')}"
+        if end:
+            e2 = datetime.fromisoformat(end).astimezone()
+            when += f" – {e2.strftime('%H:%M')}"
+        return when
+    except (ValueError, TypeError):
+        return f"{start} – {end}" if end else start
 
 
 CONFIRM_ROW_CAP = 8
@@ -735,15 +779,31 @@ def calendar_context(events: list[dict], now: datetime, window_end: date,
         who = f" — with {names}" if names else ""
         if e["all_day"]:
             d = date.fromisoformat(e["start_at"][:10])
-            when = f"{d.strftime('%a')} {d.isoformat()} (all day)"
+            when = f"{d.strftime('%a')} {d.isoformat()}"
+            # Google's end is exclusive. A trip lists from the day it began,
+            # so it needs its last day to read as still on today (#113).
+            last = (date.fromisoformat(e["end_at"][:10]) - timedelta(days=1)
+                    if e.get("end_at") else d)
+            if last > d:
+                when += f" – {last.strftime('%a')} {last.isoformat()}"
+            when += " (all day)"
         else:
             # Each event at its own offset, not now's — a November event read
             # through October's −06:00 showed an hour late (#73).
             s = datetime.fromisoformat(e["start_at"]).astimezone()
             when = f"{s.strftime('%a')} {s.date().isoformat()} {s.strftime('%H:%M')}"
             if e.get("end_at"):
-                when += f"–{datetime.fromisoformat(e['end_at']).astimezone().strftime('%H:%M')}"
-        lines.append(f"- {when}: {e['title']}{cal}{loc}{who}")
+                end = datetime.fromisoformat(e["end_at"]).astimezone()
+                # Past midnight, the end names its own day (#113).
+                when += (f"–{end.strftime('%H:%M')}" if end.date() == s.date()
+                         else f" – {end.strftime('%a')} {end.date().isoformat()} "
+                              f"{end.strftime('%H:%M')}")
+        # Mark declined/transparent so the model answers "am I free?" correctly
+        # without dropping these rows from the listing (#125).
+        note = (" (declined)" if e.get("response_status") == "declined"
+                else " (marked free)" if e.get("transparency") == "transparent"
+                else "")
+        lines.append(f"- {when}: {e['title']}{note}{cal}{loc}{who}")
     return "\n".join(lines)
 
 
@@ -1118,6 +1178,10 @@ class Router:
             groups.add("fs")
         if TODO_HINT.search(message):
             groups.add("todos")
+        # todo-fixes #131: gate on canvas being configured, not just the hint,
+        # so the group adds nothing when Canvas hasn't been set up.
+        if self._canvas is not None and CANVAS_HINT.search(message):
+            groups.add("canvas")
         return groups
 
     def _screen_prior(self, surface: str | None, message: str) -> set[str]:
@@ -1129,8 +1193,14 @@ class Router:
         available = {"mail": self._mail_store is not None,
                      "gcal": self._calendar is not None,
                      "books": self._books is not None,
-                     "fs": True, "todos": True}
-        return {group} if available.get(group) else set()
+                     "fs": True, "todos": True,
+                     "canvas": self._canvas is not None}
+        out = {group} if available.get(group) else set()
+        if group == "canvas":
+            # Canvas assignments are todos too: "mark this done" on the
+            # Canvas screen still needs the todo tools it had before (#131).
+            out.add("todos")
+        return out
 
     def _engaged_groups(self, conv_id: int | None) -> set[str]:
         """A tool-engaged conversation keeps every group on a bare follow-up
@@ -1150,7 +1220,8 @@ class Router:
         available = {"mail": self._mail_store is not None,
                      "gcal": self._calendar is not None,
                      "books": self._books is not None,
-                     "fs": True, "todos": True}
+                     "fs": True, "todos": True,
+                     "canvas": self._canvas is not None}
         return group if available.get(group, False) else None
 
     def _data_groups(self, message: str, conv_id: int | None,
@@ -1175,7 +1246,7 @@ class Router:
         mail rides along on every tool loop as grounding."""
         for group, name in (("fs", "files"), ("gcal", "calendar"),
                             ("books", "books"), ("mail", "email"),
-                            ("todos", "todos")):
+                            ("todos", "todos"), ("canvas", "canvas")):
             if group in groups:
                 return name
         return "chat"
@@ -1394,12 +1465,19 @@ class Router:
                 # one is the UI's cookie replay handing back the session Canvas
                 # just 401'd, and kicking on that looped 401 → drop → replay →
                 # 401 (live bug 2026-08-27).
+                #
+                # Only kick a sync on first connect / re-login (transition from
+                # disconnected → connected). A CSRF token rotation while browsing
+                # also calls set_session; kicking on that would trigger a full
+                # sync on almost every Canvas page load (todo-fixes #128).
+                was_connected = self._canvas.connected
                 if self._canvas.set_session(payload.get("cookies", {})):
-                    # Sync at once instead of leaving the tab empty until the
-                    # next poll tick — connecting one minute after a tick
-                    # otherwise means a whole poll interval of nothing (live bug
-                    # 2026-08-25).
-                    self._kick_canvas_sync()
+                    if not was_connected:
+                        # Sync at once instead of leaving the tab empty until the
+                        # next poll tick — connecting one minute after a tick
+                        # otherwise means a whole poll interval of nothing (live
+                        # bug 2026-08-25).
+                        self._kick_canvas_sync()
                 yield {"result": self._canvas_status()}
         elif type_ == "canvas.status":
             # Live poller state (not config) for the Canvas tab + Settings row.
@@ -1538,13 +1616,19 @@ class Router:
                 label = c.get("course_code") or c.get("name") or "Canvas"
                 title = f"{label} — {p['name']} due"
                 if p["action"] == "create":
-                    eid = writer.create_all_day(title, p["due"]) if writer else None
+                    # Google HTTP in a worker thread; SQLite stays on the loop
+                    # thread — same split canvas_calendar.py uses (todo-fixes #138).
+                    eid = (await asyncio.to_thread(writer.create_all_day, title, p["due"])
+                           if writer else None)
                     if eid:
                         store.set_calendar_marker(p["id"], eid, p["due"])
                         added += 1
-                elif writer and writer.patch_all_day(p["event_id"], p["due"]):
-                    store.set_calendar_marker(p["id"], p["event_id"], p["due"])
-                    updated += 1
+                elif writer:
+                    ok = await asyncio.to_thread(writer.patch_all_day,
+                                                 p["event_id"], p["due"])
+                    if ok:
+                        store.set_calendar_marker(p["id"], p["event_id"], p["due"])
+                        updated += 1
             yield {"result": {"added": added, "updated": updated}}
         elif type_ == "canvas.assignments":
             # The Canvas tab's assignment list. pending_marker flags rows the
@@ -1615,6 +1699,26 @@ class Router:
                                   if self._canvas_proposals else 0),
                     "alerts": (self._canvas_alerts.count()
                                if self._canvas_alerts else 0)}}
+        elif type_ == "canvas.alerts":
+            # todo-fixes #130: unseen alerts (due-date moves + conflict notes),
+            # newest first, capped at 20 so the UI never gets a surprise wall.
+            if self._canvas_alerts is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                yield {"result": {"items": self._canvas_alerts.recent(limit=20)}}
+        elif type_ == "canvas.alerts_seen":
+            # Mark alerts seen. ids omitted = mark all. Returns the remaining
+            # unseen count so the UI badge can update without a second round
+            # trip.
+            if self._canvas_alerts is None:
+                yield {"error": "canvas unavailable"}
+            else:
+                ids = payload.get("ids") or None
+                self._canvas_alerts.mark_seen(
+                    [int(i) for i in ids] if ids else None)
+                self._canvas_alerts.prune()
+                yield {"result": {
+                    "alerts": self._canvas_alerts.count()}}
         elif type_ == "canvas.set_calendar_sync":
             if self._canvas_prefs is None:
                 yield {"error": "canvas unavailable"}
@@ -1628,9 +1732,15 @@ class Router:
                 on = bool(payload.get("enabled"))
                 self._canvas_prefs.set_ai_mode(on)
                 if on and self._canvas is not None:
-                    # Re-offer everything for classification: the switch was off
-                    # when these rows were first seen, so none were ever looked at.
+                    # Re-offer assignments for classification: the switch was
+                    # off when these rows were first seen.
                     self._canvas.store.reset_ai_state()
+                    # todo-fixes #134: and recent announcements for exam dates.
+                    # They were all classified while the switch was off, so
+                    # the normal exam scan (unclassified only) never sees
+                    # them. The next sync's enrichment pass does it; the tab
+                    # asks for that sync right after the toggle.
+                    self._canvas.request_exam_rescan()
                 yield {"result": self._canvas_prefs.all()}
         elif type_ == "canvas.calendar_queue":
             # Proposed removals awaiting review. Read-only.
@@ -1665,14 +1775,14 @@ class Router:
                     int(payload.get("id", 0)), bool(payload.get("approve")))}
         elif type_ == "canvas.sync_now":
             # Flipping a toggle has to do something visible without waiting out
-            # the next poll tick. Guarded by the existing sync lock.
+            # the next poll tick. Coalesced: if a sync is already running,
+            # await it and return its result — no more "already syncing" rejections
+            # (todo-fixes #129).
             if self._canvas is None:
                 yield {"error": "canvas unavailable"}
             elif not self._enabled("canvas"):
                 yield {"result": {"started": False, "ok": False,
                                   "reason": "paused"}}
-            elif self._canvas.busy:
-                yield {"result": {"started": False, "reason": "already syncing"}}
             else:
                 ok = await self._canvas.sync_once()
                 yield {"result": {"started": True, "ok": bool(ok),
@@ -1682,12 +1792,11 @@ class Router:
             # sync_now already pulls the mirror; what was missing was the
             # reconcile/calendar effects and — the point of the ask — the
             # queued REMOVALS being surfaced at the moment they appear.
+            # Coalesced: awaits any in-flight sync rather than rejecting (#129).
             if self._canvas is None:
                 yield {"error": "canvas unavailable"}
             elif not self._enabled("canvas"):
                 yield {"result": {"ok": False, "reason": "paused"}}
-            elif self._canvas.busy:
-                yield {"result": {"ok": False, "reason": "already syncing"}}
             else:
                 yield {"result": await self._canvas.reconcile_now()}
         elif type_ == "canvas.courses":
@@ -1890,15 +1999,25 @@ class Router:
             if self._calendar is None:
                 yield {"error": "calendar unavailable"}
             else:
-                if type_ == "calendar.refresh" and self._enabled("google_calendar"):
-                    await self._calendar.sync_once()
+                # #117: a refresh says how its Google pull went, so the UI
+                # can show a failure rather than a spurious ✓: sync_failed =
+                # connected + enabled but the pull failed; sync_paused = the
+                # user turned Calendar sync off. Both always present on a
+                # refresh and never on a list (a cache read knows nothing
+                # new), so the UI keeps the last word until the next pull.
                 today = date.today().isoformat()
+                sync: dict = {}
+                if type_ == "calendar.refresh":
+                    paused = not self._enabled("google_calendar")
+                    ok = paused or await self._calendar.sync_once()
+                    sync = {"sync_failed": not ok and self._calendar.connected,
+                            "sync_paused": paused}
                 yield {"result": {
                     "events": self._calendar.list_range(
                         payload.get("from", today), payload.get("to", today)),
                     "connected": self._calendar.connected,
                     "last_sync": self._calendar.last_sync(),
-                    "window": list(self._calendar.window())}}
+                    "window": list(self._calendar.window()), **sync}}
         elif type_ == "todos.list":
             yield {"result": self._todos.list_all()}
         elif type_ == "todos.add":
@@ -1975,10 +2094,15 @@ class Router:
                 if row is None:
                     yield {"error": "suggestion not found"}
                     return
-                raw = row["text"] + (f" @{row['due_date']}" if row["due_date"] else "")
-                todos = self._todos.add(raw, source="llm-extracted")
+                # Use add_structured to keep text verbatim — the old add()
+                # called parse_todo_input, which stripped #tag tokens as real
+                # tags and lowercased them ("Send invoice #4471" → tag "4471",
+                # text "Send invoice", todo-fixes #122).
+                self._todos.add_structured(
+                    row["text"], row.get("due_date"), [],
+                    source="llm-extracted")
                 yield {"result": {"suggestions": self._suggestions.pending(),
-                                  "todos": todos}}
+                                  "todos": self._todos.list_all()}}
             else:   # todos.dismiss_suggestion
                 try:
                     self._suggestions.dismiss(int(payload["id"]))
@@ -2855,10 +2979,14 @@ class Router:
         """Meeting prep: deterministic event lookup + per-attendee mirror
         history, one narration pass. No cache hit answers honestly."""
         now = datetime.now().astimezone()
+        # Resolve an explicit target day so "prep for tomorrow's standup" finds
+        # tomorrow's event even when today's runs at the same time (todo-fixes #124).
+        target_day = meeting_prep.parse_prep_day(message, now.date())
         events = self._calendar.list_range(
             now.date().isoformat(),
             (now.date() + timedelta(days=PREP_WINDOW_DAYS)).isoformat())
-        event = meeting_prep.find_event(events, message, now)
+        event = meeting_prep.find_event(events, message, now,
+                                        target_date=target_day)
         if event is None:
             yield {"chunk": ("I don't see that meeting on your calendar in the "
                              f"next {PREP_WINDOW_DAYS} days.")}
@@ -2996,6 +3124,15 @@ class Router:
         except LLMUnavailable as e:
             yield {"error": str(e)}
             return
+        except Exception:
+            # Unexpected shape from the model (Google-format JSON, etc.) — log
+            # the traceback for debugging but never surface "internal error"
+            # to the user (todo-fixes #119).
+            log.exception("event proposal failed")
+            yield {"chunk": ("Something went wrong turning that into an event "
+                             "— try rephrasing with a day and time.")}
+            yield {"done": True}
+            return
         if proposal is None:
             yield {"chunk": err}     # honest failure is an answer, not an IPC error
             yield {"done": True}
@@ -3108,24 +3245,45 @@ class Router:
     async def _gated_update(self, event: dict, changes: dict):
         """Confirm-over-IPC then patch an event on Google Calendar (#12). UI
         one-shot only; `changes` carries the fields the edit dialog touched
-        (title/start/end/all_day/location/color_id), and only those are sent."""
+        (title/start/end/all_day/location/color_id), and only those are sent.
+
+        todo-fixes #120: always show the event title so the user knows which
+        event they are editing; render times human-readably (old → new); note
+        that attendees are NOT notified (update_event uses sendUpdates=none)."""
         title = str(changes.get("title") or "").strip()
         start = str(changes.get("start") or "").strip()
         end = str(changes.get("end") or "").strip()
+        all_day_new = bool(changes.get("all_day"))
         color_id = str(changes.get("color_id") or "").strip()
         location = str(changes.get("location") or "").strip()
-        rows = []
-        if title:
-            rows.append(("Title", title))
-        if start:
-            rows.append(("When", f"{start} – {end}" if end else start))
-        if location:
-            rows.append(("Location", location))
-        if color_id:
-            rows.append(("Colour", GCAL_COLOR_NAMES.get(color_id, color_id)))
-        if not rows:
+        if not any([title, start, color_id, location]):
             yield {"result": {"updated": False, "message": "Nothing to change."}}
             return
+        event_title = event.get("title") or "Untitled"
+        # Always anchor the dialog with the event name; the user may have
+        # many events and a colour/location change doesn't name it otherwise.
+        rows: list[tuple[str, str]] = [("Event", event_title)]
+        if title and title != event_title:
+            rows.append(("Title", f"{event_title} → {title}"))
+        if start:
+            old_when = _event_when(event)
+            new_when = _when_update(start, end, all_day_new)
+            rows.append(("When", f"{old_when} → {new_when}"))
+        else:
+            rows.append(("When", _event_when(event)))
+        if location:
+            old_loc = (event.get("location") or "").strip()
+            if old_loc and old_loc != location:
+                rows.append(("Location", f"{old_loc} → {location}"))
+            else:
+                rows.append(("Location", location))
+        if color_id:
+            rows.append(("Colour", GCAL_COLOR_NAMES.get(color_id, color_id)))
+        # update_event uses sendUpdates="none" — be honest about it (#120)
+        non_self = [a for a in event.get("attendees") or [] if not a.get("self")]
+        if non_self:
+            names = ", ".join(a.get("name") or a.get("email") for a in non_self)
+            rows.append(("Attendees", f"{names} — not notified of this change"))
         confirm_id = self._confirm.begin()
         yield {"confirm_request": {
                    "icon": "▲", "title": "Update calendar event",
