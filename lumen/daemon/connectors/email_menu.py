@@ -81,6 +81,17 @@ def normalize_message(raw: dict) -> dict:
             "is_read": "UNREAD" not in labels, "attachments": attachments}
 
 
+def local_received(received_at: str | None, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """A stored received_at (UTC) on the user's clock. Every prompt that shows
+    a mail time goes through here: raw slices of the UTC stamp put a 9 PM email
+    at "03:15" tomorrow, while search_email showed the local time — the model
+    saw two different times for one email (todo-fixes #75)."""
+    try:
+        return datetime.fromisoformat(received_at).astimezone().strftime(fmt)
+    except (ValueError, TypeError):
+        return (received_at or "")[:10]
+
+
 # ---- mail query parsing (search_email tool + UI search box) ----------------
 # The local 4B model, trained on Gmail, emits operator queries (from:me,
 # subject:'x', on:2026-07-08, after:/before:, boolean ||) and asks for "the most
@@ -156,13 +167,15 @@ def parse_mail_query(query: str, *, now_local: datetime) -> dict:
     are resolved in `now_local`'s timezone and returned as UTC ISO bounds (the
     format received_at is stored in), so 'on:2026-07-08' matches the messages
     the user saw on their July 8, not the UTC calendar day."""
-    tz, today = now_local.tzinfo, now_local.date()
+    today = now_local.date()
 
     def day_bounds(d: date) -> tuple[str, str]:
-        start = datetime(d.year, d.month, d.day, tzinfo=tz)
+        # Each midnight at its own offset, not today's — a day past the DST
+        # change was an hour off at both ends (todo-fixes #73's class).
+        start, end = (datetime.combine(x, datetime.min.time()).astimezone()
+                      for x in (d, d + timedelta(days=1)))
         return (start.astimezone(timezone.utc).isoformat(timespec="seconds"),
-                (start + timedelta(days=1)).astimezone(timezone.utc)
-                .isoformat(timespec="seconds"))
+                end.astimezone(timezone.utc).isoformat(timespec="seconds"))
 
     def rel(days: int) -> str:
         return (now_local - timedelta(days=days)).astimezone(

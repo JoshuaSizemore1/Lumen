@@ -49,12 +49,17 @@ def parse_proposal(text: str) -> dict | None:
     return None
 
 
-def _parse_local(value: str, tzinfo) -> datetime | None:
+def _parse_local(value: str) -> datetime | None:
+    """The proposal's wall-clock time as an aware local datetime, at that
+    date's own UTC offset — not today's, which is an hour off across a DST
+    change (#73). The prompt asks for local times, so an offset the model
+    tacks on ("Z") is format noise: it was shown as local in the confirm but
+    booked as UTC. The wall clock is what the user said."""
     try:
         dt = datetime.fromisoformat(value)
     except (TypeError, ValueError):
         return None
-    return dt.replace(tzinfo=tzinfo) if dt.tzinfo is None else dt
+    return dt.replace(tzinfo=None).astimezone()
 
 
 def validate_proposal(p: dict, *, now: datetime, user_message: str,
@@ -80,10 +85,10 @@ def validate_proposal(p: dict, *, now: datetime, user_message: str,
             return None, "That date is in the past."
         start_s, end_s = start_d.isoformat(), end_d.isoformat()
     else:
-        start = _parse_local(p.get("start"), now.tzinfo)
+        start = _parse_local(p.get("start"))
         if start is None:
             return None, "I couldn't pin down the time — say it like 'Friday 2pm'."
-        end = _parse_local(p.get("end"), now.tzinfo) if p.get("end") else (
+        end = _parse_local(p.get("end")) if p.get("end") else (
             start + timedelta(minutes=DEFAULT_DURATION_MIN))
         if end is None:
             return None, "I couldn't pin down the end time."

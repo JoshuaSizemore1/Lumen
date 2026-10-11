@@ -89,6 +89,22 @@ def test_norm_book_and_event():
     assert allday["all_day"] is True and allday["date"] == "2026-07-20"
 
 
+def test_calendar_events_past_dst_keep_their_own_wall_clock(qtbot, set_tz):
+    """todo-fixes #73: the calendar handler converted every event to today's
+    fixed −06:00, so November events showed an hour late — and the edit
+    dialog, pre-filled with that wrong start, moved the event when only the
+    end time was changed."""
+    set_tz("America/Denver")
+    got = {}
+    handler = AppState()._calendar_handler(lambda r: got.update(r))
+    handler({"events": [{"title": "Dentist", "all_day": False,
+                         "start_at": "2026-11-05T14:00:00-07:00",
+                         "end_at": "2026-11-05T15:00:00-07:00"}]})
+    ev = got["events"][0]
+    assert (ev["date"], ev["start"], ev["start_min"], ev["dur"]) == (
+        "2026-11-05", "14:00", 14 * 60, 60)
+
+
 def test_norm_event_carries_identity_for_delete():
     # The day-view delete button needs the Google event/calendar ids; sample
     # events have neither, which is what hides the button in sample mode.

@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 
 from lumen.daemon.connectors import google_auth
 from lumen.daemon.connectors.gcal_colors import GCAL_COLOR_HEX
+from lumen.daemon.connectors.gcal_time import local_day
 
 log = logging.getLogger(__name__)
 
@@ -35,24 +36,27 @@ class EventStore:
         self._conn = conn
 
     def replace_window(self, events: list[dict], start_iso: str, end_iso: str) -> None:
-        """Whole-window refresh in one transaction — small dataset, no diffing."""
+        """Whole-window refresh in one transaction — small dataset, no diffing.
+        Days are the user's local days (start_day), never SQLite's date(),
+        which reads an offset stamp as UTC (#72)."""
         with self._conn:
             self._conn.execute(
-                "DELETE FROM events WHERE date(start_at) >= ? AND date(start_at) <= ?",
+                "DELETE FROM events WHERE start_day >= ? AND start_day <= ?",
                 (start_iso, end_iso))
             self._conn.executemany(
-                f"INSERT OR REPLACE INTO events ({', '.join(COLUMNS)}) "
-                f"VALUES ({', '.join('?' * len(COLUMNS))})",
+                f"INSERT OR REPLACE INTO events ({', '.join(COLUMNS)}, start_day) "
+                f"VALUES ({', '.join('?' * (len(COLUMNS) + 1))})",
                 [tuple(
                     json.dumps(e["attendees"]) if c == "attendees"
                     else int(bool(e["all_day"])) if c == "all_day"
                     else e.get(c)
-                    for c in COLUMNS) for e in events])
+                    for c in COLUMNS) + (local_day(e["start_at"]),)
+                 for e in events])
 
     def list_range(self, start_iso: str, end_iso: str) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT * FROM events WHERE date(start_at) >= ? AND date(start_at) <= ? "
-            "ORDER BY date(start_at), all_day DESC, start_at, id",
+            "SELECT * FROM events WHERE start_day >= ? AND start_day <= ? "
+            "ORDER BY start_day, all_day DESC, start_at, id",
             (start_iso, end_iso)).fetchall()
         return [self._to_dict(r) for r in rows]
 
@@ -76,6 +80,7 @@ class EventStore:
     @staticmethod
     def _to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
+        d.pop("start_day", None)        # an index, not part of the event
         d["all_day"] = bool(d["all_day"])
         d["attendees"] = json.loads(d["attendees"])
         return d

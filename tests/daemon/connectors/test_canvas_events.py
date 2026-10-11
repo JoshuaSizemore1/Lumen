@@ -3,7 +3,7 @@ behaviour is pinned down exhaustively — the orchestrator around it only pipes.
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -57,6 +57,15 @@ def test_due_local_converts_utc_to_local():
 @pytest.mark.parametrize("bad", [None, "", "not a date", "2026-13-45", 17])
 def test_due_local_is_total(bad):
     assert ce.due_local(bad) is None
+
+
+def test_due_day_is_the_local_day_not_the_utc_one():
+    """todo-fixes #74: 11:59 PM Mountain is already tomorrow in UTC, so the
+    Canvas tab's `due_at[:10]` said "Due tomorrow" for tonight's homework."""
+    assert ce.due_day("2026-10-12T05:59:00Z") == date(2026, 10, 11)
+    assert ce.due_day("2026-11-06T06:59:00Z") == date(2026, 11, 5)    # MST
+    assert ce.due_day("2026-10-11") == date(2026, 10, 11)    # a bare date is local
+    assert ce.due_day(None) is None and ce.due_day("soon") is None
 
 
 def test_due_local_rejects_a_naive_timestamp():

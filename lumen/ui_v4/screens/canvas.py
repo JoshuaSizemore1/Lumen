@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QApplication, QBoxLayout, QFrame, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from ...daemon.connectors.canvas_events import due_day, due_local
 from ...ui_v3 import canvas_creds
 from ...ui_v3 import canvas_login as cl
 from .. import theme as T
@@ -114,14 +115,13 @@ def _md(d: date) -> str:
 
 def _due_badge(due_at: str, done: bool = False) -> tuple[str, str]:
     """(badge kind, words) for an assignment's due date, by urgency. Something
-    already handed in never reads as overdue."""
-    iso = (due_at or "")[:10]
-    if not iso:
+    already handed in never reads as overdue. The day is the local one —
+    Canvas's UTC stamp is tomorrow for anything due tonight (#74)."""
+    if not (due_at or "").strip():
         return "neutral", "No due date"
-    try:
-        d = date.fromisoformat(iso)
-    except ValueError:
-        return "neutral", iso
+    d = due_day(due_at)
+    if d is None:
+        return "neutral", due_at[:10]
     days = (d - date.today()).days
     if done:
         return "neutral", f"Due {_md(d)}"
@@ -151,22 +151,25 @@ def _pretty_when(value) -> str:
 
 
 def _due_key(a: dict):
-    iso = (a.get("due_at") or "")[:10]
-    try:
-        return (0, date.fromisoformat(iso))
-    except ValueError:
-        return (1, date.max)
+    d = due_day(a.get("due_at"))
+    return (0, d) if d is not None else (1, date.max)
+
+
+def _local_due(due_at: str | None) -> str:
+    """The due time the Ask bar hands the model: local, like every other time
+    it sees — Canvas's raw stamp is UTC with nothing saying so (#74)."""
+    due = due_local(due_at)
+    return due.strftime("%Y-%m-%d %H:%M") if due else (due_at or "")[:16]
 
 
 _SECTIONS = ["Overdue", "Next 7 days", "In 1–2 weeks", "Later", "No due date"]
 
 
 def _time_bucket(due_at: str) -> int:
-    iso = (due_at or "")[:10]
-    try:
-        days = (date.fromisoformat(iso) - date.today()).days
-    except ValueError:
+    d = due_day(due_at)
+    if d is None:
         return 4
+    days = (d - date.today()).days
     if days < 0:
         return 0
     if days <= 6:
@@ -556,7 +559,7 @@ class CanvasScreen(QWidget):
                         if not a.get("submitted") and a.get("score") is None][:15]
             ctx["assignments"] = [
                 {"name": a.get("name", ""), "course": a.get("course_code", ""),
-                 "due": (a.get("due_at") or "")[:16]} for a in upcoming]
+                 "due": _local_due(a.get("due_at"))} for a in upcoming]
         return ctx
 
     def resizeEvent(self, ev):

@@ -66,7 +66,7 @@ def _hhmm(value: str) -> time:
     return time(int(h), int(m))
 
 
-def _busy_intervals(events: list[dict], tzinfo) -> list[tuple[datetime, datetime]]:
+def _busy_intervals(events: list[dict]) -> list[tuple[datetime, datetime]]:
     """Timed, non-cancelled events as aware local intervals. All-day rows
     (holidays, PTO markers) don't block — they aren't appointments."""
     out = []
@@ -74,8 +74,8 @@ def _busy_intervals(events: list[dict], tzinfo) -> list[tuple[datetime, datetime
         if e.get("all_day") or e.get("status") == "cancelled":
             continue
         try:
-            start = datetime.fromisoformat(e["start_at"]).astimezone(tzinfo)
-            end = (datetime.fromisoformat(e["end_at"]).astimezone(tzinfo)
+            start = datetime.fromisoformat(e["start_at"]).astimezone()
+            end = (datetime.fromisoformat(e["end_at"]).astimezone()
                    if e.get("end_at") else start + timedelta(minutes=30))
         except (TypeError, ValueError):
             continue
@@ -89,14 +89,16 @@ def find_slots(events: list[dict], *, duration_min: int, start_date: date,
                ) -> list[tuple[datetime, datetime]]:
     """Up to `count` open slots, spread across days before repeating one:
     half-hour-aligned starts inside working hours that overlap no busy event."""
-    busy = _busy_intervals(events, now.tzinfo)
+    busy = _busy_intervals(events)
     duration = timedelta(minutes=duration_min)
     step = timedelta(minutes=STEP_MIN)
     per_day: list[list[tuple[datetime, datetime]]] = []
     day = start_date
     while day <= end_date:
-        window_start = datetime.combine(day, _hhmm(day_start), tzinfo=now.tzinfo)
-        window_end = datetime.combine(day, _hhmm(day_end), tzinfo=now.tzinfo)
+        # Each day's own offset, not now's: across a DST change today's
+        # offset puts "08:00" an hour off on the far side (#73).
+        window_start = datetime.combine(day, _hhmm(day_start)).astimezone()
+        window_end = datetime.combine(day, _hhmm(day_end)).astimezone()
         if day == now.date():
             earliest = now + timedelta(minutes=LEAD_MIN)
             minute = (earliest.minute // STEP_MIN + 1) * STEP_MIN

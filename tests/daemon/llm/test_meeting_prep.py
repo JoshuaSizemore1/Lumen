@@ -4,10 +4,17 @@ was handed, with subjects/dates so claims are checkable."""
 
 from datetime import datetime
 
+import pytest
+
 from lumen.daemon.llm.meeting_prep import (SYSTEM, build_prep_data,
                                            compose_prep, find_event)
 
 NOW = datetime.fromisoformat("2026-07-13T08:00:00-06:00")
+
+
+@pytest.fixture(autouse=True)
+def mountain_time(set_tz):
+    set_tz("America/Denver")        # NOW's −06:00 is Denver's summer offset
 
 STANDUP = {"id": "e1", "calendar_id": "primary", "calendar_name": "Work",
            "color": "#7986cb", "title": "Team standup",
@@ -63,6 +70,16 @@ def test_finds_event_by_attendee_name():
 def test_no_match_returns_none():
     assert find_event(EVENTS, "prep me for the quarterly offsite", NOW) is None
     assert find_event([], "prep me for my 2pm", NOW) is None
+
+
+def test_clock_time_matches_an_event_after_dst_ends():
+    """todo-fixes #73: a November 2 PM read through today's −06:00 was 3 PM,
+    so "prep me for my 2pm" found nothing and the prep block said 15:00."""
+    now = datetime(2026, 10, 30, 9, 0).astimezone()
+    nov = dict(REVIEW, id="n1", start_at="2026-11-05T14:00:00-07:00",
+               end_at="2026-11-05T15:00:00-07:00")
+    assert find_event([nov], "prep me for my 2pm", now) is nov
+    assert "Thu 2026-11-05 14:00–15:00" in build_prep_data(nov, {}, now)
 
 
 # ---- build_prep_data ----
@@ -130,3 +147,12 @@ async def test_compose_streams_and_carries_data():
     assert llm.messages[0]["role"] == "system"
     assert llm.messages[0]["content"] == SYSTEM
     assert data in llm.messages[1]["content"]
+
+
+def test_prep_history_dates_are_local():
+    """todo-fixes #75: an evening email showed under tomorrow's date."""
+    hist = {"priya@x.com": [
+        {"id": "m9", "sender": "Priya <priya@x.com>", "recipients": "me@x.com",
+          "subject": "Late note", "received_at": "2026-10-09T03:15:00+00:00"}]}
+    data = build_prep_data(STANDUP, hist, NOW)
+    assert "2026-10-08: from them" in data

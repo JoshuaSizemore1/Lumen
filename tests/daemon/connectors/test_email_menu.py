@@ -66,7 +66,19 @@ def test_search_empty_query_returns_newest_first(tmp_path):
     assert ids == ["m5", "m3", "m1"]                   # most recent first
 
 
-def test_search_on_date_uses_local_timezone(tmp_path):
+def test_search_day_bounds_use_that_days_offset(set_tz):
+    """Same class as todo-fixes #73: "on:" a date past the DST change was
+    bounded with today's −06:00, an hour off at each end of the day."""
+    from lumen.daemon.connectors.email_menu import parse_mail_query
+    set_tz("America/Denver")
+    now = datetime(2026, 10, 11, 9, 0).astimezone()
+    p = parse_mail_query("on:2026-11-05", now_local=now)
+    assert (p["after"], p["before"]) == ("2026-11-05T07:00:00+00:00",
+                                         "2026-11-06T07:00:00+00:00")
+
+
+def test_search_on_date_uses_local_timezone(tmp_path, set_tz):
+    set_tz("America/Denver")        # _NOW's −06:00 is Denver's summer offset
     # UTC 07-09T04:00 is the user's local 07-08T22:00 — 'on the 8th' must find
     # it even though the stored UTC date is the 9th (the live bug).
     store = make_store(tmp_path)
@@ -798,3 +810,13 @@ def test_list_page_sent_scope(tmp_path):
                   msg(3, labels=["SENT", "INBOX"], is_read=True)])  # self-send
     assert [m["id"] for m in store.list_page("sent")] == ["m3", "m2"]
     assert [m["id"] for m in store.list_page("inbox")] == ["m3", "m1"]
+
+
+def test_local_received_is_the_users_clock(set_tz):
+    """todo-fixes #75: received_at is stored in UTC; every prompt that shows
+    it must show the local time, as search_email already did."""
+    from lumen.daemon.connectors.email_menu import local_received
+    set_tz("America/Denver")
+    assert local_received("2026-10-09T03:15:00+00:00") == "2026-10-08 21:15"
+    assert local_received("2026-10-09T03:15:00+00:00", "%Y-%m-%d") == "2026-10-08"
+    assert local_received("garbage") == "garbage" and local_received(None) == ""

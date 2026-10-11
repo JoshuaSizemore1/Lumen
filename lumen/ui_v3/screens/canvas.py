@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QFrame, QLineEdit, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from ...daemon.connectors.canvas_events import due_day
 from .. import canvas_creds
 from .. import canvas_login as cl
 from .. import theme as T
@@ -60,14 +61,13 @@ def _due_meta(due_at: str, done: bool = False) -> tuple[str, str, str]:
     overdue = red, due within 3 days = amber, later = muted. Turns a bare ISO
     date into a human 'in 2 days' / 'overdue' the way a planner would. A `done`
     item (submitted or graded) never reads as overdue — its past due date is just
-    quiet context, not an alarm (audit)."""
-    iso = (due_at or "")[:10]
-    if not iso:
+    quiet context, not an alarm (audit). The day is the local one — Canvas's
+    UTC stamp is tomorrow for anything due tonight (#74)."""
+    if not (due_at or "").strip():
         return "no due date", T.TEXT_FAINTER, T.BORDER_FIELD
-    try:
-        d = date.fromisoformat(iso)
-    except ValueError:
-        return iso, T.TEXT_MUTED, T.BORDER_FIELD
+    d = due_day(due_at)
+    if d is None:
+        return due_at[:10], T.TEXT_MUTED, T.BORDER_FIELD
     days = (d - date.today()).days
     when = d.strftime("%b %-d")
     if done:
@@ -98,11 +98,8 @@ def _pretty_when(value) -> str:
 
 def _due_key(a: dict):
     """Sort assignments soonest-first; those with no due date sink to the end."""
-    iso = (a.get("due_at") or "")[:10]
-    try:
-        return (0, date.fromisoformat(iso))
-    except ValueError:
-        return (1, date.max)
+    d = due_day(a.get("due_at"))
+    return (0, d) if d is not None else (1, date.max)
 
 
 # Time-section buckets for the assignment timeline (#28 rework). Rolling windows
@@ -114,11 +111,10 @@ _SECTIONS = ["Overdue", "Next 7 days", "In 1–2 weeks", "Later", "No due date"]
 
 def _time_bucket(due_at: str) -> int:
     """Index into _SECTIONS for one assignment's due date."""
-    iso = (due_at or "")[:10]
-    try:
-        days = (date.fromisoformat(iso) - date.today()).days
-    except ValueError:
+    d = due_day(due_at)
+    if d is None:
         return 4                       # no / unparseable due date
+    days = (d - date.today()).days
     if days < 0:
         return 0
     if days <= 6:
@@ -803,12 +799,8 @@ class CanvasScreen(QWidget):
         if a.get("submitted"):
             return Chip("✓ submitted", T.OK, T.BORDER_OK, px=10, radius=3,
                         hpad=7, vpad=2)
-        iso = (a.get("due_at") or "")[:10]
-        try:
-            overdue = date.fromisoformat(iso) < date.today()
-        except ValueError:
-            overdue = False
-        if not overdue:
+        d = due_day(a.get("due_at"))
+        if d is None or d >= date.today():
             return None
         return Chip("not turned in", _OVERDUE, T.BORDER_DANGER, px=10, radius=3,
                     hpad=7, vpad=2)

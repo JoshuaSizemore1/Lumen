@@ -22,6 +22,7 @@ from lumen.daemon.connectors.gcal_colors import (  # noqa: F401  (re-exported)
 from lumen.daemon import local_tools
 from lumen.daemon.connectors.capture import classify
 from lumen.daemon.connectors.connection_state import ConnectionState
+from lumen.daemon.connectors.email_menu import local_received
 from lumen.daemon.llm import (commitments, intent, label_keywords,
                               label_suggest, meeting_prep, notes_qa, triage)
 from lumen.daemon.llm.book_recs import recommend
@@ -663,10 +664,12 @@ def calendar_context(events: list[dict], now: datetime, window_end: date,
             d = date.fromisoformat(e["start_at"][:10])
             when = f"{d.strftime('%a')} {d.isoformat()} (all day)"
         else:
-            s = datetime.fromisoformat(e["start_at"]).astimezone(now.tzinfo)
+            # Each event at its own offset, not now's — a November event read
+            # through October's −06:00 showed an hour late (#73).
+            s = datetime.fromisoformat(e["start_at"]).astimezone()
             when = f"{s.strftime('%a')} {s.date().isoformat()} {s.strftime('%H:%M')}"
             if e.get("end_at"):
-                when += f"–{datetime.fromisoformat(e['end_at']).astimezone(now.tzinfo).strftime('%H:%M')}"
+                when += f"–{datetime.fromisoformat(e['end_at']).astimezone().strftime('%H:%M')}"
         lines.append(f"- {when}: {e['title']}{cal}{loc}{who}")
     return "\n".join(lines)
 
@@ -706,9 +709,19 @@ def mail_context(unread: list[dict], counts: dict, connected: bool,
     if not unread:
         lines.append("No unread messages.")
     for m in unread:
-        when = m["received_at"][:16].replace("T", " ")
-        lines.append(f"- {when}: {m['sender']} — {m['subject']}")
+        lines.append(f"- {local_received(m['received_at'])}: "
+                     f"{m['sender']} — {m['subject']}")
     return "\n".join(lines)
+
+
+def date_line(now: datetime) -> str:
+    """The date line every chat prompt carries. Date, not clock: it sits ahead
+    of the history, and a time that changed every minute would throw away the
+    history's prompt cache on nearly every turn (power/thermal rule). The
+    calendar context carries the clock when a question needs it."""
+    off = now.strftime("%z")
+    return (f"Today is {now.strftime('%A')} {now.date().isoformat()} "
+            f"(local timezone UTC{off[:3]}:{off[3:]}).")
 
 
 def todo_context(todos: list[dict], today: date, has_tool: bool = False) -> str:
@@ -966,6 +979,10 @@ class Router:
             mem = memory_mod.memory_context(self._memory_path, self._memory_cap)
             if mem:
                 context.append(mem)
+        # Every question gets the date — "yesterday" and "until Christmas"
+        # had none, and Claude mode's --system-prompt-file drops the CLI's own
+        # date line (#76). After identity + memory so the warm prefix holds.
+        context.append(date_line(datetime.now().astimezone()))
         if self._procedures is not None:
             proc = self._procedures.match(message)
             if proc:

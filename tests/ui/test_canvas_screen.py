@@ -1,4 +1,6 @@
 import json
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 
 from PyQt6.QtWidgets import QLabel, QPushButton
 
@@ -236,6 +238,18 @@ def test_due_meta_urgency_colours():
     assert _due_meta(soon)[0].startswith("in 2d")
     assert "overdue" not in _due_meta(far)[0]
     assert _due_meta("")[0] == "no due date"
+
+
+def test_evening_deadlines_land_on_their_local_day(set_tz):
+    """todo-fixes #74: Canvas sends due dates in UTC, and the tab read the
+    first ten characters — tonight's 11:59 PM homework showed "Due tomorrow"
+    and last night's "Due today" instead of overdue."""
+    from lumen.ui_v3.screens.canvas import _OVERDUE, _due_meta, _time_bucket
+    set_tz("America/Denver")
+    tonight, last_night = _tonight_and_last_night()
+    assert _due_meta(tonight)[0] == "due today"
+    assert _due_meta(last_night)[1] == _OVERDUE
+    assert _time_bucket(last_night) == 0 and _time_bucket(tonight) == 1
 
 
 def test_disconnected_empty_shows_connect_hero(qtbot):
@@ -1025,3 +1039,14 @@ def test_disconnected_tab_never_syncs_on_show(qtbot):
     screen._start_login = lambda: None         # don't open the login browser
     screen.showEvent(None)
     assert state.syncs == 0
+
+
+def _utc_z(local: datetime) -> str:
+    """A local wall-clock time as Canvas sends it: a UTC instant with a Z."""
+    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tonight_and_last_night() -> tuple[str, str]:
+    today = date.today()
+    return (_utc_z(datetime.combine(today, dtime(23, 59))),
+            _utc_z(datetime.combine(today - timedelta(days=1), dtime(23, 59))))

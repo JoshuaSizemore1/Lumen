@@ -6,6 +6,8 @@ subjects/dates so every claim is checkable (book-recs grounding pattern)."""
 import re
 from datetime import datetime
 
+from lumen.daemon.connectors.email_menu import local_received
+
 SYSTEM = (
     "You are Lumen, the user's local assistant. Compose a short meeting brief "
     "from the data below: what the meeting is, who is in it, and what the "
@@ -56,10 +58,12 @@ def _event_words(e: dict) -> set[str]:
 
 
 def _start(e: dict, now: datetime) -> datetime:
+    """Local start at the event's own UTC offset — today's is an hour off for
+    an event across a DST change, so "my 2pm" missed a November 2 PM (#73)."""
     s = e["start_at"]
     if e.get("all_day"):
-        return datetime.fromisoformat(s[:10] + "T00:00:00").replace(tzinfo=now.tzinfo)
-    return datetime.fromisoformat(s).astimezone(now.tzinfo)
+        return datetime.fromisoformat(s[:10] + "T00:00:00").astimezone()
+    return datetime.fromisoformat(s).astimezone()
 
 
 def find_event(events: list[dict], message: str, now: datetime) -> dict | None:
@@ -95,10 +99,10 @@ def _when(e: dict, now: datetime) -> str:
     if e.get("all_day"):
         s = _start(e, now)
         return f"{s.strftime('%a')} {s.date().isoformat()} (all day)"
-    s = datetime.fromisoformat(e["start_at"]).astimezone(now.tzinfo)
+    s = _start(e, now)
     when = f"{s.strftime('%a')} {s.date().isoformat()} {s.strftime('%H:%M')}"
     if e.get("end_at"):
-        when += f"–{datetime.fromisoformat(e['end_at']).astimezone(now.tzinfo).strftime('%H:%M')}"
+        when += f"–{datetime.fromisoformat(e['end_at']).astimezone().strftime('%H:%M')}"
     return when
 
 
@@ -133,7 +137,7 @@ def build_prep_data(event: dict, history: dict[str, list[dict]] | None,
         lines.append(f"- {who}:")
         addr = (a.get("email") or "").lower()
         for m in rows:
-            day = (m.get("received_at") or "")[:10]
+            day = local_received(m.get("received_at"), "%Y-%m-%d")
             them = addr and addr in (m.get("sender") or "").lower()
             direction = "from them" if them else "from you"
             lines.append(f"  - {day}: {direction} — “{m.get('subject') or '(no subject)'}”")

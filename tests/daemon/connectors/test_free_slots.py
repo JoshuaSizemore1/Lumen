@@ -3,11 +3,18 @@ hours, busy intervals, request parsing, and the rendered proposal text."""
 
 from datetime import date, datetime
 
+import pytest
+
 from lumen.daemon.connectors.free_slots import (SLOT_HEADER, find_slots,
                                                 parse_duration, parse_window,
                                                 render_slots)
 
 NOW = datetime.fromisoformat("2026-07-13T09:10:00-06:00")   # Monday morning
+
+
+@pytest.fixture(autouse=True)
+def mountain_time(set_tz):
+    set_tz("America/Denver")        # NOW's −06:00 is Denver's summer offset
 
 
 def ev(start, end, **over):
@@ -118,3 +125,18 @@ def test_render_numbers_options_with_explicit_dates():
     assert "2. Wed 2026-07-15" in text and "3. Thu 2026-07-16" in text
     assert "only" in text and "calendar" in text       # honesty note
     assert "book" in text.lower()                      # booking nudge
+
+
+# ---- daylight saving (todo-fixes #73) ----
+
+def test_slots_after_dst_ends_use_that_days_offset():
+    """Building the working day with today's fixed −06:00 put November's
+    "08:00" at 7 AM MST: the slot was checked free an hour earlier than the
+    8 AM that "book the first one" then booked — right over a real event."""
+    now = datetime(2026, 10, 30, 9, 0).astimezone()             # MDT
+    nov2 = date(2026, 11, 2)
+    busy = [ev("2026-11-02T08:00:00-07:00", "2026-11-02T09:00:00-07:00")]
+    slots = find_slots(busy, duration_min=30, start_date=nov2, end_date=nov2,
+                       now=now)
+    assert slots[0][0].isoformat() == "2026-11-02T09:00:00-07:00"
+    assert "1. Mon 2026-11-02 09:00–09:30" in render_slots(slots, 30)

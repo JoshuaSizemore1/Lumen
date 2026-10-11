@@ -106,3 +106,20 @@ async def test_scan_llm_down_propagates_and_keeps_cursor(tmp_path):
     with pytest.raises(LLMUnavailable):
         await scan(llm, mail, store, now=NOW)
     assert store.last_scan() is None       # failed scan retries the same mail
+
+
+async def test_scan_tells_the_model_the_local_sent_day(tmp_path, set_tz):
+    """todo-fixes #75: an email sent Thursday evening was described as "sent
+    on" Friday (its UTC date), so "I'll send it tomorrow" landed a day late."""
+    set_tz("America/Denver")
+    seen = []
+
+    class Capture:
+        async def chat(self, messages):
+            seen.append(messages[-1]["content"])
+            yield "[]"
+
+    store = SuggestionStore(db.connect(tmp_path / "s.db"))
+    mail = mail_store_with([dict(sent_mail(8), received_at="2026-10-09T03:15:00+00:00")])
+    await scan(Capture(), mail, store, now=datetime.fromisoformat("2026-10-09T03:15:00+00:00"))
+    assert seen[0].startswith("Sent on 2026-10-08 (Thursday).")

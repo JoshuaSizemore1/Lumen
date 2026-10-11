@@ -4,6 +4,8 @@ for a session replayed from stored cookies (L11), and Disconnect from
 anywhere clears the browser's cookie jar (L11). A stand-in page object
 replaces Chromium — tests never start QtWebEngine."""
 import enum
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as dtime
 
 import pytest
 from PyQt6.QtWidgets import QPushButton
@@ -224,3 +226,34 @@ def test_remove_all_says_what_was_really_removed(live_canvas):
     assert toasts == []                          # one still out
     cbs[1]({"ok": False, "reason": "calendar unavailable"})
     assert toasts == ["Removed 1 of 2 events"]
+
+
+def _utc_z(local: datetime) -> str:
+    """A local wall-clock time as Canvas sends it: a UTC instant with a Z."""
+    return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _tonight_and_last_night() -> tuple[str, str]:
+    today = date.today()
+    return (_utc_z(datetime.combine(today, dtime(23, 59))),
+            _utc_z(datetime.combine(today - timedelta(days=1), dtime(23, 59))))
+
+
+def test_evening_deadlines_land_on_their_local_day(set_tz):
+    """todo-fixes #74 — same rule as ui_v3: the local day, never the UTC one."""
+    set_tz("America/Denver")
+    tonight, last_night = _tonight_and_last_night()
+    assert canvas_mod._due_badge(tonight) == ("warn", "Due today")
+    assert canvas_mod._due_badge(last_night)[0] == "danger"
+    assert canvas_mod._time_bucket(last_night) == 0
+    assert canvas_mod._time_bucket(tonight) == 1
+
+
+def test_ask_context_sends_local_due_times(canvas, set_tz):
+    """The Ask bar context handed the model Canvas's UTC time, unlabelled."""
+    set_tz("America/Denver")
+    _win, scr = canvas
+    scr._connected = True
+    scr._assign_data = [{"name": "HW 5", "course_code": "CS 4150",
+                         "due_at": "2026-10-12T05:59:00Z"}]
+    assert scr.ask_context()["assignments"][0]["due"] == "2026-10-11 23:59"

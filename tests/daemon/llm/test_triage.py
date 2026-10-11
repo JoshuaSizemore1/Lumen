@@ -74,3 +74,12 @@ def test_render_names_come_from_rows_not_model():
 def test_system_prompt_demands_json_and_defines_buckets():
     low = SYSTEM.lower()
     assert "json" in low and "never needs_response" in low
+
+
+def test_triage_dates_are_local(set_tz):
+    """todo-fixes #75: an evening email was dated tomorrow in triage."""
+    set_tz("America/Denver")
+    row = dict(ROWS[0], received_at="2026-10-09T03:15:00+00:00")
+    assert "2026-10-08" in message_line(row) and "2026-10-09" not in message_line(row)
+    digest = render_digest({"needs_response": [(row, "asks for the spec")]}, total=1)
+    assert "(2026-10-08)" in digest

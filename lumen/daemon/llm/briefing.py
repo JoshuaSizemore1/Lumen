@@ -4,6 +4,8 @@ never goes looking, so a briefing can't fabricate a day."""
 
 from datetime import date, datetime
 
+from lumen.daemon.connectors.email_menu import local_received
+
 SYSTEM = (
     "You are Lumen, the user's local assistant. Compose a short morning "
     "briefing from the data below — a quick read to start the day, not a "
@@ -73,8 +75,8 @@ def build_sections(events: list[dict], todos: list[dict], unread: list[dict],
             lines.append("No unread mail.")
         else:
             for m in unread:
-                when = (m.get("received_at") or "")[:16].replace("T", " ")
-                lines.append(f"- {when}: {m['sender']} — {m['subject']}")
+                lines.append(f"- {local_received(m.get('received_at'))}: "
+                             f"{m['sender']} — {m['subject']}")
 
     # Canvas assignments already surface as real todos above; only announcements
     # need their own line. Omit the section entirely when there's nothing to say.

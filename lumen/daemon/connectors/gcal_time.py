@@ -1,6 +1,22 @@
-"""The UTC offset stamped onto an edited event's times. Its own module, like
-gcal_colors, so both UIs share one copy without importing the router."""
+"""Local-time helpers for calendar events: the UTC offset stamped onto an
+edited event's times, and the local day an event belongs to. Its own module,
+like gcal_colors, so both UIs share one copy without importing the router."""
 from datetime import date, datetime
+
+
+def local_day(start_at: str) -> str:
+    """The local date (YYYY-MM-DD) an event starts on — the day Today and the
+    day view file it under. SQLite's date() converts an offset stamp to UTC,
+    which put every evening event on tomorrow (todo-fixes #72). An all-day
+    event's bare date is already a local day."""
+    text = str(start_at or "")
+    if len(text) == 10:
+        return text
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return text[:10]
+    return (dt.astimezone() if dt.tzinfo else dt).date().isoformat()
 
 
 def tz_offset(day: date | None = None, h: int = 12, m: int = 0) -> str:

@@ -131,3 +131,11 @@ def test_build_sections_omits_empty_canvas_section():
                          cal_connected=True, mail_connected=True,
                          mail_syncing=False, canvas_announcements=[])
     assert "CANVAS ANNOUNCEMENTS" not in out
+
+
+def test_unread_mail_times_are_local(set_tz):
+    """todo-fixes #75: the briefing said a 9 PM email came in at "03:15"
+    tomorrow."""
+    set_tz("America/Denver")
+    s = sections(unread=[dict(UNREAD[0], received_at="2026-10-09T03:15:00+00:00")])
+    assert "2026-10-08 21:15: Ada" in s and "03:15" not in s

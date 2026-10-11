@@ -3,12 +3,19 @@ model, is what guarantees nothing malformed ever reaches a confirm dialog."""
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from lumen.daemon.llm.event_create import (
     confirm_payload, parse_proposal, propose_event, validate_proposal,
 )
 
 TZ = timezone(timedelta(hours=-6))
 NOW = datetime(2026, 7, 10, 14, 0, tzinfo=TZ)
+
+
+@pytest.fixture(autouse=True)
+def mountain_time(set_tz):
+    set_tz("America/Denver")        # TZ is Denver's summer offset
 
 
 def proposal(**kw):
@@ -43,6 +50,30 @@ def test_valid_proposal_normalizes_with_local_tz():
     assert p["start"] == "2026-07-11T14:00:00-06:00"   # naive times become local
     assert p["end"] == "2026-07-11T14:30:00-06:00"
     assert p["all_day"] is False and p["attendees"] == []
+
+
+def test_time_after_dst_ends_gets_that_days_offset():
+    """todo-fixes #73: "Dentist Nov 5 2pm", asked in October, was stamped
+    with October's −06:00 — booked at 1 PM, though the confirm said 2 PM."""
+    p, err = valid(proposal(start="2026-11-05T14:00", end="2026-11-05T15:00"),
+                   "dentist nov 5 2pm")
+    assert err is None
+    assert p["start"] == "2026-11-05T14:00:00-07:00"
+    assert p["end"] == "2026-11-05T15:00:00-07:00"
+
+
+def test_an_offset_from_the_model_keeps_the_local_wall_clock():
+    """The prompt asks for local times. A "Z" the model tacked on was shown
+    as 14:00 in the confirm but booked as 14:00 UTC — 8 AM here. The wall
+    clock is what the user said, and the confirm must show what is booked."""
+    p, err = valid(proposal(start="2026-11-05T14:00:00Z",
+                            end="2026-11-05T15:00:00+00:00"),
+                   "dentist nov 5 2pm")
+    assert err is None
+    assert p["start"] == "2026-11-05T14:00:00-07:00"
+    assert p["end"] == "2026-11-05T15:00:00-07:00"
+    when = dict(confirm_payload(p)["rows"])["When"]
+    assert "14:00 – 15:00" in when
 
 
 def test_missing_title_rejected():

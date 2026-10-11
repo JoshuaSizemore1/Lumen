@@ -6,6 +6,8 @@ a sender or subject (mechanical grounding, book_recs rule-class)."""
 import json
 import re
 
+from lumen.daemon.connectors.email_menu import local_received
+
 SYSTEM = (
     "You classify ONE email from the user's inbox into exactly one bucket:\n"
     "- needs_response: a real person personally wrote to the user and is "
@@ -33,7 +35,7 @@ _OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 def message_line(r: dict) -> str:
     state = "read" if r.get("is_read") else "unread"
-    day = (r.get("received_at") or "")[:10]
+    day = local_received(r.get("received_at"), "%Y-%m-%d")
     snippet = (r.get("snippet") or "").strip()[:SNIPPET_CAP]
     return (f"[{state}] {day}: {r.get('sender', '')} — "
             f"“{r.get('subject') or '(no subject)'}” — {snippet}")
@@ -78,7 +80,7 @@ def render_digest(buckets: dict, total: int) -> str:
             lines.append("• nothing.")
         for row, why in items:
             used += 1
-            day = (row.get("received_at") or "")[:10]
+            day = local_received(row.get("received_at"), "%Y-%m-%d")
             reason = f": {why}" if why else ""
             lines.append(f"• {row.get('sender', '')} — "
                          f"“{row.get('subject') or '(no subject)'}” ({day}){reason}")

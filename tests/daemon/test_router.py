@@ -475,8 +475,9 @@ async def test_chat_todo_question_injects_context():
 async def test_chat_non_todo_question_stays_uninjected():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "capital of France?"})
-    # identity is always present; no per-query todo context stacks under it
-    assert "Today is" not in llm.messages[0]["content"]
+    # identity (+ the date line, #76) is always present; no per-query todo
+    # context stacks under it
+    assert "open todos" not in llm.messages[0]["content"]
     assert llm.messages[-1] == {"role": "user", "content": "capital of France?"}
 
 
@@ -1249,8 +1250,8 @@ async def test_chat_without_books_store_never_injects():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "have I read Dune"})
     # identity only — no book catalog stacked under it (no books store)
-    assert llm.messages == [{"role": "system", "content": IDENTITY},
-                            {"role": "user", "content": "have I read Dune"}]
+    assert identity_only(llm.messages[0])
+    assert llm.messages[1:] == [{"role": "user", "content": "have I read Dune"}]
 
 
 class FullFakeBookStore(FakeBookStore):
@@ -1452,6 +1453,33 @@ def test_identity_forbids_fabricated_checks():
     assert "never pretend" in IDENTITY.lower()
 
 
+def identity_only(system: dict) -> bool:
+    """The system message holds the identity block and the date line (#76) —
+    nothing stacked under them."""
+    head, _, tail = system["content"].rpartition("\n\n")
+    return (system["role"] == "system" and head == IDENTITY
+            and tail.startswith("Today is ") and "\n" not in tail)
+
+
+def test_every_prompt_carries_the_current_date_after_the_warm_prefix(tmp_path):
+    """todo-fixes #76: "did Chris email me yesterday?" or "how many days
+    until Christmas?" reached the model with no date anywhere, and Claude mode
+    lost the CLI's own date line to --system-prompt-file. The line rides after
+    identity + memory, so the primed prefix cache still matches."""
+    mem = tmp_path / "memory.md"
+    mem.write_text("## Mail\n- Chris is the user's manager. (last seen 2026-07-14)\n")
+    r = Router(FakeLLM(), FakeStore(), memory_path=mem, memory_cap=4000)
+    ask = "how many days until Christmas?"
+    system = r._build_messages(ask, [{"role": "user", "content": ask}])[0]["content"]
+    today = date.today()
+    assert f"Today is {today.strftime('%A')} {today.isoformat()}" in system
+    # No clock time: it would change the system message every minute and cost
+    # the history's prompt cache on every turn (power/thermal rule).
+    assert "local time is" not in system
+    assert system.startswith(r._warm_prefix()[0]["content"])
+    assert system.index("Chris is") < system.index("Today is")
+
+
 def test_cal_hint_vocabulary():
     for msg in ("what's on my calendar", "when is my next meeting",
                 "am I free at 3pm thursday", "what's my schedule this week",
@@ -1470,7 +1498,8 @@ def test_cal_hint_vocabulary():
     assert not CAL_HINT.search("list the files in my notes folder")
 
 
-def test_calendar_context_lines_bounds_and_tz():
+def test_calendar_context_lines_bounds_and_tz(set_tz):
+    set_tz("Europe/Berlin")          # +02:00 in July, the rows' own offset
     now = datetime(2026, 7, 10, 14, 32, tzinfo=timezone(_td(hours=2)))
     ctx = calendar_context([CAL_ROW, ALLDAY_ROW], now, date(2026, 7, 24))
     assert "2026-07-10 14:32" in ctx and "Friday" in ctx
@@ -1478,6 +1507,17 @@ def test_calendar_context_lines_bounds_and_tz():
     assert "09:30" in ctx and "Standup" in ctx and "[Personal]" in ctx
     assert "Priya" in ctx and "Meet" in ctx
     assert "(all day)" in ctx and "PTO" in ctx
+
+
+def test_calendar_context_shows_events_past_dst_at_their_own_offset(set_tz):
+    """todo-fixes #73: converting every event to today's −06:00 showed a
+    November 2 PM as 15:00 — the model then told the user the wrong hour."""
+    set_tz("America/Denver")
+    now = datetime(2026, 10, 30, 9, 0).astimezone()
+    nov = dict(CAL_ROW, start_at="2026-11-05T14:00:00-07:00",
+               end_at="2026-11-05T15:00:00-07:00")
+    assert "Thu 2026-11-05 14:00–15:00" in calendar_context([nov], now,
+                                                            date(2026, 11, 13))
 
 
 def test_calendar_context_out_of_window_routes_to_tool_when_attached():
@@ -1514,8 +1554,8 @@ async def test_chat_without_calendar_never_injects():
     llm = FakeLLM()
     await collect(Router(llm, FakeStore()), "chat", {"message": "am I free at 3pm?"})
     # identity only — no calendar context (no calendar facade)
-    assert llm.messages == [{"role": "system", "content": IDENTITY},
-                            {"role": "user", "content": "am I free at 3pm?"}]
+    assert identity_only(llm.messages[0])
+    assert llm.messages[1:] == [{"role": "user", "content": "am I free at 3pm?"}]
 
 
 async def test_calendar_list_one_shot():
@@ -5223,3 +5263,12 @@ async def test_an_explicit_subject_still_beats_the_prior():
     assert "todos" in router._subject_groups("put milk on my todo list")
     # _subject_groups is consulted first, so the prior never gets a say
     assert router._screen_prior("mail", "put milk on my todo list") == set()
+
+
+def test_mail_context_shows_received_times_in_local_time(set_tz):
+    """todo-fixes #75: a 9 PM email read as "03:15" the next day."""
+    set_tz("America/Denver")
+    unread = [{"sender": "Ada <a@x.com>", "subject": "Engines",
+               "received_at": "2026-10-09T03:15:00+00:00"}]
+    ctx = mail_context(unread, {"total": 40, "unread": 1}, True)
+    assert "2026-10-08 21:15: Ada" in ctx and "03:15" not in ctx

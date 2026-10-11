@@ -52,7 +52,7 @@ without a click), loses something typed, or makes a feature not work at all.
 
 ### Dates and times (one root cause: UTC vs local)
 
-72. **Evening events land on the wrong day** (review #1) [checked]
+72. **Evening events land on the wrong day** (review #1) [checked] — ✔ fixed (2026-10-11)
     - The calendar cache buckets events by their UTC date. Anything after 6 PM
       (5 PM after Nov 1) is filed under tomorrow: missing from Today, the day
       view, the briefing and free-slot answers, and shown on the next day
@@ -61,7 +61,13 @@ without a click), loses something typed, or makes a feature not work at all.
     - **Where:** `daemon/connectors/gcal.py:41,54` (`date(start_at)` in SQLite
       converts to UTC).
     - **Fix:** store a local-date column at `_normalize` time and filter on it.
-73. **Event times break across daylight saving — DST ends 2026-11-01** (review #2) [checked state.py; probe]
+    - **Done:** `events.start_day` (local date, from `gcal_time.local_day`) is
+      written on every `replace_window` and backfilled on start (NULL rows
+      only, so a crash mid-migration heals); the window delete and `list_range`
+      filter and sort on it. On a copy of the
+      real DB, 9 of 29 cached events moved back to their own day (every 11:44 PM
+      Canvas block, an evening dinner).
+73. **Event times break across daylight saving — DST ends 2026-11-01** (review #2) [checked state.py; probe] — ✔ fixed (2026-10-11)
     - Several places take today's fixed −06:00 offset and apply it to future
       dates. After Nov 1:
       - "Dentist Nov 5 2pm" is booked at 1 PM, though the confirm says 2 PM.
@@ -75,14 +81,26 @@ without a click), loses something typed, or makes a feature not work at all.
       `daemon/llm/meeting_prep.py:61,98`.
     - **Fix:** convert per instant with `.astimezone()` or `ZoneInfo`, as
       `gcal_time.tz_offset` already does.
-74. **Canvas tab is a day off for evening deadlines** (review #3) [checked]
+    - **Done:** every listed site now converts at the event's own instant
+      (`.astimezone()` with no argument): the UI calendar handler, free-slot
+      working hours and busy intervals, `calendar_context`, meeting prep's
+      lookup and "when" line, and the event-create gate. The gate reads the
+      model's time as a local wall clock and drops any offset it adds ("Z"),
+      since the prompt asks for local times; the confirm shows what gets booked.
+      Same class, found in review: the mail search's `on:`/`after:`/`before:`
+      day bounds used today's offset too — fixed the same way.
+74. **Canvas tab is a day off for evening deadlines** (review #3) [checked] — ✔ fixed (2026-10-11)
     - Homework due tonight at 11:59 PM shows "Due tomorrow"; last night's shows
       "Due today" under "Next 7 days" instead of Overdue. The Todos screen has the
       right date, so the two disagree. The Ask bar context also sends the UTC
       time unlabelled.
     - **Where:** `ui_v4/screens/canvas.py:115-175` (`due_at[:10]`), same in ui_v3.
     - **Fix:** use `canvas_events.due_local()`.
-75. **Mail times reach the model in UTC, labelled as local** (review #4) [probe ×3]
+    - **Done:** new `canvas_events.due_day()` (local day, bare-date fallback) is
+      used by the badge/chip, sort key, time sections and "not turned in" check
+      in both v3 and v4. The v4 Ask bar context sends the local due time. On the
+      real DB, 63 of 106 assignments changed day.
+75. **Mail times reach the model in UTC, labelled as local** (review #4) [probe ×3] — ✔ fixed (2026-10-11)
     - A 9 PM email reads as "03:15 tomorrow" in the briefing. The commitment scan
       is told an evening email was "sent on Friday" when it was Thursday, so
       "I'll send it tomorrow" lands a day late. Same in triage and meeting prep.
@@ -92,13 +110,26 @@ without a click), loses something typed, or makes a feature not work at all.
       `daemon/llm/commitments.py:80`, `daemon/llm/triage.py:36,133,178`,
       `daemon/llm/meeting_prep.py:136,229`.
     - **Fix:** `.astimezone()` before formatting.
-76. **Ordinary questions get no current date** (review #5) [probe]
+    - **Done:** one helper, `email_menu.local_received()`, used by
+      `mail_context`, the briefing, the commitment scan (which now also gets the
+      weekday: "Sent on 2026-10-08 (Thursday)"), both triage lines and meeting
+      prep. On the real mirror, 174 of the 716 newest emails had been dated a
+      day off.
+76. **Ordinary questions get no current date** (review #5) [probe] — ✔ fixed (2026-10-11)
     - For "did Chris email me yesterday?" or "how many days until Christmas?" the
       prompt contains no date at all. Claude mode loses the CLI's own date line
       too, because `--system-prompt-file` replaces it.
     - **Where:** `daemon/router.py:436`, `:947-1004`.
     - **Fix:** add "Today is <date> (<weekday>) <time>" after the identity/memory
       block, so the warm prefix cache still holds.
+    - **Done:** `router.date_line()` ("Today is Sunday 2026-10-11 (local
+      timezone UTC-06:00).") rides in every `_build_messages` prompt, right
+      after identity + memory. A test pins that the warm prefix is still a
+      string prefix of the real system message.
+    - **No clock time, on purpose:** the line sits ahead of the history, so a
+      time that changes every minute would throw away the history's prompt
+      cache on nearly every turn (power/thermal rule). Calendar questions
+      already get the clock from `calendar_context`'s "Now:" line.
 
 ### Safety rules (writes without a click, or the wrong thing deleted)
 

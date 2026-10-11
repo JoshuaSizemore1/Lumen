@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_color TEXT,                       -- the event's own colorId, as hex
     title TEXT,
     start_at TEXT NOT NULL,                 -- RFC3339 as given; ISO date if all-day
+    start_day TEXT,                         -- local date it starts on (#72); filter on this
     end_at TEXT,
     all_day INTEGER NOT NULL DEFAULT 0,
     location TEXT,
@@ -287,6 +288,18 @@ def connect(db_path: Path) -> sqlite3.Connection:
     ev_cols = {r["name"] for r in conn.execute("PRAGMA table_info(events)")}
     if "event_color" not in ev_cols:
         conn.execute("ALTER TABLE events ADD COLUMN event_color TEXT")
+    if "start_day" not in ev_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN start_day TEXT")
+    # Backfilled, not left for the next sync: the cache is read the moment the
+    # daemon is up, and a NULL day hides the event. Runs on every start (it
+    # touches only NULL rows), so a crash between the ALTER and here heals.
+    from lumen.daemon.connectors.gcal_time import local_day
+    with conn:
+        conn.executemany(
+            "UPDATE events SET start_day = ? WHERE calendar_id = ? AND id = ?",
+            [(local_day(r["start_at"]), r["calendar_id"], r["id"])
+             for r in conn.execute("SELECT calendar_id, id, start_at FROM events "
+                                   "WHERE start_day IS NULL").fetchall()])
     todo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(todos)")}
     if "description" not in todo_cols:
         conn.execute("ALTER TABLE todos ADD COLUMN description TEXT")

@@ -99,11 +99,12 @@ def _norm_rec(rec: dict) -> dict:
             "why": rec.get("rationale") or rec.get("why") or ""}
 
 
-def _norm_event(e: dict, tz) -> dict:
+def _norm_event(e: dict, tz=None) -> dict:
     """Daemon calendar event -> uniform screen event carrying its own color hex.
 
     Time grids paint by `color` (real Google-calendar colors don't map to the
-    mock's four categories), and `cal` (calendar name) is the day-view meta."""
+    mock's four categories), and `cal` (calendar name) is the day-view meta.
+    `tz` None — the live path — is local time at each event's own instant."""
     # The event's own colour wins over its calendar's (set in Google or the
     # edit dialog); `cal_color` keeps the calendar's for legends.
     color = e.get("event_color") or e.get("color") or T.TEXT_DIM
@@ -1245,11 +1246,12 @@ class AppState(QObject):
     # ---- calendar ----
     def _calendar_handler(self, cb):
         """Shared by calendar.list and calendar.refresh — they answer in the
-        same shape, so the caller never has to know which one ran."""
-        tz = datetime.now().astimezone().tzinfo
-
+        same shape, so the caller never has to know which one ran. Events are
+        converted at their own UTC offset, never today's: across a DST change
+        that showed November an hour late, and the edit dialog then moved an
+        event whose end time alone was changed (#73)."""
         def handle(result):
-            cb({"events": [_norm_event(e, tz) for e in result.get("events", [])],
+            cb({"events": [_norm_event(e) for e in result.get("events", [])],
                 "connected": result.get("connected", True),
                 "window": result.get("window"),
                 "error": result.get("error")})

@@ -7,6 +7,8 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
+from lumen.daemon.connectors.email_menu import local_received
+
 SYSTEM = (
     "You scan an email the user SENT for commitments the user made to someone "
     "else — promises like \"I'll send that over Friday\" or \"I will call you "
@@ -77,7 +79,10 @@ async def scan(llm, mail_store, suggestions, *, now: datetime | None = None,
         scanned += 1
         if suggestions.has_email(m["id"]):
             continue
-        sent_day = (m.get("received_at") or "")[:10]
+        # The LOCAL day and its weekday: "tomorrow" / "Friday" in the body
+        # resolve against it, and the UTC date is a day late for an evening
+        # email (#75).
+        sent_day = local_received(m.get("received_at"), "%Y-%m-%d (%A)")
         user = (f"Sent on {sent_day}. Subject: {m.get('subject') or '(none)'}\n\n"
                 f"{(m.get('body') or '')[:BODY_CAP]}")
         text = ""

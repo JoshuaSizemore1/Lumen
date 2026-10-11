@@ -22,7 +22,7 @@ that the tests pin down:
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 HORIZON_DAYS = 90
 LEAD_MINUTES = 15
@@ -98,6 +98,20 @@ def due_local(due_at: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone()
+
+
+def due_day(due_at: str | None) -> date | None:
+    """The local day an assignment is due — what "due today" means to the
+    user. Canvas's UTC stamp starts with tomorrow's date for anything due after
+    6 PM Mountain, which made the Canvas tab a day off (todo-fixes #74). A
+    stamp with no zone falls back to its own date, as it always read."""
+    due = due_local(due_at)
+    if due is not None:
+        return due.date()
+    try:
+        return date.fromisoformat(str(due_at or "")[:10])
+    except ValueError:
+        return None
 
 
 def is_all_day(due_dt: datetime) -> bool:

@@ -1,7 +1,16 @@
 """EventStore window cache + CalendarSync normalization (fake API, no network)."""
 
+import pytest
+
 from lumen.daemon import db
 from lumen.daemon.connectors.gcal import EventStore
+
+
+@pytest.fixture(autouse=True)
+def mountain_time(set_tz):
+    """Events file under their LOCAL day (#72), so every expectation here
+    depends on the zone — pin it rather than trust the machine's."""
+    set_tz("America/Denver")
 
 
 def make_store(tmp_path):
@@ -53,6 +62,81 @@ def test_list_range_orders_all_day_first_within_a_day(tmp_path):
         "2026-07-01", "2026-07-31")
     assert [e["id"] for e in store.list_range("2026-07-11", "2026-07-11")] == [
         "allday", "timed"]
+
+
+def test_evening_event_lands_on_its_local_day(tmp_path, set_tz):
+    """todo-fixes #72: SQLite's date() turns an offset stamp into UTC, which
+    filed every event after 6 PM Mountain (5 PM after Nov 1) under tomorrow —
+    missing from Today and shown on the wrong day. Canvas's 11:59 PM due-date
+    events never appeared on their own day at all."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window(
+        [ev(id="dinner", start_at="2026-10-11T19:00:00-06:00",
+            end_at="2026-10-11T20:00:00-06:00"),
+         ev(id="due", start_at="2026-11-05T23:44:00-07:00",
+            end_at="2026-11-05T23:59:00-07:00"),
+         # Google may hand back another zone's offset (an event on a
+         # New York calendar): 9 PM there is still 7 PM here.
+         ev(id="ny", start_at="2026-10-11T21:00:00-04:00",
+            end_at="2026-10-11T22:00:00-04:00")],
+        "2026-10-01", "2026-11-30")
+    assert [e["id"] for e in store.list_range("2026-10-11", "2026-10-11")] == [
+        "dinner", "ny"]
+    assert store.list_range("2026-10-12", "2026-10-12") == []
+    assert [e["id"] for e in store.list_range("2026-11-05", "2026-11-05")] == ["due"]
+    assert "start_day" not in store.list_range("2026-10-11", "2026-10-11")[0]
+
+
+def test_replace_window_drops_evening_rows_of_its_last_day(tmp_path, set_tz):
+    """The window delete must use the same local day as the read, or an evening
+    event on the window's last day survives every resync after it's deleted."""
+    set_tz("America/Denver")
+    store = make_store(tmp_path)
+    store.replace_window([ev(id="gone", start_at="2026-10-11T19:00:00-06:00")],
+                         "2026-10-01", "2026-10-11")
+    store.replace_window([], "2026-10-01", "2026-10-11")
+    assert store.list_range("2026-01-01", "2026-12-31") == []
+
+
+def test_migration_backfills_local_day_on_an_existing_cache(tmp_path, set_tz):
+    """A cache written before start_day existed must read right on first start,
+    not only after the next sync."""
+    import sqlite3
+    set_tz("America/Denver")
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE events (
+            id TEXT NOT NULL, calendar_id TEXT NOT NULL, calendar_name TEXT,
+            color TEXT, event_color TEXT, title TEXT, start_at TEXT NOT NULL,
+            end_at TEXT, all_day INTEGER NOT NULL DEFAULT 0, location TEXT,
+            description TEXT, attendees TEXT NOT NULL DEFAULT '[]', status TEXT,
+            PRIMARY KEY (calendar_id, id));
+        INSERT INTO events (id, calendar_id, title, start_at, all_day)
+            VALUES ('dinner', 'primary', 'Dinner', '2026-10-11T19:00:00-06:00', 0),
+                   ('pto', 'primary', 'PTO', '2026-10-12', 1);
+    """)
+    raw.commit()
+    raw.close()
+    store = EventStore(db.connect(path))
+    assert [e["id"] for e in store.list_range("2026-10-11", "2026-10-11")] == ["dinner"]
+    assert [e["id"] for e in store.list_range("2026-10-12", "2026-10-12")] == ["pto"]
+
+
+def test_a_null_local_day_is_healed_on_the_next_start(tmp_path):
+    """A crash between the ALTER and the backfill left NULL days, which no
+    later start used to revisit — those events stayed invisible."""
+    path = tmp_path / "e.db"
+    conn = db.connect(path)
+    EventStore(conn).replace_window([ev(id="dinner",
+                                        start_at="2026-10-11T19:00:00-06:00")],
+                                    "2026-10-01", "2026-10-31")
+    with conn:
+        conn.execute("UPDATE events SET start_day = NULL")
+    conn.close()
+    store = EventStore(db.connect(path))
+    assert [e["id"] for e in store.list_range("2026-10-11", "2026-10-11")] == ["dinner"]
 
 
 def test_get_by_calendar_and_id(tmp_path):
