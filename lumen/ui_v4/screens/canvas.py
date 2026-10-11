@@ -1500,7 +1500,6 @@ class CanvasScreen(QWidget):
                      "it in Canvas settings.",
             "rows": [("Account", "utah.instructure.com")],
             "confirm_label": "Disconnect", "danger": True,
-            "toast": "Canvas disconnected",
         }
         self.win.confirm.open(payload, lambda ok, _p: ok and self._disconnect())
 
@@ -1511,9 +1510,14 @@ class CanvasScreen(QWidget):
         self.forget_browser_session()
         self._stack.setCurrentIndex(self._CONTENT_IDX)
         self._set_lifecycle("Discarded")
-        self.state.canvas_disconnect(self._apply_status)
+        self.state.canvas_disconnect(self._disconnected)
         if not self.state.live:
-            self._apply_status({"connected": False})
+            self._disconnected({"connected": False})
+
+    def _disconnected(self, st):
+        """The daemon's answer: only now has Canvas really let go."""
+        self._apply_status(st)
+        self.win.show_toast("Canvas disconnected")
 
     def forget_browser_session(self):
         """Clear the sign-in browser's cookies, now if it's built, else the
@@ -1795,12 +1799,27 @@ class CanvasScreen(QWidget):
                    "intro": f"Lumen will delete {n} event{'' if n == 1 else 's'} "
                             "from your Google Calendar.",
                    "rows": rows, "danger": True,
-                   "confirm_label": f"Remove {n}",
-                   "toast": f"Removed {n} event{'' if n == 1 else 's'}"}
+                   "confirm_label": f"Remove {n}"}
         self.win.confirm.open(
             payload, lambda ok, _p: ok and self._do_remove_all(items))
 
     def _do_remove_all(self, items: list):
+        n = len(items)
+        answers: list[bool] = []
+
+        def one(r):
+            # Count what the daemon actually removed, and say so once every
+            # removal has answered — not when Approve was clicked.
+            answers.append(bool(isinstance(r, dict) and r.get("ok")
+                                and r.get("removed")))
+            if len(answers) < n:
+                return
+            done = sum(answers)
+            noun = "event" if n == 1 else "events"
+            self.win.show_toast(f"Removed {done} {noun}" if done == n
+                                else f"Removed {done} of {n} {noun}")
+            self._after_review()
+
         for item in items:
-            self.state.canvas_resolve_removal(item.get("id"), True, lambda _r: None)
+            self.state.canvas_resolve_removal(item.get("id"), True, one)
         self._after_review()

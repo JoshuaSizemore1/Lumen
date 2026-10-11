@@ -219,3 +219,24 @@ def test_compose_request_line_emits_signal(qtbot, tmp_path):
         "compose_request": {"to": ["a@x.com"], "subject": "Hi"}}).encode() + b"\n")
     client._process_buffer()
     assert payloads == [{"compose_id": 7, "to": ["a@x.com"], "subject": "Hi"}]
+
+
+def test_a_raising_on_error_does_not_strand_the_others(qtbot, tmp_path):
+    """Review find: one waiting callback that raised (a deleted widget) ended
+    the loop, so the callers after it — Mail's busy scrim — never settled."""
+    path = str(tmp_path / "d.sock")
+    server = QLocalServer()
+    assert server.listen(path)
+    client = DaemonClient(path)
+    errors = []
+
+    def dead_widget(_msg):
+        raise RuntimeError("wrapped C/C++ object has been deleted")
+    client.request("books.recommend", {}, lambda r: None, on_error=dead_widget)
+    client.request("mail.suggest_labels", {}, lambda r: None,
+                   on_error=errors.append)
+    qtbot.waitUntil(server.hasPendingConnections, timeout=2000)
+    server.nextPendingConnection().abort()   # the daemon drops; both waiting
+    qtbot.waitUntil(lambda: errors != [], timeout=2000)
+    assert len(errors) == 1 and "daemon offline" in errors[0]
+    server.close()

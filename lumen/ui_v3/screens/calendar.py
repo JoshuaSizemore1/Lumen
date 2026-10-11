@@ -5,6 +5,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QButtonGroup, QDialog, QFrame, QLineEdit, QWidget
 
 from ...daemon.connectors.gcal_colors import GCAL_COLOR_HEX, GCAL_COLOR_NAMES
+from ...daemon.connectors.gcal_time import tz_offset
 from .. import theme as T
 from ..calendar_grids import (
     MON3, MONTHS, WD_FULL, WEEKDAYS, DayColumn, MonthGrid, TimeGutter,
@@ -16,16 +17,6 @@ from ..widgets import (
     IconButton, font, hbox, hline, label, scroll, scroll_fixed, seg_button,
     vbox, vline,
 )
-
-
-def _tz_offset(day: date | None = None, h: int = 12, m: int = 0) -> str:
-    """Local UTC offset as +HH:MM on that day at that time, for stamping
-    edited times into ISO. Not today's: across a DST change that would move
-    the event an hour."""
-    when = datetime.combine(day or date.today(),
-                            datetime.min.time().replace(hour=h, minute=m))
-    off = when.astimezone().strftime("%z")   # e.g. -0600
-    return f"{off[:3]}:{off[3:]}" if off else "+00:00"
 
 
 class EventEditDialog(QDialog):
@@ -105,9 +96,9 @@ class EventEditDialog(QDialog):
             return ""
         h, _, m = hhmm.partition(":")
         try:
-            off = _tz_offset(date.fromisoformat(self.ev["date"]), int(h), int(m))
+            off = tz_offset(date.fromisoformat(self.ev["date"]), int(h), int(m))
         except ValueError:
-            off = _tz_offset()
+            off = tz_offset()
         return f"{self.ev['date']}T{hhmm}:00{off}"
 
     def _save(self):

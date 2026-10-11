@@ -1,6 +1,7 @@
 """v4 Settings fixes: the "turn the model on" highlight survives the rebuild
 the replies cause (plan M6), Advanced shows what the daemon really reports
-(M7), screen confirms show their toast (L7), Google disconnect says both go
+(M7), a screen's success toast waits for the daemon (L7), Google disconnect
+says both go
 (L8), and a saved rule refreshes the list (L9)."""
 import pytest
 from PyQt6.QtWidgets import QPlainTextEdit
@@ -85,17 +86,21 @@ def test_google_disconnect_says_both_go(live, qtbot):
     win.confirm.open = lambda payload, cb: seen.update(payload)
     scr._confirm_disconnect("gmail", "Gmail", lambda _r=None: None)
     assert "Google Calendar" in seen["intro"]
-    assert seen["toast"] == "Gmail and Google Calendar disconnected"
 
 
-def test_screen_confirm_shows_its_toast(live, qtbot, monkeypatch):
+def test_disconnect_toast_waits_for_the_daemon(live, qtbot, monkeypatch):
+    """Review find: the toast fired on Approve, before the daemon had done
+    anything, so a failed disconnect still claimed success."""
     win, data, scr = live
+    _answer_settings(data)
     toasts = []
     monkeypatch.setattr(win, "show_toast", lambda m, undo=None: toasts.append(m))
-    win.confirm.open({"title": "Disconnect Canvas?", "toast": "Canvas disconnected",
-                      "confirm_label": "Disconnect"}, lambda ok, p: None)
+    scr._confirm_disconnect("gmail", "Gmail", lambda _r=None: None)
     win.confirm._answer(True)
-    assert toasts == ["Canvas disconnected"]
+    assert toasts == []                          # asked, not done yet
+    _p, cb = data.last("connections.disconnect")
+    cb({"accounts": {}})
+    assert toasts == ["Gmail and Google Calendar disconnected"]
 
 
 def test_declined_confirm_shows_no_toast(live, qtbot, monkeypatch):

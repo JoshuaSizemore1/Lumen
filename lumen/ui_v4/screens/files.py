@@ -223,7 +223,12 @@ class FilesScreen(QWidget):
     # ---- window hooks -------------------------------------------------------
     def on_shown(self):
         # Re-read the folder every visit: files change underneath us. The
-        # editor is a separate pane, so unsaved text is never touched.
+        # editor is a separate pane, so unsaved text is never touched. With a
+        # file open in the single-pane layout the folder pane is hidden, and
+        # every way back to it (Close, back, widening) rebuilds it — so skip
+        # the list_dir and row build for a pane nobody can see.
+        if self.open_file is not None and not self._split:
+            return
         self._build_browser()
 
     def refresh(self):

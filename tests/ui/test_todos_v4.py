@@ -99,6 +99,26 @@ def test_edit_that_keeps_the_tag_stays_quiet(live, qtbot, monkeypatch):
     assert todos.tag_filter == "admin" and toasts == []
 
 
+def test_a_filter_change_after_an_edit_is_not_a_move(live, qtbot, monkeypatch):
+    """Review find: the 5 s watch judged the edited todo against whatever
+    filter came next, reset it, and toasted a move that never happened."""
+    win, data = live
+    rows = [{"id": 7, "text": "Renew", "completed": False, "tags": ["work"]},
+            {"id": 8, "text": "Dishes", "completed": False, "tags": ["home"]}]
+    win.state._set_todos(rows)
+    win.switch_to("todos")
+    todos = win.screen("todos")
+    todos._set_tag("work")
+    toasts = []
+    monkeypatch.setattr(win, "show_toast", lambda m, undo=None: toasts.append(m))
+    win.state.update_todo(7, text="Renew the domain")
+    todos.note_edited(7)
+    _payload, cb = data.last("todos.update")
+    todos._set_tag("home")                       # inside the watch window
+    cb([dict(rows[0], text="Renew the domain"), rows[1]])
+    assert todos.tag_filter == "home" and toasts == []
+
+
 def test_pending_delete_is_flushed_on_quit(live, qtbot):
     win, data = live
     win.state._set_todos([{"id": 7, "text": "Renew", "completed": False,

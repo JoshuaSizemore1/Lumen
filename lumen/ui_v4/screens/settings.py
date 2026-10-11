@@ -615,13 +615,18 @@ class SettingsScreen(QWidget):
             "icon": "logout", "title": title, "intro": intro,
             "rows": [("Account", name)],
             "confirm_label": "Disconnect", "danger": True,
-            "toast": f"{name} disconnected",
         }
+
+        def disconnected(result):
+            # The daemon's answer, not the Approve click: a failed disconnect
+            # comes back as an error instead and must not claim success.
+            refresh(result)
+            self.win.show_toast(f"{name} disconnected")
 
         def done(ok, _p):
             if not ok:
                 return
-            self.state.disconnect_connection(key, refresh)
+            self.state.disconnect_connection(key, disconnected)
             if key == "canvas":
                 # The daemon forgets its session; the sign-in browser's own
                 # cookie jar has to go too, or Connect reuses it (L11).

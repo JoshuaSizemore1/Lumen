@@ -54,6 +54,9 @@ def main() -> None:
     if try_send(SOCKET_NAME, command):
         return          # a running instance handled it
 
+    # Ask the desktop whether it wants animations off (hyprctl/gsettings)
+    # off the GUI thread, while the rest of startup runs.
+    T.prime_reduced_motion()
     _prepare_webengine()
     app = QApplication(sys.argv)
     app.setApplicationName("lumen")
@@ -61,9 +64,6 @@ def main() -> None:
     app.setDesktopFileName("lumen")
     app.setQuitOnLastWindowClosed(False)
     _apply_app_style(app)
-    # Resolve the desktop's animation setting now (it can shell out to
-    # hyprctl/gsettings), not lazily on the first animation mid-session.
-    T.reduced_motion()
 
     # Claim the name before building anything, so a second launch during the
     # (slow) window build can't become a second tray icon. Nothing is

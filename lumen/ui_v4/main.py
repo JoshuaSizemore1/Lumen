@@ -640,7 +640,10 @@ class LumenWindow(QWidget):
         if confirm_id is not None:     # daemon confirm-over-IPC: always answer
             self.state.respond_confirm(confirm_id, approved,
                                        check=payload.get("check_state"))
-        # (An approved payload's "toast" is shown by the overlay itself.)
+        # Only sample mode's demo confirms carry a toast, and approving one
+        # is the whole action; a daemon confirm reports its own result.
+        if approved and payload.get("toast"):
+            self.show_toast(payload["toast"])
 
     def _open_compose(self, payload: dict):
         self._present()

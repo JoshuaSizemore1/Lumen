@@ -171,6 +171,29 @@ def test_desktop_animation_setting_is_followed(monkeypatch, tmp_path, v4_setting
     assert T.reduced_motion() is expect
 
 
+def test_the_desktop_is_asked_off_the_gui_thread(monkeypatch, tmp_path,
+                                                v4_settings, no_env_motion):
+    """Review find: hyprctl + gsettings ran on the GUI thread at startup, up
+    to ~2 s in front of the window. Until the worker answers, motion is on."""
+    import threading
+    _fake_desktop(monkeypatch, tmp_path)
+    release = threading.Event()
+    on_main = []
+
+    def slow_run(*argv):
+        on_main.append(threading.current_thread() is threading.main_thread())
+        release.wait(5)
+        return "false"                       # gsettings: animations off
+    monkeypatch.setattr(T, "_run", slow_run)
+    monkeypatch.setattr(T, "_motion_probe", None)
+    T.prime_reduced_motion()
+    assert T.reduced_motion() is False       # still asking: doesn't wait
+    release.set()
+    T._motion_probe.join(2)
+    assert on_main == [False]
+    assert T.reduced_motion() is True
+
+
 def test_lumens_own_toggle_still_wins(monkeypatch, tmp_path, v4_settings,
                                       no_env_motion):
     _fake_desktop(monkeypatch, tmp_path)

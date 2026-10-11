@@ -76,6 +76,17 @@ def _own_the_lock(monkeypatch, tmp_path):
                         lambda: tmp_path / "launch.lock")
 
 
+def _v4_answers_on(attempts: list, n: int):
+    """A try_send whose v4 server starts answering on its nth try; the v3
+    socket (a pre-v4 instance) never answers."""
+    def send(name, cmd):
+        if name != "lumen-ui-v4":
+            return False
+        attempts.append(cmd)
+        return len(attempts) >= n
+    return send
+
+
 def test_main_forwards_to_running_instance(monkeypatch):
     sent = []
     monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
@@ -91,8 +102,7 @@ def test_main_hands_off_to_an_instance_that_is_still_starting(monkeypatch):
     events = []
     attempts = []
     monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
-                        lambda n, c: attempts.append(c) and False
-                        or len(attempts) >= 3)     # its server opens on try 3
+                        _v4_answers_on(attempts, 3))   # its server opens on try 3
     monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: None)
     monkeypatch.setattr(launch, "spawn_daemon",
                         lambda: events.append("spawn"))
@@ -110,14 +120,29 @@ def test_late_hotkey_press_summons_rather_than_toggling(monkeypatch):
     and, started by the hotkey, quit the app with it."""
     attempts = []
     monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
-                        lambda n, c: attempts.append(c) and False
-                        or len(attempts) >= 2)
+                        _v4_answers_on(attempts, 2))
     monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: None)
     monkeypatch.setattr(sys, "argv", ["lumen", "--toggle-launcher"])
 
     launch.main()
 
     assert attempts == ["toggle-launcher", "show-launcher"]
+
+
+def test_hotkey_reaches_a_pre_v4_instance_holding_the_lock(monkeypatch):
+    """Review find: a `lumen` started before v4 became the default holds
+    launch.lock but listens on the v3 socket. The press has to reach it there,
+    as typed (it's long started), not wait out the handoff and give up."""
+    sent = []
+    monkeypatch.setattr("lumen.ui_v2.single_instance.try_send",
+                        lambda n, c: sent.append((n, c)) or n == "lumen-ui-v3")
+    monkeypatch.setattr(launch.instance_lock, "acquire", lambda p=None: None)
+    monkeypatch.setattr(sys, "argv", ["lumen", "--toggle-launcher"])
+
+    launch.main(handoff_timeout=0.3)
+
+    assert sent == [("lumen-ui-v4", "toggle-launcher"),
+                    ("lumen-ui-v3", "toggle-launcher")]
 
 
 def test_handoff_takes_over_when_the_starting_instance_dies(monkeypatch):

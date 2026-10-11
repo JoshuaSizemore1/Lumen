@@ -37,6 +37,10 @@ any v4 screen, and update it when you add or change behaviour.
 ## Ask (`askbar.py`, `screens/ask.py`)
 - The bar and the Ask screen share one chat connection: one turn at a time
   (`window.chat_busy()`); each ignores stream events it didn't ask for.
+- Both run the same stream protocol, `askbar.StreamTurn` (busy gate, wake /
+  cold-start wording, empty-turn settle, captured todo, todo refresh); each
+  surface only draws, through its `turn_*` methods. Fix stream behaviour
+  there, once.
 - Page context is built once (`askbar.context_dict` / `chat_payload`). A
   screen's `ask_context()` may return a str (summary) or a dict; Inbox's dict
   carries `message` so `open_email` is sent ("label this email").
@@ -47,7 +51,11 @@ any v4 screen, and update it when you add or change behaviour.
   from a focused row without marking read. Below 900px the mailboxes are a
   chip row. Forward warns that attachments aren't carried.
 - **Todos:** tag chips + Show completed sit directly above the list; the rail
-  has progress and group-by. A tag chip click never opens the edit card.
+  has progress and group-by. A tag chip click never opens the edit card. The
+  "Moved out of #tag" notice judges an edit against the filter it was saved
+  under; changing the filter ends the watch.
+- **Books:** Refresh's busy state belongs to its run — a timed-out run's late
+  reply can't end a newer one.
 - **Files:** hidden files off by default (switch, remembered), list/grid
   toggle (remembered), "N more not shown" past 500 entries. An open file sits
   in an editor pane beside a folder list (≥960px), full page when narrower.
@@ -64,16 +72,22 @@ any v4 screen, and update it when you add or change behaviour.
 
 ## Invariants (tested in `tests/ui/*_v4.py`)
 - Every outside write goes through the daemon's confirm gate or the window
-  ConfirmOverlay; an approved confirm's `toast` is shown by the overlay.
+  ConfirmOverlay. Approve only starts the write: a success toast waits for
+  the daemon's answer (the screen shows it from the reply). Only sample
+  mode's demo confirms carry a `toast` key, shown by the window on approve.
 - A daemon error or dropped connection must settle any waiting UI:
   `DaemonClient.request(..., on_error=)`; state exposes `mail_error` /
   `todos_error`, and calendar callbacks get `{"error": ...}`. No skeleton or
-  busy scrim may wait forever.
+  busy scrim may wait forever. A callback that raises is logged, never
+  allowed to strand the other waiting callers.
 - Power: hidden screens defer rebuilds; QtWebEngine is imported only when
   Canvas first builds its view; the Canvas page is Frozen when hidden and
-  Discarded on Done; no timers run on hidden screens.
+  Discarded on Done; no timers run on hidden screens. Files skips its
+  folder re-read while a narrow editor hides the folder pane.
 - Text size and reduced motion: `theme.text_size()` is applied by
   `ThemeManager.apply` (every stylesheet apply); `theme.reduced_motion()`
-  also follows the desktop's animation setting.
+  also follows the desktop's animation setting, asked once at startup on a
+  worker thread (`prime_reduced_motion`) — never on the GUI thread; motion
+  stays on until it answers.
 - Tests must isolate QSettings via `tests/ui/v4_support.py::v4_settings`
   (it is Josh's real preference store otherwise).

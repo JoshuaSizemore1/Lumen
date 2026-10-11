@@ -5,6 +5,7 @@ refreshed on every visit (`refresh_books`), `add_book` from the form,
 `recommend_books` for fresh suggestions, and "Add to log" on a suggestion
 prefills the form. New here: a search box that filters the log locally.
 """
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QBoxLayout, QWidget
@@ -51,6 +52,7 @@ class BooksScreen(QWidget):
         self.win = window
         self.state = window.state
         self._busy = False
+        self._run = 0                 # which Refresh the busy state belongs to
         self._query = ""
         self._narrow = False
         self._loaded = (not self.state.live) or bool(self.state.books)
@@ -347,22 +349,28 @@ class BooksScreen(QWidget):
             self._build_recs()          # repaints with the notice in place
             return
         self._busy = True
+        self._run += 1
+        run = self._run
         self.rec_status.start("Finding books")
         if self.rec_btn is not None:
             self.rec_btn.set_busy(True, "Working…")
         self._recs_timer.start()
-        self.state.recommend_books(on_done=self._recs_done,
-                                   on_error=lambda _msg: self._recs_done())
+        self.state.recommend_books(on_done=lambda: self._recs_done(run),
+                                   on_error=lambda _msg: self._recs_done(run))
         if not self.state.live:
             # Sample mode has no model: settle instead of spinning forever.
-            QTimer.singleShot(0, self._recs_done)
+            QTimer.singleShot(0, lambda: self._recs_done(run))
 
-    def _recs_done(self):
+    def _recs_done(self, run: int):
+        if run != self._run or sip.isdeleted(self):
+            # A run that timed out answering late: a newer Refresh owns the
+            # busy state now, and only its own reply may end it.
+            return
         self._busy = False
         self._recs_timer.stop()
         self._build_recs()
 
     def _recs_timed_out(self):
         if self._busy:
-            self._recs_done()
+            self._recs_done(self._run)
             self.win.show_toast("Suggestions took too long. Try again in a moment.")

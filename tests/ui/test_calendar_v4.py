@@ -103,10 +103,10 @@ def denver(monkeypatch):
 def test_edit_uses_the_events_own_utc_offset(editor, denver):
     """Review find: the offset was today's, so editing an event on the other
     side of a DST change moved it an hour."""
-    from lumen.ui_v4.screens.calendar import _tz_offset
+    from lumen.daemon.connectors.gcal_time import tz_offset
     from datetime import date
-    assert _tz_offset(date(2026, 7, 1), 9) == "-06:00"     # MDT
-    assert _tz_offset(date(2026, 11, 5), 9) == "-07:00"    # MST
+    assert tz_offset(date(2026, 7, 1), 9) == "-06:00"     # MDT
+    assert tz_offset(date(2026, 11, 5), 9) == "-07:00"    # MST
     dlg, data = editor
     dlg.open(dict(_ev(9 * 60, 60), date="2026-11-05"))
     dlg.start_f.set_text("10:00")

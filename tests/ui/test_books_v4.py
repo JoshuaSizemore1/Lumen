@@ -45,3 +45,20 @@ def test_an_error_ends_it(books):
     scr._refresh()
     assert data.fail("books.recommend")
     assert not scr._busy and scr.rec_btn.isEnabled()
+
+
+def test_a_timed_out_runs_late_reply_leaves_the_new_run_busy(books):
+    """Review find: after a timeout and a second Refresh, the first run's
+    late reply ended the second run's busy state."""
+    win, data, scr = books
+    scr._refresh()
+    _p, first = data.last("books.recommend")
+    scr._recs_timed_out()
+    assert not scr._busy
+    scr._refresh()
+    assert data.request_types().count("books.recommend") == 2
+    first(RECS)                                  # the old run answers late
+    assert scr._busy and not scr.rec_btn.isEnabled()
+    _p, second = data.last("books.recommend")
+    second(RECS)
+    assert not scr._busy and scr.rec_btn.isEnabled()

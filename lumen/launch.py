@@ -131,6 +131,14 @@ def main(handoff_timeout: float = HANDOFF_TIMEOUT_S) -> None:
     # one just opened.
     waited_command = "show-launcher" if toggle else "show"
     lock = instance_lock.acquire()
+    if lock is None:
+        # A `lumen` started before v4 became the default holds the same lock
+        # but listens on the v3 socket. It is long past starting up, so it
+        # gets the press as typed; without this the hotkey waited out the
+        # handoff and gave up until that instance was quit by hand.
+        from lumen.ui_v3 import SOCKET_NAME as V3_SOCKET
+        if try_send(V3_SOCKET, command):
+            return
     deadline = time.monotonic() + handoff_timeout
     while lock is None:
         # An instance is *starting* — seconds of daemon spawn and UI import

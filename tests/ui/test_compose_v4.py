@@ -76,6 +76,22 @@ def test_failed_send_brings_the_draft_back(live, qtbot):
     assert win.compose.body_edit.toPlainText() == "Hello there"
 
 
+def test_failed_send_keeps_the_forward_note(qtbot, v4_settings):
+    """Review find: the draft came back without the caller's note, so a
+    retried forward no longer said its attachments won't go."""
+    data = FakeClient()
+    win = make_window(qtbot, AppState(data=data))
+    note = "Attachments aren't forwarded."
+    win.compose.open({"to": "ada@example.com", "subject": "Fwd: Hi",
+                      "body": "b", "note": note})
+    win.compose._send()
+    win.confirm._answer(True)
+    assert data.fail("emails.send")
+    assert win.compose.isVisible()
+    assert win.compose.note.isVisibleTo(win.compose)
+    assert win.compose.note_text.text() == note
+
+
 def test_chat_compose_send_is_reviewed_too(qtbot, v4_settings):
     confirm = FakeClient()
     win = make_window(qtbot, AppState(data=FakeClient(), confirm=confirm))

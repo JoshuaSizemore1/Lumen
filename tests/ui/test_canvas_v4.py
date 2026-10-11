@@ -9,8 +9,9 @@ import pytest
 
 import lumen.ui_v4.screens.canvas as canvas_mod
 import lumen.ui_v4.theme as T
+from lumen.ui_v3.state import AppState
 from tests.ui.v4_support import (  # noqa: F401
-    _stub_canvas_creds, make_window, v4_settings,
+    FakeClient, _stub_canvas_creds, make_window, v4_settings,
 )
 
 
@@ -121,3 +122,33 @@ def test_successful_sign_in_drops_the_page(canvas, qtbot):
     scr._on_connected({"connected": True})
     assert scr._stack.currentIndex() == scr._CONTENT_IDX
     assert scr._web.page().state is _Page.LifecycleState.Discarded
+
+
+@pytest.fixture
+def live_canvas(qtbot, v4_settings, monkeypatch):
+    data = FakeClient()
+    win = make_window(qtbot, AppState(data=data))
+    win.switch_to("canvas")
+    toasts = []
+    monkeypatch.setattr(win, "show_toast", lambda m, undo=None: toasts.append(m))
+    return win, data, win.screen("canvas"), toasts
+
+
+def test_disconnect_toast_waits_for_the_daemon(live_canvas):
+    win, data, scr, toasts = live_canvas
+    scr._disconnect()
+    assert "Canvas disconnected" not in toasts
+    _p, cb = data.last("canvas.disconnect")
+    cb({"connected": False})
+    assert toasts[-1] == "Canvas disconnected"
+
+
+def test_remove_all_says_what_was_really_removed(live_canvas):
+    win, data, scr, toasts = live_canvas
+    scr._do_remove_all([{"id": 1}, {"id": 2}])
+    cbs = [cb for t, _p, cb in data.requests if t == "canvas.resolve_removal"]
+    assert len(cbs) == 2 and toasts == []
+    cbs[0]({"ok": True, "removed": True})
+    assert toasts == []                          # one still out
+    cbs[1]({"ok": False, "reason": "calendar unavailable"})
+    assert toasts == ["Removed 1 of 2 events"]

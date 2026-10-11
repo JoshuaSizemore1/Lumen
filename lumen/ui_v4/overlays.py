@@ -268,11 +268,8 @@ class ConfirmOverlay(_Overlay):
         cb, self._callback = self._callback, None
         if cb:
             cb(approved, payload)
-        # Shown here, not by each caller: a screen's own confirm (Disconnect,
-        # Remove all) carries a toast too, and nothing else showed it (L7).
-        show = getattr(self.parentWidget(), "show_toast", None)
-        if approved and payload.get("toast") and show is not None:
-            show(payload["toast"])
+        # No success toast here: Approve only starts the action. Each caller
+        # says it worked once the daemon answers (L7).
         if self._queue and not self._active:
             nxt = self._queue.pop(0)
             QTimer.singleShot(0, lambda: self.open(*nxt))
@@ -292,6 +289,7 @@ class ComposeOverlay(_Overlay):
         self.state = state
         self._compose_id = None
         self._reply_to = None
+        self._note = ""
         v = vbox(self.card, (0, 0, 0, 0), 0)
 
         head, self.heading = _dialog_head(
@@ -368,8 +366,9 @@ class ComposeOverlay(_Overlay):
         if isinstance(to, list):
             to = ", ".join(to)
         self.heading.setText("Reply" if self._reply_to else "New email")
-        self.note_text.setText(payload.get("note") or "")
-        self.note.setVisible(bool(payload.get("note")))
+        self._note = payload.get("note") or ""
+        self.note_text.setText(self._note)
+        self.note.setVisible(bool(self._note))
         self.to_field.clear_error()
         self.to.setText(to)
         self.subject.setText(payload.get("subject", ""))
@@ -432,12 +431,16 @@ class ComposeOverlay(_Overlay):
             self.state.respond_compose(self._compose_id, fields)
             self._compose_id = None
             return
+        note = self._note
 
         def failed(_msg):
-            # The draft would otherwise be gone with the closed window.
+            # The draft would otherwise be gone with the closed window — and
+            # so would the caller's note (a forward's "attachments aren't
+            # included"), which matters most on the retry.
             self.state.toast_requested.emit("Couldn't send. Your draft is back.")
             self.open({"to": fields["to"], "subject": fields["subject"],
-                       "body": fields["body"], "reply_to": fields.get("reply_to")})
+                       "body": fields["body"], "reply_to": fields.get("reply_to"),
+                       "note": note})
         self.state.send_email(fields, self._sent, on_error=failed)
 
     def _sent(self, result):

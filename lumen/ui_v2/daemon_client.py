@@ -3,12 +3,25 @@ No business logic here — serialize, deserialize, emit signals."""
 
 import itertools
 import json
+import logging
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtNetwork import QLocalSocket
 
+log = logging.getLogger("lumen.ui")
+
 OFFLINE_MSG = ("daemon offline — start it with: uv run lumen-daemon "
                "(or systemctl --user start lumen-daemon)")
+
+
+def _call(cb, arg) -> None:
+    """Run a caller's callback without letting it take the others down: one
+    that raises (a deleted widget, say) must not leave the rest of the
+    waiting callers — a busy scrim, a skeleton — hanging."""
+    try:
+        cb(arg)
+    except Exception:
+        log.exception("daemon client callback failed")
 
 
 class DaemonClient(QObject):
@@ -91,7 +104,7 @@ class DaemonClient(QObject):
         self.error.emit(OFFLINE_MSG)
         for _on_result, on_error in waiting:
             if on_error is not None:
-                on_error(OFFLINE_MSG)
+                _call(on_error, OFFLINE_MSG)
 
     def _flush_pending(self) -> None:
         for line in self._pending:
@@ -114,12 +127,14 @@ class DaemonClient(QObject):
                                                            (None, None))
                 self.error.emit(msg["error"])
                 if on_error is not None:
-                    on_error(msg["error"])
+                    _call(on_error, msg["error"])
             elif "result" in msg:
                 on_result, _on_error = self._callbacks.pop(msg.get("id"),
                                                            (None, None))
                 if on_result is not None:
-                    on_result(msg["result"])
+                    # Guarded too: a raise here stranded every line still
+                    # in the buffer behind it.
+                    _call(on_result, msg["result"])
             elif msg.get("done"):
                 self.done.emit()
             elif "confirm_request" in msg:

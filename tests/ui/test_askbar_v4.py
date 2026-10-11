@@ -177,3 +177,38 @@ def test_a_captured_note_keeps_its_confirmation(live, qtbot):
     chat.done.emit()
     assert bar.answer.text() == "Added to your todos: call Bob"
     assert not bar.open_btn.isVisibleTo(bar)       # nothing to continue
+
+
+def test_cold_start_wording_follows_the_daemon(live, qtbot):
+    """The bar and the Ask screen share one StreamTurn: "Waking the model"
+    only when the daemon said so (ui_v3 #22)."""
+    win, _data, chat = live
+    win.switch_to("today")
+    bar = win.askbar
+    bar.ask("hi", None)
+    bar.turn._on_wake()
+    assert bar.status.text().startswith("Working")
+    chat.cold_start.emit()
+    bar.turn._on_wake()
+    assert bar.status.text().startswith("Waking the model")
+
+
+def test_ask_screen_settles_an_empty_turn_and_an_error(live, qtbot):
+    from lumen.ui_v4.components import NO_REPLY_TEXT
+    win, _data, chat = live
+    win.switch_to("ask")
+    ask = win.screen("ask")
+    ask.input.setPlainText("hello")
+    ask._send()
+    assert ask._busy and win.chat_busy()
+    bub = ask._pending
+    chat.done.emit()
+    assert not ask._busy and bub.body.text() == NO_REPLY_TEXT
+    assert ask._messages[-1] == {"role": "assistant", "text": ""}
+    ask.input.setPlainText("again")
+    ask._send()
+    bub = ask._pending
+    chat.error.emit("daemon offline")
+    assert not ask._busy and bub.body.text() == "daemon offline"
+    assert ask.send_btn.isEnabled()
+    assert not win.askbar.panel.isVisible()        # the bar stayed out of it

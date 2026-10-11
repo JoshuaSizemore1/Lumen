@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -249,6 +250,21 @@ def system_reduced_motion() -> bool:
                 "enable-animations") == "false"
 
 
+_motion_probe: threading.Thread | None = None
+
+
+def prime_reduced_motion() -> None:
+    """Ask the desktop once, at startup, on a worker thread. hyprctl and
+    gsettings can take a second each, and that must not sit on the GUI
+    thread in front of the window (the Super+L cold start)."""
+    global _motion_probe
+    if _motion_probe is None:
+        _motion_probe = threading.Thread(target=system_reduced_motion,
+                                         name="lumen-motion-probe",
+                                         daemon=True)
+        _motion_probe.start()
+
+
 def reduced_motion() -> bool:
     """Lumen's toggle, LUMEN_REDUCED_MOTION, or the desktop asking for it."""
     env = os.environ.get("LUMEN_REDUCED_MOTION", "").strip().lower()
@@ -256,6 +272,9 @@ def reduced_motion() -> bool:
         return True
     if settings().value("reduced_motion", False, bool):
         return True
+    probe = _motion_probe
+    if probe is not None and probe.is_alive():
+        return False        # still asking the desktop: animate until it answers
     return system_reduced_motion()
 
 

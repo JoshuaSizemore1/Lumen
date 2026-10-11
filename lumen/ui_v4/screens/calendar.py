@@ -42,6 +42,7 @@ from ..components import (
 from ..overlays import _dialog_foot, _dialog_head, _Overlay
 
 from ...daemon.connectors.gcal_colors import GCAL_COLOR_NAMES
+from ...daemon.connectors.gcal_time import tz_offset
 
 WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 WD_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
@@ -117,14 +118,6 @@ def day_hours(events: list[dict], lo: int = GRID_START_H,
         lo = min(lo, s // 60)
         hi = max(hi, min(24, -(-e // 60)))
     return lo, hi
-
-
-def _tz_offset(day: date, h: int = 12, m: int = 0) -> str:
-    """The local UTC offset (+HH:MM) on that day at that time — not today's:
-    an edit to an event across a DST change would otherwise move it an hour."""
-    off = datetime.combine(day, datetime.min.time().replace(
-        hour=h, minute=m)).astimezone().strftime("%z")
-    return f"{off[:3]}:{off[3:]}" if off else "+00:00"
 
 
 def _font(family: str, px: int, weight=QFont.Weight.Normal) -> QFont:
@@ -539,7 +532,7 @@ class EventEditOverlay(_Overlay):
             day += timedelta(days=1)
         h, _, m = value.partition(":")
         return (f"{day.isoformat()}T{int(h):02d}:{m}:00"
-                f"{_tz_offset(day, int(h), int(m))}")
+                f"{tz_offset(day, int(h), int(m))}")
 
     def _save(self):
         if not self.isVisible():

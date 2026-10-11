@@ -261,7 +261,7 @@ class TodosScreen(QWidget):
         self.show_done = True
         self._query = ""
         self._pending_del: dict = {}          # tid -> QTimer
-        self._edited: tuple | None = None     # (tid, monotonic) awaiting #48
+        self._edited: tuple | None = None     # (tid, tag, monotonic) awaiting #48
         self._loaded = (not self.state.live) or bool(self.state.todos)
         self._dirty = False
         self._narrow = False
@@ -411,7 +411,7 @@ class TodosScreen(QWidget):
         old early return made this notice dead, M8)."""
         if self.tag_filter == "all":
             return
-        self._edited = (tid, time.monotonic())
+        self._edited = (tid, self.tag_filter, time.monotonic())
         if self._check_edited():
             self.rebuild()
 
@@ -419,8 +419,10 @@ class TodosScreen(QWidget):
         """True when it cleared the tag filter."""
         if self._edited is None:
             return False
-        tid, at = self._edited
-        if (self.tag_filter == "all"
+        tid, tag, at = self._edited
+        # A filter changed since the save is the user's own choice: the edit
+        # is judged against the filter it was made under, never a newer one.
+        if (self.tag_filter != tag
                 or time.monotonic() - at > self.EDIT_WATCH_S):
             self._edited = None
             return False

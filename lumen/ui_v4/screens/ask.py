@@ -5,8 +5,9 @@ here. `window.ask` -> `start(question, context)` (the command palette) still
 sends a question into the active conversation from here.
 
 Streams exactly like ui_v3 chat.py: `window.chat_client.send("chat", {...})`,
-with chunk / done / error / tool_used / cold_start / model_off / conversation /
-via / claude_unavailable handled the same way. The thread id is app-wide
+with chunk / done / error / tool_used / cold_start / model_off / via /
+claude_unavailable / captured run by the `StreamTurn` it shares with the Ask
+bar, and `conversation` handled here. The thread id is app-wide
 (`state.active_conv_id`), so every surface continues the same conversation.
 
 Conversation list: `state.list_conversations`, `get_conversation`,
@@ -21,20 +22,18 @@ Differences from ui_v3 chat, all additive:
   - The composer is multi-line: Enter sends, Shift+Enter adds a line.
   - Below ~760px the conversation list folds behind a "Conversations" button.
 """
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QTextOption
 from PyQt6.QtWidgets import QFrame, QPlainTextEdit, QSizePolicy, QWidget
 
 from .. import theme as T
-from ..askbar import SCREEN_NAMES, chat_payload, context_dict
+from ..askbar import SCREEN_NAMES, StreamTurn, chat_payload, context_dict
 from ..components import (
-    NO_REPLY_STATUS, NO_REPLY_TEXT, Badge, Button, ClaudeUnavailableNotice,
-    ClickRow, Divider, ElideLabel, EmptyState, Eyebrow, IconButton, IconLabel,
-    Kbd, Label, ModelOffNotice, ScreenHeader, ScrollArea, SkeletonRow,
-    TypingDots, clear_layout, hbox, vbox,
+    Badge, Button, ClickRow, Divider, ElideLabel, EmptyState, Eyebrow,
+    IconButton, IconLabel, Kbd, Label, ModelOffNotice, ScreenHeader,
+    ScrollArea, SkeletonRow, TypingDots, clear_layout, hbox, vbox,
 )
 
-WAKE_THRESHOLD_MS = 1500
 # The empty state's suggested prompts (review.md: "offers three").
 SUGGESTED = ("What's on my calendar today?",
              "Summarize my unread email",
@@ -148,10 +147,7 @@ class AskScreen(QWidget):
         self.win = window
         self.state = window.state
         self.chat = getattr(window, "chat_client", None)
-        self._busy = False
-        self._cold = False
-        self._via = ""
-        self._acc = ""
+        self.turn = StreamTurn(self, self.chat, self.state)
         self._messages: list[dict] = []
         self._conversations: list[dict] | None = None
         self._title = ""
@@ -228,26 +224,9 @@ class AskScreen(QWidget):
         pv.addWidget(comp)
         root.addWidget(pane, 1)
 
-        # ---- stream wiring (same signals as ui_v3 chat.py) -------------------
+        # The rest of the stream is self.turn's (shared with the Ask bar).
         if self.chat is not None:
-            self.chat.chunk.connect(self._on_chunk)
-            self.chat.done.connect(self._on_done)
-            self.chat.error.connect(self._on_error)
-            self.chat.tool_used.connect(self._on_tool)
-            self.chat.cold_start.connect(self._on_cold)
-            self.chat.model_off.connect(self._on_model_off)
             self.chat.conversation.connect(self._on_conversation)
-            if hasattr(self.chat, "via"):
-                self.chat.via.connect(self._on_via)
-            if hasattr(self.chat, "claude_unavailable"):
-                self.chat.claude_unavailable.connect(self._on_claude_unavailable)
-            if hasattr(self.chat, "captured"):
-                self.chat.captured.connect(self._on_captured)
-
-        self._wake = QTimer(self)
-        self._wake.setSingleShot(True)
-        self._wake.setInterval(WAKE_THRESHOLD_MS)
-        self._wake.timeout.connect(self._on_wake)
 
         self.state.model_state_changed.connect(self._sync_model_badge)
         self._sync_model_badge()
@@ -258,6 +237,10 @@ class AskScreen(QWidget):
             self.open_conversation(self.state.active_conv_id)
         else:
             self._refresh_list()
+
+    @property
+    def _busy(self) -> bool:
+        return self.turn.busy
 
     # ---- window hooks ---------------------------------------------------------
     def on_shown(self, focus: bool = False, **_kw):
@@ -567,10 +550,7 @@ class AskScreen(QWidget):
             self.win.show_toast("Lumen's background service isn't connected, "
                                 "so there's no one to answer.")
             return
-        self._busy = True
-        self._cold = False
-        self._via = ""
-        self._acc = ""
+        self.turn.begin()
         self.input.clear()
         self.send_btn.set_busy(True, "Answering…")
         if not self._messages:
@@ -584,17 +564,11 @@ class AskScreen(QWidget):
         self._end_rows()
         bub.status.show()
         bub.status.start("Thinking")
-        self._wake.start()
 
         payload = chat_payload(msg, ctx, capture_ok=bool(ctx) and from_bar)
         if self.state.active_conv_id is not None:
             payload["conversation_id"] = self.state.active_conv_id
         self.chat.send("chat", payload)
-
-    def _settle(self):
-        self._busy = False
-        self._wake.stop()
-        self.send_btn.set_busy(False)
 
     def _drop_pending(self):
         if self._holder is not None:
@@ -605,104 +579,35 @@ class AskScreen(QWidget):
         self._pending = None
         self._open_thread_for()
 
-    # ---- stream handlers ------------------------------------------------------------
-    def _status(self, text: str):
-        if self._pending is not None:
-            self._pending.set_status(text)
-
-    def _on_cold(self):
-        if self._busy and getattr(self.state, "model_mode", "local") != "claude":
-            self._cold = True
-
-    def _on_wake(self):
-        # Only call it a cold start if the daemon said the model is loading
-        # (ui_v3 #22); otherwise it's a slow prompt on a warm model.
-        if not self._busy or self._pending is None:
-            return
-        self._pending.status.start("Waking the model — the first answer takes "
-                                   "a little longer" if self._cold
-                                   else "Working")
-
+    # ---- drawing the turn (StreamTurn decides) ------------------------------------
     def _on_conversation(self, cid: int):
         if self._busy:
             self.state.active_conv_id = cid
 
-    def _on_tool(self, name: str):
-        if self._busy and self._pending is not None:
-            self._pending.tool.setText(f"Used {name.replace('_', ' ')}")
+    def turn_status(self, text: str, kind: str) -> None:
+        bub = self._pending
+        if bub is None:
+            return
+        if kind == "working":
+            bub.status.start(text)
+            return
+        bub.set_status(text)
+        if kind == "error":
+            bub.status.set_role("error")
+
+    def turn_text(self, text: str) -> None:
+        if self._pending is not None:
+            self._pending.set_text(text)
+
+    def turn_tool(self, label: str) -> None:
+        if self._pending is not None:
+            self._pending.tool.setText(label)
             self._pending.tool.show()
 
-    def _on_via(self, tag: str):
-        if self._busy:
-            self._via = tag
-
-    def _on_chunk(self, text: str):
-        if not self._busy or self._pending is None:
-            return
-        self._wake.stop()
-        self._pending.set_status("")
-        self._acc += text
-        self._pending.set_text(self._acc)
-
-    def _on_done(self):
-        if not self._busy:
-            return
-        self._settle()
-        bub = self._pending
-        if bub is not None:
-            if not self._acc:
-                # Settle the dots when a turn ends with no text (ui_v3 #34).
-                bub.set_status(NO_REPLY_STATUS)
-                bub.set_text(NO_REPLY_TEXT)
-            else:
-                bub.set_status("")
-            bub.set_foot(self._via if self._via else
-                         "Answered on this computer")
-            bub.foot.setToolTip("" if self._via else f"Model: {T.MODEL_NAME}")
-        self._messages.append({"role": "assistant", "text": self._acc})
-        self._pending = None
-        self._holder = None
-        self._refresh_list()
-        # A turn may have added or ticked off todos (ui_v3 #20).
-        self.state.refresh_todos()
-
-    def _on_error(self, msg: str):
-        if not self._busy:
-            return
-        self._settle()
-        if self._pending is not None:
-            self._pending.set_status("Something went wrong")
-            self._pending.status.set_role("error")
-            self._pending.set_text(msg)
-        self._pending = None
-        self._holder = None
-
-    def _on_model_off(self):
-        """The switch moved after this turn started: swap the pending bubble
-        for the notice."""
-        if not self._busy:
-            return
-        self._settle()
-        self._drop_pending()
-        self._append_widget(ModelOffNotice(self.state))
-        self._end_rows()
-
-    def _on_claude_unavailable(self, _reason: str, message: str):
-        if not self._busy:
-            return
-        self._settle()
-        self._drop_pending()
-        self._append_widget(ClaudeUnavailableNotice(self.state, message))
-        self._end_rows()
-
-    def _on_captured(self, todo: dict):
+    def turn_captured(self) -> None:
         """An Ask-bar note became a todo instead of a chat turn."""
-        if not self._busy or self._pending is None:
+        if self._pending is None:
             return
-        text = (todo or {}).get("text") or "your note"
-        self._pending.set_status("")
-        self._acc = f"Added to your todos: {text}"
-        self._pending.set_text(self._acc)
         row = QWidget()
         rh = hbox(row, (0, 0, 0, 0), T.S2)
         rh.addWidget(IconLabel("check-square", "accent", T.ICON_SM))
@@ -710,4 +615,25 @@ class AskScreen(QWidget):
                             on_click=lambda: self.win.switch_to("todos")))
         rh.addStretch(1)
         self._pending.layout().addWidget(row)
-        self.state.refresh_todos()
+
+    def turn_finished(self, ok: bool) -> None:
+        self.send_btn.set_busy(False)
+        bub = self._pending
+        if ok:
+            via = self.turn.via
+            if bub is not None:
+                bub.set_foot(via or "Answered on this computer")
+                bub.foot.setToolTip("" if via else f"Model: {T.MODEL_NAME}")
+            self._messages.append({"role": "assistant", "text": self.turn.acc})
+        self._pending = None
+        self._holder = None
+        if ok:
+            self._refresh_list()
+
+    def turn_notice(self, notice: QWidget) -> None:
+        """The switch moved, or Claude failed, after this turn started: swap
+        the pending bubble for the notice."""
+        self.send_btn.set_busy(False)
+        self._drop_pending()
+        self._append_widget(notice)
+        self._end_rows()

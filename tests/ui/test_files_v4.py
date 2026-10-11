@@ -78,6 +78,26 @@ def test_open_file_sits_beside_the_folder(files, tree):
     assert not scr.browser.isVisible() and scr.editor_pane.isVisible()
 
 
+def test_a_visit_skips_the_folder_the_narrow_editor_hides(files, tree,
+                                                          monkeypatch):
+    """Review find: every visit re-read the folder and rebuilt its rows on
+    the GUI thread, even with the pane hidden behind a narrow editor."""
+    win, scr = files
+    scr._open(tree / "a.md")
+    win.resize(800, 760)
+    QApplication.processEvents()
+    assert not scr.browser.isVisible()
+    reads = []
+    real = win.state.list_dir
+    monkeypatch.setattr(win.state, "list_dir",
+                        lambda *a, **kw: reads.append(a) or real(*a, **kw))
+    scr.on_shown()
+    assert reads == []
+    win.resize(1400, 860)                      # wide again: shown, and fresh
+    QApplication.processEvents()
+    assert reads and scr.browser.isVisible()
+
+
 def test_browsing_beside_an_edit_keeps_the_edit(files, tree):
     win, scr = files
     scr._open(tree / "a.md")
