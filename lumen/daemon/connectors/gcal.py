@@ -324,9 +324,10 @@ class CalendarMarkerWriter:
             return None
         return created.get("id")
 
-    def patch_event(self, event_id: str, body: dict) -> bool:
-        """False on failure. A 404 here means the user deleted the event by hand;
-        the caller demotes to create rather than retrying forever."""
+    def patch_event(self, event_id: str, body: dict) -> bool | None:
+        """True = success. None = 404/410 (event gone, caller should demote to
+        create). False = transient error (5xx, auth, network) — caller retries
+        next sync without touching the stored link."""
         service = self._service_factory()
         if service is None:
             return False
@@ -335,10 +336,10 @@ class CalendarMarkerWriter:
                 calendarId="primary", eventId=event_id, body=body,
                 sendUpdates="none").execute()
         except Exception as exc:
-            if _status(exc) == 404:
+            if _status(exc) in (404, 410):
                 log.info("canvas event %s is gone — will recreate", event_id)
-            else:
-                log.exception("canvas event patch failed")
+                return None
+            log.exception("canvas event patch failed")
             return False
         return True
 

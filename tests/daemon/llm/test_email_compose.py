@@ -117,3 +117,21 @@ async def test_no_style_file_leaves_prompts_bare(monkeypatch):
     llm = FakeLLM('{"to": [], "cc": [], "subject": "S", "body": "B", "reply_hint": null}')
     await propose_email(llm, "email sam about the demo")
     assert "sent mail" not in llm.messages[0]["content"]
+
+
+def test_split_addresses_respects_quotes_and_angles():
+    from lumen.daemon.llm.email_compose import split_addresses
+    assert split_addresses('"Doe, John" <j@x.com>; a@x.com,, b@y.com,') == [
+        '"Doe, John" <j@x.com>', "a@x.com", "b@y.com"]
+    assert split_addresses("<a,b@x.com>") == ["<a,b@x.com>"]
+    assert split_addresses("  ; , ") == []
+
+
+def test_format_address_keeps_names_readable_and_names_the_bad():
+    from lumen.daemon.llm.email_compose import format_address
+    assert format_address("Chris <c@x.com>") == "Chris <c@x.com>"
+    assert format_address('"Doe, John" <j@x.com>') == '"Doe, John" <j@x.com>'
+    assert format_address("Jöhn <j@x.com>") == "Jöhn <j@x.com>"
+    assert format_address("c@x.com") == "c@x.com"
+    for bad in ("bob", "a@@x.com", "a@x.com b@y.com", "Chris <not-an-email>"):
+        assert format_address(bad) is None, bad

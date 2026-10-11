@@ -280,7 +280,10 @@ def plan(rows: list[dict], now: datetime, ai: bool = False) -> list[Action]:
         linked = row.get("calendar_event_id")
         reason = removal_reason(row)
         if reason is not None:
-            if linked:
+            if linked and not row.get("calendar_event_kept"):
+                # Only propose a removal if the user hasn't explicitly kept
+                # this event. clear_stale_kept_flags() clears the flag when
+                # the removal reason goes away, so kept never locks in forever.
                 actions.append(Action(
                     op="remove", assignment_id=aid, event_id=linked,
                     title=row.get("event_title") or title(row, ai),

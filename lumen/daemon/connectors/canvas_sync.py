@@ -249,6 +249,9 @@ class CanvasSync:
         worker thread; every SQLite touch stays on this one."""
         if self._prefs is None or self.calendar_paused():
             return {}
+        # Clear kept flags for assignments whose removal reason is gone —
+        # they should resume normal sync rather than staying frozen.
+        canvas_calendar.clear_stale_kept_flags(self._store, self._queue)
         actions = canvas_calendar.plan_calendar(self._store, self._prefs,
                                                 datetime.now())
         if not actions:

@@ -24,13 +24,26 @@ carries the file.
 
 Unsaved edits are never dropped silently: Close offers Undo, and leaving a
 file any other way (back/forward, opening another file) keeps the draft until
-the file is opened again (plan L12).
+the file is opened again (plan L12). Quitting asks about them (#88).
+
+The editor remembers the disk version it was loaded from (#86). A change on
+disk (the Ask bar's file tool, the memory distiller, another editor) reloads
+an unedited buffer, and asks "reload or keep mine" over an edited one; Save
+checks again first, so it never writes stale text over newer content.
+
+A suggested edit shows as a diff before Apply (#87), and Apply merges it into
+the text as it is now — anything typed while Lumen drafted survives — in one
+undoable step.
 """
+import difflib
+import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QFileSystemWatcher, Qt, QTimer
+from PyQt6.QtGui import QColor, QTextCursor, QTextFormat
 from PyQt6.QtWidgets import (
-    QBoxLayout, QFrame, QGridLayout, QPlainTextEdit, QSizePolicy, QWidget,
+    QBoxLayout, QFrame, QGridLayout, QPlainTextEdit, QSizePolicy, QTextEdit,
+    QWidget,
 )
 
 from .. import theme as T
@@ -38,7 +51,7 @@ from ..components import (
     Badge, Button, ClickRow, Divider, ElideLabel, EmptyState, FlowLayout,
     IconButton, IconLabel, Label, ModelOffNotice, Panel, ScreenHeader,
     ScrollArea, SegmentedControl, SwitchRow, TextField, TypingDots,
-    clear_layout, fire_on_next_tick, hbox, vbox,
+    _on_theme, clear_layout, fire_on_next_tick, hbox, vbox,
 )
 
 TEXT_SUFFIXES = {".md", ".txt", ".toml", ".conf", ".cfg", ".ini", ".json",
@@ -51,6 +64,142 @@ CARD_GAP = T.S3
 NARROW = 720          # content width below which toolbars stack
 SPLIT_MIN = 960       # content width the folder + editor side by side need
 SIDE_W = 300          # the folder list beside an open file
+DIFF_MAX_LINES = 400  # rows of a suggested edit's diff before "… N more"
+DISK_SETTLE_MS = 250  # a writer's truncate + write lands as one change
+
+
+def _stamp(p: Path) -> tuple[int, int] | None:
+    """(mtime_ns, size): the cheap "did it change" check. Size too, because
+    the kernel's coarse clock can give two quick writes the same mtime."""
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def merge3(base: str, mine: str, theirs: str) -> str | None:
+    """Line-level three-way merge: `theirs`'s changes to `base`, laid onto
+    `mine`. None when both changed the same lines (or inserted at the same
+    spot), so neither side's text is overwritten."""
+    b = base.splitlines(keepends=True)
+
+    def changes(other: str) -> list[tuple[int, int, tuple[str, ...]]]:
+        o = other.splitlines(keepends=True)
+        sm = difflib.SequenceMatcher(None, b, o, autojunk=False)
+        return [(i1, i2, tuple(o[j1:j2]))
+                for tag, i1, i2, j1, j2 in sm.get_opcodes() if tag != "equal"]
+
+    ours, edits = changes(mine), changes(theirs)
+    for c in edits:
+        for o in ours:
+            if c == o:
+                continue                              # the same change twice
+            (i1, i2, _), (k1, k2, _) = c, o
+            if i1 < k2 and k1 < i2:
+                return None                           # overlapping lines
+            if i1 == i2 == k1 == k2 or (i1 == i2 and k1 < i1 < k2) or (
+                    k1 == k2 and i1 < k1 < i2):
+                return None                           # inserts that collide
+    out, pos = [], 0
+    for i1, i2, lines in sorted(set(ours) | set(edits)):
+        out += b[pos:i1]
+        out += lines
+        pos = max(pos, i2)
+    return "".join(out + b[pos:])
+
+
+def diff_rows(old: str, new: str) -> tuple[list[tuple[str, str]], int, int]:
+    """([(kind, line)], added, removed) for a suggested edit: kind is "+",
+    "-", " " (context) or "…" (a gap between hunks)."""
+    rows, added, removed = [], 0, 0
+    lines = difflib.unified_diff(old.splitlines(), new.splitlines(),
+                                 lineterm="", n=2)
+    for ln in list(lines)[2:]:                        # skip the ---/+++ header
+        if ln.startswith("@@"):
+            if rows:
+                rows.append(("…", ""))
+            continue
+        kind = ln[:1] or " "
+        added += kind == "+"
+        removed += kind == "-"
+        rows.append((kind, ln[1:]))
+    return rows, added, removed
+
+
+def cut_short(old: str, new: str) -> int:
+    """Lines of `old` missing from the end of `new` — the shape of a model
+    reply that stopped before the file did. 0 when the end is intact."""
+    a, b = old.splitlines(), new.splitlines()
+    ops = difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+    if not ops:
+        return 0
+    tag, i1, i2, j1, j2 = ops[-1]
+    if tag in ("delete", "replace") and i2 == len(a) and j2 == len(b):
+        missing = (i2 - i1) - (j2 - j1)
+        return missing if missing >= 2 else 0
+    return 0
+
+
+def _replace_text(editor: QPlainTextEdit, new: str) -> None:
+    """Swap the editor's text for `new` as ONE undoable step, touching only
+    the span that differs (the cursor and scroll stay put elsewhere)."""
+    old = editor.toPlainText()
+    if old == new:
+        return
+    i = len(os.path.commonprefix([old, new]))
+    j = len(os.path.commonprefix([old[i:][::-1], new[i:][::-1]]))
+
+    def pos(s: str) -> int:                   # Qt counts UTF-16 code units
+        return len(s.encode("utf-16-le")) // 2
+    c = QTextCursor(editor.document())
+    c.setPosition(pos(old[:i]))
+    c.setPosition(pos(old[:len(old) - j]), QTextCursor.MoveMode.KeepAnchor)
+    c.insertText(new[i:len(new) - j])
+
+
+class _DiffView(QPlainTextEdit):
+    """A suggested edit as a read-only line diff: removed lines on the danger
+    ground, added on the success ground, with -/+ marks for colour-blind
+    reading."""
+
+    def __init__(self, rows: list[tuple[str, str]], more: int = 0):
+        super().__init__()
+        self.setReadOnly(True)
+        self.setProperty("role", "code")
+        self.setAccessibleName("Suggested changes")
+        self.setMaximumHeight(240)        # the editor keeps room below
+        self._kinds = [k for k, _ in rows]
+        text = "\n".join("   ⋯" if k == "…" else f"{k} {ln}" for k, ln in rows)
+        if more:
+            text += f"\n   … {more} more line{'' if more == 1 else 's'}"
+        self.setPlainText(text)
+        self._paint()
+        _on_theme(self, self._paint)
+
+    def _paint(self, *_):
+        th = T.current()
+        sels = []
+        block = self.document().begin()
+        for kind in self._kinds:
+            if kind in ("+", "-"):
+                ink, ground = th.kind("success" if kind == "+" else "danger")
+                # Full-width ground needs a collapsed cursor; the ink needs
+                # the line's text selected — so two selections per line.
+                row = QTextEdit.ExtraSelection()
+                row.format.setBackground(QColor(ground))
+                row.format.setProperty(QTextFormat.Property.FullWidthSelection,
+                                       True)
+                row.cursor = QTextCursor(block)
+                text = QTextEdit.ExtraSelection()
+                text.format.setForeground(QColor(ink))
+                cur = QTextCursor(block)
+                cur.movePosition(QTextCursor.MoveOperation.EndOfBlock,
+                                 QTextCursor.MoveMode.KeepAnchor)
+                text.cursor = cur
+                sels += [row, text]
+            block = block.next()
+        self.setExtraSelections(sels)
 
 
 def _size(n) -> str:
@@ -189,14 +338,30 @@ class FilesScreen(QWidget):
         self.open_file: Path | None = None
         self.editor_text = ""
         self.dirty = False
-        self._proposal: str | None = None
+        self._loading = False                  # our own setText isn't an edit
+        # (buffer it was asked about, suggested text): the diff and the merge
+        # both need the starting point.
+        self._proposal: tuple[str, str] | None = None
         self._error: str | None = None
         self._narrow = False
         self._split = False
         self.editor: QPlainTextEdit | None = None
         self._drafts: dict[Path, str] = {}    # unsaved edits left behind (L12)
+        self._draft_disk: dict[Path, tuple] = {}   # each draft's disk version
         self._draft_restored = False
         self._editor_file: Path | None = None  # the file the editor widget shows
+        # (stamp, text) of the disk version the editor was loaded from or
+        # last saved as; a newer one waiting on "reload or keep mine".
+        self._disk: tuple[tuple | None, str] | None = None
+        self._conflict: tuple[tuple | None, str] | None = None
+        # inotify, not polling: a write to the open file wakes us; the timer
+        # lets a multi-step write settle before we read it.
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_file_changed)
+        self._disk_timer = QTimer(self)
+        self._disk_timer.setSingleShot(True)
+        self._disk_timer.setInterval(DISK_SETTLE_MS)
+        self._disk_timer.timeout.connect(self._check_disk)
         prefs = T.settings()
         self.show_hidden = bool(prefs.value("files/show_hidden", False, bool))
         self.view_mode = prefs.value("files/view", "grid", str)
@@ -227,6 +392,7 @@ class FilesScreen(QWidget):
         # file open in the single-pane layout the folder pane is hidden, and
         # every way back to it (Close, back, widening) rebuilds it — so skip
         # the list_dir and row build for a pane nobody can see.
+        self._check_disk()           # one stat; catches a change while away
         if self.open_file is not None and not self._split:
             return
         self._build_browser()
@@ -267,6 +433,8 @@ class FilesScreen(QWidget):
         self.open_file = target
         if got is not None:
             self._take(target, got)
+        else:
+            self._disk = self._conflict = None
         self.rebuild()
 
     def open_path(self, p) -> None:
@@ -302,6 +470,7 @@ class FilesScreen(QWidget):
             self._emit_location()
             return
         if p == self.open_file:
+            self._check_disk()
             return
         if p.suffix.lower() not in TEXT_SUFFIXES:
             self.win.show_toast(f"Lumen can only open text files, not {p.name}.")
@@ -316,26 +485,42 @@ class FilesScreen(QWidget):
         self.rebuild()
         self._emit_location()
 
-    def _read(self, p: Path) -> tuple[str, bool] | None:
-        """(text, is_draft) for `p` — a draft left behind wins — or None,
-        with a toast saying why. Changes nothing, so a failed open can't
-        disturb the file that's already open."""
-        draft = self._drafts.get(p)
-        if draft is not None:
-            return draft, True
+    def _read_disk(self, p: Path) -> tuple[tuple | None, str] | dict:
+        """(stamp, text) of `p` on disk, or the read_file error dict. The
+        stat comes first: a write racing the read then shows up as a newer
+        stamp on the next check, never as a missed change."""
+        m = _stamp(p)
         result = self.state.read_file(p)
         if result.get("error"):
-            self.win.show_toast(f"Couldn't open {p.name}: {result['error']}")
-            return None
-        return result.get("content", ""), False
+            return result
+        return m, result.get("content", "")
 
-    def _take(self, p: Path, got: tuple[str, bool]) -> None:
+    def _read(self, p: Path) -> tuple[str, bool, tuple | None] | None:
+        """(text, is_draft, disk version) for `p` — a draft left behind wins
+        — or None, with a toast saying why. Changes nothing, so a failed open
+        can't disturb the file that's already open."""
+        draft = self._drafts.get(p)
+        if draft is not None:
+            return draft, True, self._draft_disk.get(p)
+        disk = self._read_disk(p)
+        if isinstance(disk, dict):
+            self.win.show_toast(f"Couldn't open {p.name}: {disk['error']}")
+            return None
+        return disk[1], False, disk
+
+    def _take(self, p: Path, got: tuple) -> None:
         """Make `got` (from _read) the editor buffer for `p`."""
-        text, is_draft = got
+        text, is_draft, disk = got
         self._drafts.pop(p, None)
+        self._draft_disk.pop(p, None)
         self.editor_text = text
         self._draft_restored = is_draft
         self.dirty = False
+        self._conflict = None
+        if disk is None:                     # a draft from before we tracked
+            got_disk = self._read_disk(p)
+            disk = None if isinstance(got_disk, dict) else got_disk
+        self._disk = disk
 
     def _stash_unsaved(self):
         """Leaving an edited file without Close keeps the edits for its next
@@ -343,10 +528,120 @@ class FilesScreen(QWidget):
         them without a word."""
         if self.dirty and self.editor is not None and self.open_file is not None:
             self._drafts[self.open_file] = self.editor.toPlainText()
+            if self._disk is not None:
+                self._draft_disk[self.open_file] = self._disk
             self.win.show_toast(f"Kept your unsaved changes to "
                                 f"{self.open_file.name}. They're back when you "
                                 "open it again.")
         self.dirty = False
+
+    # ---- the disk under the editor (#86) --------------------------------------
+    def _watch(self, f: Path | None) -> None:
+        if self._watcher.files():
+            self._watcher.removePaths(self._watcher.files())
+        if f is not None and f.exists():
+            self._watcher.addPath(str(f))
+
+    def _on_file_changed(self, path: str) -> None:
+        f = self.open_file
+        if f is None or Path(path) != f:
+            return
+        if path not in self._watcher.files() and f.exists():
+            self._watcher.addPath(path)      # replaced by rename: follow it
+        self._disk_timer.start()
+
+    def _check_disk(self, saving: bool = False) -> str:
+        """Compare the open file on disk with the version the editor came
+        from: "same", "reloaded" (it changed and you had no edits, so the
+        editor follows it) or "conflict" (it changed under your edits; the
+        banner asks). A missing or unreadable file is "same" — Save puts
+        it back."""
+        f = self.open_file
+        if f is None or self.editor is None or self._disk is None:
+            return "same"
+        m = _stamp(f)
+        if m is None or m == self._disk[0]:
+            return "same"
+        disk = self._read_disk(f)
+        if isinstance(disk, dict):
+            return "same"
+        if f not in self._watcher.files():
+            self._watch(f)
+        text = disk[1]
+        if text == self._disk[1] or text == self.editor.toPlainText():
+            self._disk = disk                # touched, or already what we have
+            if self._conflict is not None:
+                self._conflict = None
+                self.disk_host.hide()
+            return "same"
+        if not self.dirty:
+            self._set_buffer(text)
+            self._disk = disk
+            self.win.show_toast(f"Reloaded {f.name}: it changed on disk.")
+            return "reloaded"
+        self._conflict = disk
+        self._show_conflict(saving)
+        return "conflict"
+
+    def _set_buffer(self, text: str, dirty: bool = False) -> None:
+        """Put `text` in the editor as one undoable step, without it counting
+        as your edit."""
+        self._loading = True
+        try:
+            _replace_text(self.editor, text)
+        finally:
+            self._loading = False
+        self.dirty = dirty
+        self._set_status(dirty)
+
+    def _show_conflict(self, saving: bool) -> None:
+        name = self.open_file.name
+        clear_layout(self.disk_lay)
+        h = hbox(s=T.S3)
+        h.addWidget(IconLabel("alert", "warn"), 0, Qt.AlignmentFlag.AlignTop)
+        col = vbox(s=2)
+        col.addWidget(Label(
+            f"Not saved: {name} changed on disk since you opened it." if saving
+            else f"{name} changed on disk since you opened it.", "body",
+            wrap=True))
+        col.addWidget(Label(
+            "Reload to see the new version (your edits here go, with Undo), "
+            "or keep yours — saving them replaces the version on disk.",
+            "muted", wrap=True))
+        h.addLayout(col, 1)
+        self.disk_lay.addLayout(h)
+        row = hbox(s=T.S2)
+        row.addStretch(1)
+        row.addWidget(Button("Reload from disk", "ghost", size="sm",
+                             on_click=self._reload_from_disk))
+        row.addWidget(Button("Save mine anyway" if saving else "Keep mine",
+                             "secondary", size="sm",
+                             on_click=lambda: self._keep_mine(saving)))
+        self.disk_lay.addLayout(row)
+        self.disk_host.show()
+
+    def _reload_from_disk(self) -> None:
+        if self._conflict is None or self.editor is None:
+            return
+        f, mine = self.open_file, self.editor.toPlainText()
+        self._disk, self._conflict = self._conflict, None
+        self.disk_host.hide()
+        self._set_buffer(self._disk[1])
+        self.win.show_toast(f"Reloaded {f.name} from disk.",
+                            undo=lambda: self._restore_mine(f, mine))
+
+    def _restore_mine(self, f: Path, text: str) -> None:
+        if self.open_file == f and self.editor is not None:
+            self._set_buffer(text, dirty=True)
+
+    def _keep_mine(self, save: bool) -> None:
+        """Your edits win: the newer disk version becomes the one they're
+        measured against, so the next Save goes through."""
+        if self._conflict is not None:
+            self._disk, self._conflict = self._conflict, None
+        self.disk_host.hide()
+        if save:
+            self._save()
 
     def _emit_location(self):
         sig = getattr(self.state, "nav_location_changed", None)
@@ -542,7 +837,9 @@ class FilesScreen(QWidget):
         self.editor = None
         self._tool_row = None
         self._editor_file = f
+        self._watch(f)
         if f is None:
+            self._disk = self._conflict = None
             return
 
         # Toolbar: status on the left, actions on the right; stacks when narrow.
@@ -604,25 +901,36 @@ class FilesScreen(QWidget):
         self.edit_off.hide()
         lay.addWidget(self.edit_off)
 
-        # Proposal: apply or discard.
+        # The file changed on disk under your edits: reload or keep yours.
+        self.disk_host = Panel(padding=T.S4, spacing=T.S3)
+        self.disk_lay = self.disk_host.lay
+        self.disk_host.hide()
+        lay.addWidget(self.disk_host)
+
+        # Proposal: the diff, then apply or discard.
         self.prop_host = Panel(padding=T.S4, spacing=T.S3)
         ph = hbox(s=T.S3)
         ph.addWidget(IconLabel("edit", "accent"), 0, Qt.AlignmentFlag.AlignTop)
         pcol = vbox(s=2)
-        pcol.addWidget(Label("Lumen suggested a rewrite of this file.", "body",
+        pcol.addWidget(Label("Lumen suggested these changes.", "body",
                              wrap=True))
-        pcol.addWidget(Label("Apply puts it in the editor. Nothing is saved "
-                             "until you press Save.", "muted", wrap=True))
+        self.prop_note = Label("", "muted", wrap=True)
+        pcol.addWidget(self.prop_note)
+        self.prop_warn = Label("", "error", wrap=True)
+        pcol.addWidget(self.prop_warn)
         ph.addLayout(pcol, 1)
         self.prop_host.lay.addLayout(ph)
+        self.prop_diff = vbox(s=0)
+        self.prop_host.lay.addLayout(self.prop_diff)
         prow = hbox(s=T.S2)
         prow.addStretch(1)
         prow.addWidget(Button("Discard", "ghost", size="sm",
                               on_click=self._discard_proposal))
-        prow.addWidget(Button("Apply", "secondary", icon="check", size="sm",
-                              on_click=self._apply_proposal))
+        self.apply_btn = Button("Apply", "secondary", icon="check", size="sm",
+                                on_click=self._apply_proposal)
+        prow.addWidget(self.apply_btn)
         self.prop_host.lay.addLayout(prow)
-        self.prop_host.setVisible(self._proposal is not None)
+        self.prop_host.hide()
         lay.addWidget(self.prop_host)
 
         self.editor = QPlainTextEdit()
@@ -634,10 +942,16 @@ class FilesScreen(QWidget):
         lay.addWidget(self.editor, 1)
         self.editor.setFocus()
         self._apply_narrow()
+        if self._proposal is not None:
+            self._show_proposal()
         if self._draft_restored:
             self._draft_restored = False
             self.dirty = False
             self._on_dirty()           # the restored draft is still unsaved
+        if self._conflict is not None:
+            self._show_conflict(False)
+        else:
+            self._check_disk()         # a draft's file may have moved on
 
     def _set_status(self, dirty: bool):
         if dirty:
@@ -647,32 +961,81 @@ class FilesScreen(QWidget):
         self.status_badge.adjustSize()
 
     def _on_dirty(self):
-        if not self.dirty:
+        if not self.dirty and not self._loading:
             self.dirty = True
             self._set_status(True)
 
-    def _save(self):
+    def _write(self, p: Path, text: str) -> dict:
+        """The one disk write: {ok, disk: (stamp, text)} or {error}."""
+        result = self.state.save_file(p, text)
+        if result.get("error"):
+            return result
+        return {"ok": True, "disk": (_stamp(p), text)}
+
+    def _save(self) -> bool:
         if self.open_file is None or self.editor is None:
-            return
-        result = self.state.save_file(self.open_file, self.editor.toPlainText())
+            return False
+        state = self._check_disk(saving=True)
+        if state == "conflict":
+            return False                 # the banner says why and offers both
+        if state == "reloaded":
+            return True                  # nothing of yours to write
+        text = self.editor.toPlainText()
+        result = self._write(self.open_file, text)
         if result.get("error"):
             self.win.show_toast(f"Couldn't save {self.open_file.name}: "
                                 f"{result['error']}")
-            return
+            return False
+        self._disk = result["disk"]
         self.dirty = False
-        self.editor_text = self.editor.toPlainText()
+        self.editor_text = text
         self._drafts.pop(self.open_file, None)
+        self._draft_disk.pop(self.open_file, None)
         self._set_status(False)
         self.win.show_toast(f"Saved {self.open_file.name}")
+        return True
+
+    # ---- quitting (#88) -------------------------------------------------------
+    def unsaved(self) -> list[Path]:
+        """Every file with edits that aren't on disk: the open one and the
+        drafts left behind."""
+        out = list(self._drafts)
+        if (self.dirty and self.open_file is not None
+                and self.open_file not in out):
+            out.insert(0, self.open_file)
+        return out
+
+    def save_unsaved(self) -> list[str]:
+        """Quit's "Save": write every unsaved edit. Returns the names that
+        weren't saved — the file changed on disk underneath (never
+        overwritten blind) or the write failed."""
+        failed = []
+        if self.dirty and self.open_file is not None:
+            if not self._save():
+                failed.append(self.open_file.name)
+        for p, text in list(self._drafts.items()):
+            base = self._draft_disk.get(p)
+            if base is not None:
+                now = self._read_disk(p)
+                if not isinstance(now, dict) and now[1] != base[1]:
+                    failed.append(p.name)
+                    continue
+            if self._write(p, text).get("error"):
+                failed.append(p.name)
+                continue
+            self._drafts.pop(p, None)
+            self._draft_disk.pop(p, None)
+        return failed
 
     def _close(self):
         """Back to the folder. Unsaved text isn't thrown away silently: the
         toast offers Undo, which reopens the file with your edits."""
         lost = None
         if self.dirty and self.editor is not None and self.open_file is not None:
-            lost = (self.open_file, self.editor.toPlainText())
+            lost = (self.open_file, self.editor.toPlainText(), self._disk)
         if self.open_file is not None:
             self._drafts.pop(self.open_file, None)   # Undo carries the text
+            self._draft_disk.pop(self.open_file, None)
         self.open_file = None
         self.dirty = False
         self._proposal = None
@@ -682,14 +1045,13 @@ class FilesScreen(QWidget):
             self.win.show_toast(f"Closed {lost[0].name} without saving",
                                 undo=lambda l=lost: self._reopen_unsaved(*l))
 
-    def _reopen_unsaved(self, path: Path, text: str):
+    def _reopen_unsaved(self, path: Path, text: str, disk=None):
         if self.open_file is not None:
             return
         self.path = path.parent
         self.open_file = path
-        self.editor_text = text
+        self._take(path, (text, True, disk))
         self._proposal = None
-        self._draft_restored = True    # it is unsaved again
         self.rebuild()
         self._emit_location()
 
@@ -715,6 +1077,7 @@ class FilesScreen(QWidget):
         self.edit_status.start("Drafting an edit")
         self.suggest_btn.set_busy(True, "Drafting…")
         target = self.open_file
+        base = self.editor.toPlainText()
 
         def settle() -> bool:
             try:
@@ -736,18 +1099,53 @@ class FilesScreen(QWidget):
                 self.win.show_toast(result.get("message") or
                                     "Lumen couldn't draft that edit.")
                 return
-            self._proposal = result.get("content", "")
-            self.prop_host.show()
+            self._proposal = (base, result.get("content", ""))
+            self._show_proposal()
 
-        self.state.propose_edit(str(target), self.editor.toPlainText(),
-                                instruction, done,
+        self.state.propose_edit(str(target), base, instruction, done,
                                 on_error=lambda _msg: settle())
 
+    def _show_proposal(self):
+        """The diff against the text Lumen was asked about, so you see what
+        Apply would do — including a reply that stopped short."""
+        base, new = self._proposal
+        rows, added, removed = diff_rows(base, new)
+        more = max(0, len(rows) - DIFF_MAX_LINES)
+        self.prop_note.setText(
+            f"{added} line{'' if added == 1 else 's'} added, {removed} "
+            f"removed. Apply puts this into the editor; nothing is saved "
+            "until you press Save.")
+        missing = cut_short(base, new)
+        self.prop_warn.setText(
+            f"The suggestion ends {missing} lines before your file does. The "
+            "model may have stopped early, so check the end before you apply "
+            "it." if missing else "")
+        self.prop_warn.setVisible(bool(missing))
+        self.apply_btn.setEnabled(True)
+        clear_layout(self.prop_diff)
+        self.prop_diff.addWidget(_DiffView(rows[:DIFF_MAX_LINES], more))
+        self.prop_host.show()
+
     def _apply_proposal(self):
-        if self._proposal is not None and self.editor is not None:
-            self.editor.setPlainText(self._proposal)
+        """Merge the suggestion into the editor as it is now: lines you
+        typed while Lumen drafted stay, and Ctrl+Z takes the whole apply
+        back. If you edited the very lines it rewrites, nothing is applied."""
+        if self._proposal is None or self.editor is None:
+            return
+        base, new = self._proposal
+        mine = self.editor.toPlainText()
+        merged = new if mine == base else merge3(base, mine, new)
+        if merged is None:
+            self.prop_warn.setText(
+                "You've since edited the lines this suggestion changes, so "
+                "applying it would overwrite your typing. Discard it and ask "
+                "again.")
+            self.prop_warn.show()
+            self.apply_btn.setEnabled(False)
+            return
         self._proposal = None
         self.prop_host.hide()
+        _replace_text(self.editor, merged)
 
     def _discard_proposal(self):
         self._proposal = None

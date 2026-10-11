@@ -10,6 +10,7 @@ instruction that doesn't quote the exact text to change ("fix the spelling
 mistake" reproducibly proposed nothing, live 2026-07-19). The UI diffs old
 vs new itself and nothing touches disk until the user applies.
 """
+from lumen.daemon.llm.file_write import unwrap_fence
 
 # Input cap: content rides the prompt twice over (in + regenerated out), and
 # both must fit num_ctx=8192 alongside the system prompt — ~3k tokens each
@@ -31,11 +32,12 @@ SYSTEM = (
 )
 
 
-def parse_reply(text: str) -> tuple[str | None, str]:
+def parse_reply(text: str, original: str | None = None) -> tuple[str | None, str]:
     """(changes_line, content). The header lives at the top; a bare --- after
     CHANGES starts the file (later --- lines are content — markdown has
     them). A model that skips the format entirely degrades to whole-reply-
-    as-content. One outer code fence is unwrapped (a 4B loves to fence)."""
+    as-content. One outer code fence is unwrapped (a 4B loves to fence) —
+    unless `original` itself starts with one (file_write.unwrap_fence)."""
     lines = (text or "").splitlines()
     changes, content_at = None, 0
     for i, ln in enumerate(lines[:10]):
@@ -46,10 +48,7 @@ def parse_reply(text: str) -> tuple[str | None, str]:
         elif changes is not None and s == "---":
             content_at = i + 1
             break
-    content = "\n".join(lines[content_at:]).strip()
-    if content.startswith("```"):
-        body = content.split("\n", 1)[1] if "\n" in content else ""
-        content = body.rsplit("```", 1)[0].strip() if "```" in body else body
+    content = unwrap_fence("\n".join(lines[content_at:]).strip(), original)
     return changes, content
 
 
@@ -68,7 +67,7 @@ async def propose_edit(llm, filename: str, content: str,
     async for chunk in llm.chat([{"role": "system", "content": SYSTEM},
                                  {"role": "user", "content": user}]):
         text += chunk
-    changes, revised = parse_reply(text)
+    changes, revised = parse_reply(text, content)
     if changes is not None and changes.rstrip(".").lower() == "none":
         return None, ("The model found nothing in the file matching that "
                       "request — try naming the text to change.")

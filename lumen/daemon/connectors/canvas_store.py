@@ -220,12 +220,39 @@ class CanvasStore:
                 (event_id, kind, start, sig, assignment_id))
 
     def clear_calendar_event(self, assignment_id: int) -> None:
-        """Forget the link without touching the assignment.
-
-        Declining a removal MUST come through here. Otherwise the diff engine
-        still sees an event linked to an ineligible assignment and re-queues the
-        same removal on every single sync, forever."""
+        """Forget the link without touching the assignment."""
         self.set_calendar_event(assignment_id, None, None, None, None)
+
+    def mark_applied(self, assignment_id: int, submitted: int | None,
+                     due: str | None) -> None:
+        """Record the Canvas values that reconcile_todos last pushed to the todo.
+        Prevents subsequent syncs from overwriting user edits until Canvas itself
+        changes the field."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments "
+                "SET applied_submitted = ?, applied_due = ? WHERE id = ?",
+                (submitted, due, assignment_id))
+
+    def set_calendar_event_kept(self, assignment_id: int) -> None:
+        """User chose to keep this event despite the removal reason. The diff
+        engine skips removal proposals for this assignment until the flag clears."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE canvas_assignments SET calendar_event_kept = 1 WHERE id = ?",
+                (assignment_id,))
+
+    def clear_kept_flags(self, assignment_ids: list[int]) -> None:
+        """Clear kept flags for assignments that are now eligible again, so normal
+        sync resumes rather than the event staying frozen forever."""
+        if not assignment_ids:
+            return
+        with self._conn:
+            ph = ",".join("?" * len(assignment_ids))
+            self._conn.execute(
+                f"UPDATE canvas_assignments SET calendar_event_kept = 0 "
+                f"WHERE id IN ({ph}) AND calendar_event_kept = 1",
+                assignment_ids)
 
     def linked_events(self) -> list[dict]:
         return [dict(r) for r in self._conn.execute(

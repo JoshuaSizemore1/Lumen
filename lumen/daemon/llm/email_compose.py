@@ -6,11 +6,48 @@ one hard rule survives: a pre-filled recipient must be an address the user
 literally wrote (the reply path adds the mirrored sender, router-side)."""
 
 import re
+from email.errors import HeaderParseError
+from email.headerregistry import Address
+from email.utils import parseaddr
 
 from lumen.daemon.llm import writing_style
 from lumen.daemon.llm.event_create import parse_proposal
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def split_addresses(text: str) -> list[str]:
+    """Recipients as typed: split on `,` or `;` outside quotes and <…>, with
+    blanks dropped. Nothing is parsed or rewritten here, so an entry the
+    daemon rejects comes back to the draft exactly as typed (todo-fixes #90)
+    — the stdlib's strict getaddresses turns `a@x.com,, b@y.com` into
+    nothing at all."""
+    out, cur, quoted, angled = [], [], False, False
+    for ch in text or "":
+        if ch == '"':
+            quoted = not quoted
+        elif ch in "<>" and not quoted:
+            angled = ch == "<"
+        if ch in ",;" and not (quoted or angled):
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return [s.strip() for s in out if s.strip()]
+
+
+def format_address(entry: str) -> str | None:
+    """One recipient (`Name <addr>`, `"Last, First" <addr>` or a bare
+    address) as a header-ready address — the name kept readable, quoted
+    when it needs it — or None when it holds no valid address."""
+    name, addr = parseaddr(entry)
+    if not addr or not EMAIL.match(addr):
+        return None
+    try:
+        return str(Address(display_name=name, addr_spec=addr))
+    except (ValueError, HeaderParseError):
+        return None
 
 # The 4B loves em dashes; the user doesn't want them in mail Lumen writes
 # (todo-fixes #14). Replace an em dash / horizontal bar (with any spaces hugging

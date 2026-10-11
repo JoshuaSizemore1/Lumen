@@ -11,6 +11,19 @@ def test_load_truncates(tmp_path):
     assert len(memory.load(p, 4000)) == 4000
 
 
+def test_load_full_no_truncation(tmp_path):
+    p = tmp_path / "memory.md"
+    content = "x" * 6000
+    p.write_text(content)
+    result = memory.load_full(p)
+    assert result is not None
+    assert len(result) == 6000
+
+
+def test_load_full_missing_returns_none(tmp_path):
+    assert memory.load_full(tmp_path / "nope.md") is None
+
+
 def test_parse_and_render_roundtrip():
     text = ("## Calendar\n- Never books before 9am. (last seen 2026-07-14)\n\n"
             "## Todos\n- Groups errands with #errands. (last seen 2026-07-10)\n")

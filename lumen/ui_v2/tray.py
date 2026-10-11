@@ -17,7 +17,8 @@ def _icon() -> QIcon:
     return QIcon(pm)
 
 
-def make_tray(app: QApplication, on_show, on_toggle_launcher, on_sleep) -> QSystemTrayIcon:
+def make_tray(app: QApplication, on_show, on_toggle_launcher, on_sleep,
+              on_quit=None) -> QSystemTrayIcon:
     tray = QSystemTrayIcon(_icon(), app)
     menu = QMenu()
     menu.addAction("Show Lumen", on_show)
@@ -25,7 +26,7 @@ def make_tray(app: QApplication, on_show, on_toggle_launcher, on_sleep) -> QSyst
     menu.addSeparator()
     menu.addAction("Sleep model now", on_sleep)
     menu.addSeparator()
-    menu.addAction("Quit", app.quit)
+    menu.addAction("Quit", on_quit or app.quit)   # v4 asks about unsaved edits
     tray.setContextMenu(menu)
     tray.setToolTip("Lumen — daily assistant")
     tray.show()

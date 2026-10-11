@@ -166,6 +166,8 @@ def test_recreate_deletes_then_inserts(bits):
 
 # --- commit ------------------------------------------------------------------
 def _cycle(store, prefs, queue, alerts, writer, now=NOW):
+    # Mirrors what CanvasSync._sync_calendar does: clean up before planning.
+    cc.clear_stale_kept_flags(store, queue)
     actions = cc.plan_calendar(store, prefs, now)
     results = cc.execute_calendar(writer, actions)
     return cc.commit_calendar(store, queue, alerts, results)
@@ -232,13 +234,14 @@ def test_a_removal_is_not_requeued_every_sync(bits):
 
 
 def test_a_hand_deleted_event_demotes_to_create(bits):
-    """A patch that 404s must clear the link, or the state machine wedges on an
-    event id that can never be patched again."""
+    """A patch that 404s (None return) must clear the link, or the state machine
+    wedges on an event id that can never be patched again."""
     store, prefs, queue, alerts = bits
     seed(store)
     _cycle(store, prefs, queue, alerts, FakeWriter())
     seed(store, name="HW1 (revised)")
-    counts = _cycle(store, prefs, queue, alerts, FakeWriter(patch=False))
+    # patch=None signals 404 (event gone); patch=False signals transient error
+    counts = _cycle(store, prefs, queue, alerts, FakeWriter(patch=None))
     assert counts["demoted"] == 1
     assert store.calendar_candidates()[0]["calendar_event_id"] is None
     # ...and the next pass simply creates it again.
@@ -288,15 +291,17 @@ def test_approving_a_removal_deletes_the_event(bits):
     assert store.calendar_candidates()[0]["calendar_event_id"] is None
 
 
-def test_declining_a_removal_clears_the_link(bits):
-    """Otherwise the diff engine still sees an event on an ineligible assignment
-    and re-queues the identical removal on every single sync, forever."""
+def test_declining_a_removal_keeps_the_link(bits):
+    """Decline ('Keep') must preserve the calendar_event_id so the next sync
+    does not create a duplicate. The kept flag suppresses re-queuing instead."""
     store, queue, qid = _queued(bits)
     writer = FakeWriter()
     assert cc.apply_removal(writer, store, queue, qid, False)["removed"] is False
     assert writer.deleted == []
     assert queue.count() == 0
-    assert store.calendar_candidates()[0]["calendar_event_id"] is None
+    row = store.calendar_candidates()[0]
+    assert row["calendar_event_id"] == "evt_new"  # link preserved — no duplicate
+    assert row["calendar_event_kept"] == 1         # flag suppresses re-queueing
 
 
 def test_a_declined_removal_does_not_come_back(bits):
@@ -354,3 +359,89 @@ def test_proposal_body_keeps_a_timed_span_untouched():
                              "end_at": "2026-09-14T11:00:00", "detail": "Rm 4"})
     assert body["start"]["dateTime"] == "2026-09-14T10:00:00"
     assert body["end"]["dateTime"] == "2026-09-14T11:00:00"
+
+
+# --- #92: duplicate-event bugs -----------------------------------------------
+
+class FakeWriterNone(FakeWriter):
+    """patch_event returns None to simulate 404 (event gone by user hand)."""
+    def patch_event(self, event_id, body):
+        self.patched.append((event_id, body))
+        return None
+
+
+def test_transient_patch_error_preserves_link(bits):
+    """A 5xx / timeout must not clear the link.  Only a 404 (None return from
+    patch_event) should demote to re-create — transient failures should retry."""
+    store, prefs, queue, alerts = bits
+    seed(store)
+    _cycle(store, prefs, queue, alerts, FakeWriter())
+    seed(store, name="HW1 (revised)")
+    # False = transient error (not a 404)
+    counts = _cycle(store, prefs, queue, alerts, FakeWriter(patch=False))
+    assert counts["failed"] == 1
+    assert counts["demoted"] == 0
+    assert store.calendar_candidates()[0]["calendar_event_id"] == "evt_new"
+
+
+def test_404_patch_demotes_to_create(bits):
+    """A 404 from patch means the user deleted the event by hand; clearing the
+    link lets the next sync re-create it cleanly."""
+    store, prefs, queue, alerts = bits
+    seed(store)
+    _cycle(store, prefs, queue, alerts, FakeWriter())
+    seed(store, name="HW1 (revised)")
+    counts = _cycle(store, prefs, queue, alerts, FakeWriterNone())
+    assert counts["demoted"] == 1
+    assert store.calendar_candidates()[0]["calendar_event_id"] is None
+    assert _cycle(store, prefs, queue, alerts, FakeWriter())["created"] == 1
+
+
+def test_keep_preserves_event_link(bits):
+    """Declining a removal ('Keep') must keep the calendar_event_id intact so
+    no duplicate is created on the next sync."""
+    store, queue, qid = _queued(bits)
+    writer = FakeWriter()
+    result = cc.apply_removal(writer, store, queue, qid, False)
+    assert result == {"ok": True, "removed": False}
+    assert writer.deleted == []
+    assert queue.count() == 0
+    row = store.calendar_candidates()[0]
+    assert row["calendar_event_id"] == "evt_new"        # link preserved
+    assert row["calendar_event_kept"] == 1              # kept flag set
+
+
+def test_kept_event_not_re_proposed(bits):
+    """After 'Keep', subsequent syncs must not re-queue the same removal."""
+    store, prefs, queue, alerts = bits
+    seed(store)
+    writer = FakeWriter()
+    _cycle(store, prefs, queue, alerts, writer)
+    seed(store, submitted=True)
+    _cycle(store, prefs, queue, alerts, writer)
+    cc.apply_removal(writer, store, queue, queue.pending()[0]["id"], False)
+    # Three more syncs — no new removal should appear
+    for _ in range(3):
+        _cycle(store, prefs, queue, alerts, writer)
+    assert queue.count() == 0
+
+
+def test_stale_removal_dropped_when_assignment_comes_back(bits):
+    """If an assignment disappears (queuing a removal) then reappears before the
+    user answers, the pending removal must be dropped automatically."""
+    store, prefs, queue, alerts = bits
+    seed(store)
+    writer = FakeWriter()
+    _cycle(store, prefs, queue, alerts, writer)
+    # Simulate disappearance: push missing_syncs to GONE_STREAK
+    from lumen.daemon.connectors.canvas_events import GONE_STREAK
+    store._conn.execute(
+        "UPDATE canvas_assignments SET missing_syncs = ? WHERE id = 10",
+        (GONE_STREAK,))
+    store._conn.commit()
+    _cycle(store, prefs, queue, alerts, writer)
+    assert queue.count() == 1                 # removal queued
+    # Assignment comes back
+    seed(store)                               # upsert resets missing_syncs to 0
+    _cycle(store, prefs, queue, alerts, writer)
+    assert queue.count() == 0                 # stale removal dropped

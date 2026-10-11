@@ -26,6 +26,26 @@ SYSTEM = (
 _BAD_NAME = ("/", "\\", "..")
 
 
+def unwrap_fence(content: str, original: str | None = None) -> str:
+    """Strip ONE code fence a 4B wrapped its whole reply in. Only a fence
+    that opens the reply and closes its last line counts — a document that
+    merely starts with a code block keeps everything after that block — and
+    never when the file being revised itself starts with a fence (todo-fixes
+    #87). An opener with no other fence anywhere is a wrapper cut off at the
+    end, so just the opener goes."""
+    if not content.startswith("```"):
+        return content
+    if original is not None and original.lstrip().startswith("```"):
+        return content
+    lines = content.split("\n")
+    fences = [i for i, ln in enumerate(lines) if ln.strip().startswith("```")]
+    if len(fences) == 1:
+        return "\n".join(lines[1:]).strip()
+    if lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return content
+
+
 def parse_file(text: str) -> dict | None:
     """Sentinel-line parse: FILENAME (required), PATH (optional), then the
     first bare --- starts the content. Header order is free; anything before
@@ -43,11 +63,8 @@ def parse_file(text: str) -> dict | None:
             break
     if filename is None or content_at is None:
         return None
-    content = "\n".join(lines[content_at:]).strip()
     # a 4B loves to fence its output — unwrap one outer code fence
-    if content.startswith("```"):
-        body = content.split("\n", 1)[1] if "\n" in content else ""
-        content = body.rsplit("```", 1)[0].strip() if "```" in body else body
+    content = unwrap_fence("\n".join(lines[content_at:]).strip())
     return {"filename": filename, "path": path or None, "content": content}
 
 

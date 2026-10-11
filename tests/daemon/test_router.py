@@ -3100,6 +3100,27 @@ async def test_chat_compose_send_roundtrip():
     assert "Sent." in text and {"done": True} in out
 
 
+async def test_chat_compose_failed_send_gives_the_draft_back():
+    """todo-fixes #90: the popup closes on Send, so a rejected address used to
+    leave only an error line in chat. The draft comes back as a plain compose
+    (no compose_id — its Send goes straight to emails.send)."""
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM((DRAFT_JSON,)), sync)
+    typed = {"to": ["sam@@x.com"], "cc": [], "bcc": [],
+             "subject": "Friday (edited)", "body": "Hi Sam!", "reply_to": None}
+    requests = []
+
+    def respond(ev):
+        requests.append(ev)
+        if "compose_id" in ev:
+            router._confirm.resolve(ev["compose_id"], typed)
+    out = await _drive_compose(router, "send an email to sam@x.com", respond)
+    assert sync.sent == []
+    assert len(requests) == 2 and "compose_id" not in requests[1]
+    assert requests[1]["compose_request"] == typed
+    assert "sam@@x.com" in "".join(e.get("chunk", "") for e in out)
+
+
 async def test_chat_compose_cancel_sends_nothing():
     sync = SendingMailSync()
     router = compose_router(FakeLLM((DRAFT_JSON,)), sync)
@@ -3143,6 +3164,48 @@ async def test_emails_send_oneshot_validates_and_sends():
     assert bad[0]["result"]["ok"] is False and len(sync.sent) == 1
     empty = await collect(router, "emails.send", {"to": [], "body": "b"})
     assert "recipient" in empty[0]["result"]["message"]
+
+
+async def test_emails_send_name_addr_format_accepted():
+    # Bug #90: "Name <addr>" was rejected by the bare EMAIL regex.
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM(), sync)
+    out = await collect(router, "emails.send",
+                        {"to": ["Chris <c@x.com>"], "subject": "s", "body": "b"})
+    assert out[0]["result"]["ok"] is True
+    # Gmail receives the formatted header value, not the bare addr.
+    assert sync.sent[-1][0] == ["Chris <c@x.com>"]
+
+
+async def test_emails_send_semicolon_list_normalised():
+    # Defensive: if a semicolon-joined string slips through from the UI,
+    # the daemon still parses it rather than rejecting it wholesale.
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM(), sync)
+    out = await collect(router, "emails.send",
+                        {"to": ["a@x.com; b@y.com"], "subject": "s", "body": "b"})
+    assert out[0]["result"]["ok"] is True
+    assert len(sync.sent[-1][0]) == 2
+
+
+async def test_emails_send_bad_addr_names_the_entry():
+    # A bogus address must be rejected with a message that identifies it.
+    router = compose_router(FakeLLM())
+    out = await collect(router, "emails.send",
+                        {"to": ["notvalid"], "subject": "s", "body": "b"})
+    r = out[0]["result"]
+    assert r["ok"] is False
+    assert "notvalid" in r["message"]
+
+
+async def test_emails_send_bad_name_addr_rejected():
+    # "Name <bad>" — the extracted address part is invalid, not the whole string.
+    router = compose_router(FakeLLM())
+    out = await collect(router, "emails.send",
+                        {"to": ["Chris <not-an-email>"], "subject": "s", "body": "b"})
+    r = out[0]["result"]
+    assert r["ok"] is False
+    assert "not-an-email" in r["message"]
 
 
 async def test_emails_revise_oneshot():
@@ -4983,8 +5046,9 @@ async def test_approving_a_removal_deletes_the_event(tmp_path):
     assert writer.deleted == ["evt_1"]
 
 
-async def test_declining_a_removal_clears_the_link_and_deletes_nothing(tmp_path):
-    """The re-queue-forever bug: declining must clear calendar_event_id too."""
+async def test_declining_a_removal_keeps_the_link_and_deletes_nothing(tmp_path):
+    """Decline ('Keep') must preserve the link — clearing it creates a duplicate.
+    Re-queuing is suppressed by setting the calendar_event_kept flag instead."""
     writer = _FakeEventWriter()
     router, store, _prefs, queue, _p = calendar_router(tmp_path, writer)
     store.upsert_courses([{"id": 1, "name": "CS", "course_code": "CS"}])
@@ -4997,7 +5061,9 @@ async def test_declining_a_removal_clears_the_link_and_deletes_nothing(tmp_path)
                          {"id": qid, "approve": False}))[-1]["result"]
     assert res["removed"] is False
     assert writer.deleted == []
-    assert store.calendar_candidates()[0]["calendar_event_id"] is None
+    row = store.calendar_candidates()[0]
+    assert row["calendar_event_id"] == "evt_1"  # link kept — no duplicate
+    assert row["calendar_event_kept"] == 1       # flag prevents re-queuing
 
 
 async def test_resolving_a_stale_removal_is_refused(tmp_path):
@@ -5335,3 +5401,19 @@ def test_mail_context_shows_received_times_in_local_time(set_tz):
                "received_at": "2026-10-09T03:15:00+00:00"}]
     ctx = mail_context(unread, {"total": 40, "unread": 1}, True)
     assert "2026-10-08 21:15: Ada" in ctx and "03:15" not in ctx
+
+
+async def test_emails_send_keeps_every_recipient_and_names_a_bad_one():
+    # todo-fixes #90: stray separators used to wipe the whole list, and a
+    # space-separated pair vanished instead of being named.
+    sync = SendingMailSync()
+    router = compose_router(FakeLLM(), sync)
+    out = await collect(router, "emails.send",
+                        {"to": ["a@x.com,, Jöhn <j@x.com>;"], "subject": "s",
+                         "body": "b"})
+    assert out[0]["result"]["ok"] is True
+    assert sync.sent[-1][0] == ["a@x.com", "Jöhn <j@x.com>"]
+    out = await collect(router, "emails.send",
+                        {"to": ["a@x.com b@y.com"], "subject": "s", "body": "b"})
+    assert out[0]["result"]["ok"] is False
+    assert "a@x.com b@y.com" in out[0]["result"]["message"]

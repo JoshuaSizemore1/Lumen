@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import (
     QLabel, QListWidget, QListWidgetItem, QPushButton, QScrollArea, QWidget,
 )
 
+from lumen.daemon.llm.email_compose import split_addresses
+
 from . import icons
 from . import theme as T
 from .components import (
@@ -298,6 +300,53 @@ class ConfirmOverlay(_Overlay):
             QTimer.singleShot(0, lambda: self.open(*nxt))
 
 
+# ---- unsaved work on quit (#88) ----------------------------------------------
+class UnsavedOverlay(_Overlay):
+    """Quitting with unsaved Files edits: Save / Don't save / Cancel. Local
+    files only, so no "touches a connected account" badge. Esc cancels, and
+    focus goes to the card so a stray Enter decides nothing."""
+
+    CARD_W = 460
+
+    def __init__(self, parent):
+        super().__init__(parent, dismissable=False)
+        self._on_save = self._on_discard = None
+        self.lay = vbox(self.card, (0, 0, 0, 0), 0)
+
+    def open(self, names: list[str], on_save, on_discard):
+        self._on_save, self._on_discard = on_save, on_discard
+        clear_layout(self.lay)
+        head = hbox(m=(T.S6, T.S6, T.S6, T.S4), s=T.S4)
+        head.addWidget(IconLabel("save", "accent", 24), 0,
+                       Qt.AlignmentFlag.AlignTop)
+        head.addWidget(Heading("Save your changes before quitting?", 3,
+                               wrap=True), 1)
+        self.lay.addLayout(head)
+        shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more"
+                                        if len(names) > 4 else "")
+        body = vbox(m=(T.S6, 0, T.S6, T.S5), s=T.S2)
+        body.addWidget(Label(
+            f"You have unsaved edits in {shown}. If you don't save them, "
+            "they're gone when Lumen quits.", "small", wrap=True))
+        self.lay.addLayout(body, 1)
+        foot, fl = _dialog_foot()
+        fl.addWidget(Button("Don't save", "ghost",
+                            on_click=lambda: self._answer(self._on_discard)))
+        fl.addStretch(1)
+        fl.addWidget(Button("Cancel", "secondary", on_click=self.cancel))
+        fl.addWidget(Button("Save and quit", "primary",
+                            on_click=lambda: self._answer(self._on_save)))
+        self.lay.addWidget(foot)
+        self.pop()
+        self.card.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _answer(self, fn):
+        self._on_save = self._on_discard = None
+        self.close_overlay()
+        if fn is not None:
+            fn()
+
+
 # ---- compose ----------------------------------------------------------------
 class ComposeOverlay(_Overlay):
     """Draft composer with an inline "ask Lumen to revise" line. A chat-driven
@@ -404,8 +453,10 @@ class ComposeOverlay(_Overlay):
         (self.body_edit if to else self.to).setFocus()
 
     def fields(self) -> dict:
-        # The daemon iterates `to`, so hand it a list, never a bare string.
-        to = [a.strip() for a in self.to.text().split(",") if a.strip()]
+        # Entries as typed ("Name <addr>", "Last, First" <addr>, `,`/`;`
+        # lists); the daemon validates each, and a rejected one comes
+        # back to the draft unchanged (#90).
+        to = split_addresses(self.to.text())
         return {"to": to, "cc": [], "bcc": [],
                 "subject": self.subject.text().strip(),
                 "body": self.body_edit.toPlainText(),
@@ -450,26 +501,40 @@ class ComposeOverlay(_Overlay):
         if not self.isVisible():
             return
         self.close_overlay()
-        if self._compose_id is not None:
-            self.state.respond_compose(self._compose_id, fields)
-            self._compose_id = None
-            return
         note = self._note
 
-        def failed(_msg):
-            # The draft would otherwise be gone with the closed window — and
-            # so would the caller's note (a forward's "attachments aren't
-            # included"), which matters most on the retry.
-            self.state.toast_requested.emit("Couldn't send. Your draft is back.")
+        def _reopen(msg):
+            # Draft would otherwise be gone — restore it with the error so
+            # the user can correct the address or retry.  The caller's note
+            # (a forward's "attachments aren't included") travels with it.
+            self.state.toast_requested.emit(msg)
             self.open({"to": fields["to"], "subject": fields["subject"],
                        "body": fields["body"], "reply_to": fields.get("reply_to"),
                        "note": note})
-        self.state.send_email(fields, self._sent, on_error=failed)
 
-    def _sent(self, result):
-        r = result or {}
-        msg = r.get("message", "Sent")
-        self.state.toast_requested.emit(("✓ " if r.get("ok") else "") + msg)
+        if self._compose_id is not None:
+            compose_id = self._compose_id
+            self._compose_id = None
+
+            def compose_done(result):
+                r = result or {}
+                if not r.get("ok") and r.get("message"):
+                    _reopen(r["message"])
+
+            self.state.respond_compose(compose_id, fields, compose_done)
+            return
+
+        def done(result):
+            r = result or {}
+            if r.get("ok"):
+                self.state.toast_requested.emit("✓ " + r.get("message", "Sent"))
+            else:
+                _reopen(r.get("message") or "Couldn't send. Your draft is back.")
+
+        def failed(_msg):
+            _reopen("Couldn't send. Your draft is back.")
+
+        self.state.send_email(fields, done, on_error=failed)
 
     def _revise(self):
         instruction = self.ask.text().strip()

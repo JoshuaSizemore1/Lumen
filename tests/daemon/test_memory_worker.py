@@ -55,6 +55,27 @@ async def test_run_once_no_entries_leaves_file(tmp_path):
     assert (tmp_path / "memory.md").read_text().startswith("## Books")
 
 
+async def test_run_once_preserves_overcap_content(tmp_path):
+    # A file larger than blob_cap_chars must not lose its over-cap content
+    # after a distillation run (bug: load() truncated before parse+write).
+    w, m = worker(tmp_path, blob_cap_chars=200)
+    # Build a file whose Books section sits well past 200 chars
+    books_bullet = "- Prefers hardboiled mysteries over epic fantasy. (last seen 2026-07-01)"
+    long_prefix = (
+        "## Calendar\n"
+        + "- Never books before 9am. (last seen 2026-07-01)\n" * 4
+        + "\n"
+    )
+    initial = long_prefix + "## Books\n" + books_bullet + "\n"
+    assert len(initial) > 200
+    (tmp_path / "memory.md").write_text(initial)
+    # Add a todos entry so run_once has work to do
+    m.log("todos", "query", {"message": "buy milk"})
+    await w.run_once(now=date(2026, 7, 14))
+    text = (tmp_path / "memory.md").read_text()
+    assert "hardboiled mysteries" in text, "over-cap Books bullet was dropped"
+
+
 def test_model_paused_blocks_distillation(tmp_path):
     # The Settings model switch has to reach the background passes too, or
     # "off" would still wake the model two minutes after every chat.

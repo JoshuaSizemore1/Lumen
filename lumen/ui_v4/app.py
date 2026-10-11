@@ -170,7 +170,9 @@ def main() -> None:
 
     def dispatch(cmd: str) -> None:
         if cmd == "quit":
-            app.quit()          # `lumen --quit`; unified mode stops the daemon
+            # `lumen --quit`; unified mode stops the daemon. Unsaved Files
+            # edits are asked about first (#88).
+            win.request_quit()
         elif cmd == "toggle-launcher":
             toggle_ask()
         elif cmd == "show-launcher":
@@ -182,7 +184,7 @@ def main() -> None:
 
     tray_mod.make_tray(app, on_show=lambda: dispatch("show"),
                        on_toggle_launcher=summon_ask,
-                       on_sleep=state.sleep_model)
+                       on_sleep=state.sleep_model, on_quit=win.request_quit)
 
     if toggle:
         summon_ask()

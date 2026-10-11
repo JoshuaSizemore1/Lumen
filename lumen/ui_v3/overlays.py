@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import (
     QComboBox, QFrame, QLineEdit, QPlainTextEdit, QWidget,
 )
 
+from lumen.daemon.llm.email_compose import split_addresses
+
 from . import theme as T
 from .widgets import (
     Chip, ClickLabel, button, clear_layout, eyebrow, font, hbox, hline, label,
@@ -265,10 +267,10 @@ class ComposeOverlay(_Scrim):
         (self.body_edit if to else self.to).setFocus()
 
     def fields(self) -> dict:
-        # The daemon's send path expects address lists (it iterates `to`), so
-        # split the field rather than handing it a bare string — a string would
-        # be walked character by character and rejected as invalid addresses.
-        to = [a.strip() for a in self.to.text().split(",") if a.strip()]
+        # Entries as typed ("Name <addr>", "Last, First" <addr>, `,`/`;`
+        # lists); the daemon validates each, and a rejected one comes
+        # back to the draft unchanged (#90).
+        to = split_addresses(self.to.text())
         return {"to": to, "cc": [], "bcc": [],
                 "subject": self.subject.text().strip(),
                 "body": self.body_edit.toPlainText(),
@@ -287,16 +289,36 @@ class ComposeOverlay(_Scrim):
             self.to.setFocus()
             return
         self.hide()
-        if self._compose_id is not None:
-            self.state.respond_compose(self._compose_id, fields)
-            self._compose_id = None
-            return
-        self.state.send_email(fields, self._sent)
 
-    def _sent(self, result):
-        msg = (result or {}).get("message", "Sent")
-        self.state.toast_requested.emit(("✓ " if (result or {}).get("ok") else "")
-                                        + msg)
+        def _reopen(msg):
+            self.state.toast_requested.emit(msg)
+            self.open({"to": fields["to"], "subject": fields["subject"],
+                       "body": fields["body"],
+                       "reply_to": fields.get("reply_to")})
+
+        if self._compose_id is not None:
+            compose_id = self._compose_id
+            self._compose_id = None
+
+            def compose_done(result):
+                r = result or {}
+                if not r.get("ok") and r.get("message"):
+                    _reopen(r["message"])
+
+            self.state.respond_compose(compose_id, fields, compose_done)
+            return
+
+        def done(result):
+            r = result or {}
+            if r.get("ok"):
+                self.state.toast_requested.emit("✓ " + r.get("message", "Sent"))
+            else:
+                _reopen(r.get("message") or "Couldn't send. Your draft is back.")
+
+        def failed(_msg):
+            _reopen("Couldn't send. Your draft is back.")
+
+        self.state.send_email(fields, done, on_error=failed)
 
     def _revise(self):
         instruction = self.ask.text().strip()

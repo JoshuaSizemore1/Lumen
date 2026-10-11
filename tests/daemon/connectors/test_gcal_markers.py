@@ -185,8 +185,9 @@ def test_a_real_delete_failure_is_reported():
     assert writer({}, {"delete": _HttpError(500)}).delete_event("evt_1") is False
 
 
-def test_patch_on_a_hand_deleted_event_fails_so_the_caller_can_recreate():
-    assert writer({}, {"patch": _HttpError(404)}).patch_event("e", {}) is False
+def test_patch_on_a_hand_deleted_event_returns_none_so_the_caller_can_recreate():
+    # None signals "event is gone (404)" — distinct from False (transient error).
+    assert writer({}, {"patch": _HttpError(404)}).patch_event("e", {}) is None
 
 
 def test_writes_are_none_or_false_when_not_connected():

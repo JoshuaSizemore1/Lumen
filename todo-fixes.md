@@ -252,14 +252,25 @@ without a click), loses something typed, or makes a feature not work at all.
 
 ### Losing what you typed or saved
 
-86. **Files: Save can overwrite newer content on disk** (review #15) [checked; probe]
+86. **Files: Save can overwrite newer content on disk** (review #15) [checked; probe] — ✔ fixed (2026-10-11)
     - An open file is never re-read. If the Ask bar's file tool edits it, or the
       distiller rewrites memory.md while it's open, the editor keeps the old
       text, and Save (even with no changes) writes the old text back.
     - **Where:** `ui_v4/screens/files.py:224-232,304-305,654-666`.
     - **Fix:** remember the file's modified time at open; reload if unchanged
       locally, ask "reload or keep mine" if not; check again on Save.
-87. **Files: "Suggest an edit" is applied blind** (review #16) [checked; probe]
+    - **Done:** the editor keeps the disk version it loaded or last saved:
+      a stamp of (mtime, size) plus the text. Size is in the stamp because
+      the kernel's coarse clock can give two quick writes the same mtime.
+      - A `QFileSystemWatcher` (inotify, no polling, 250 ms settle) and every
+        screen visit compare against it.
+      - An unedited file reloads with a toast. An edited one gets a "Reload
+        from disk / Keep mine" banner; Reload offers Undo.
+      - Save re-checks and refuses to write over a newer version. The banner
+        then offers "Save mine anyway".
+      - Kept drafts carry their disk version too, so reopening one notices
+        the file moved on.
+87. **Files: "Suggest an edit" is applied blind** (review #16) [checked; probe] — ✔ fixed (2026-10-11)
     - No diff is shown (v2 had one, and file-workbench.md calls the diff "the
       confirmation"). Apply replaces the whole buffer, wipes anything typed while
       the model was drafting, and clears undo.
@@ -268,13 +279,35 @@ without a click), loses something typed, or makes a feature not work at all.
       by the fence-unwrapping step.
     - **Where:** `ui_v4/screens/files.py:608-626,739-750`,
       `daemon/llm/file_edit.py:50-52,71`, `daemon/llm/file_write.py:130-132`.
-88. **Files: unsaved edits and "kept drafts" vanish on quit** (review #17) [checked]
+    - **Done (v4):**
+      - The suggestion card shows a coloured line diff against the text Lumen
+        was asked about, with added/removed counts.
+      - A reply whose end is missing two or more of the file's lines is
+        flagged as probably stopped early.
+      - Apply is a line-level three-way merge (`files.merge3`) onto the
+        editor as it is now, so typing done while Lumen drafted survives.
+        Edits to the same lines refuse with a note instead of overwriting.
+      - Apply is one undo step (`_replace_text`), not `setPlainText`.
+      - `file_write.unwrap_fence` (used by file_edit and file_write) strips a
+        wrapper fence only when it closes the reply's last line, and never
+        when the original file opens with a fence.
+      - v3's Files screen still applies blind; it's the fallback UI.
+88. **Files: unsaved edits and "kept drafts" vanish on quit** (review #17) [checked] — ✔ fixed (2026-10-11)
     - The close button quits the app in `lumen` mode, and nothing checks for
       unsaved work, despite the toast promising "They're back when you open it
       again".
     - **Where:** `ui_v4/main.py:691-695`.
     - **Fix:** Save / Discard / Cancel on quit, or persist drafts.
-89. **memory.md loses whole sections past 4,000 characters** (review #18) [checked; probe]
+    - **Done:** `LumenWindow.request_quit` is the one way out. It covers:
+      the close button in `lumen` mode, the tray's Quit, `lumen --quit`, and
+      Settings' Quit everything (which stops the daemon only once the quit
+      goes ahead).
+      - With unsaved edits or kept drafts it opens a Save / Don't save /
+        Cancel card (`UnsavedOverlay`).
+      - Save never overwrites a file that changed on disk. Lumen stays open
+        and names the file.
+      - `make_tray` gained an optional `on_quit`; v2/v3 are unchanged.
+89. **memory.md loses whole sections past 4,000 characters** (review #18) [checked; probe] — ✔ fixed (2026-10-11)
     - `load()` truncates at the cap, and every distill or forget run writes the
       truncated text back. A 5,369-char test file lost a whole section plus some
       bullets. Hand edits beyond the cut are lost too.
@@ -282,7 +315,15 @@ without a click), loses something typed, or makes a feature not work at all.
       `daemon/router.py:2466-2500`.
     - **Fix:** cap only what goes into the prompt; never write a truncated load
       back to disk.
-90. **A failed send throws the draft away** (review #19) [checked]
+    - **Done:** distill (`memory_worker.run_once`) and forget
+      (`router._forget_chat`) read the file with the new
+      `memory.load_full()`. `load()` keeps its cap and is for prompt
+      injection only.
+      - Over-cap bullets go to the distiller as part of each section's base,
+        so it compresses them per the skill instead of cutting them.
+      - Forget shows the model the whole file (bounded at 3× the cap), so it
+        can name a topic past the cut.
+90. **A failed send throws the draft away** (review #19) [checked] — ✔ fixed (2026-10-11)
     - A bad address (`Chris <c@x.com>`, `a@x.com; b@y.com`, a typo) or Gmail
       being unreachable: the daemon answers `{ok: false}`, v4 only toasts it, and
       the compose window is already closed. The existing test covers only the
@@ -290,14 +331,36 @@ without a click), loses something typed, or makes a feature not work at all.
     - **Where:** `ui_v4/overlays.py:426-449`.
     - **Fix:** reopen the draft when `ok` is false, and accept "Name <addr>" plus
       `,` / `;` lists.
-91. **Canvas undoes your own changes to Canvas todos on every sync** (review #20) [probe ×2]
+    - **Done:** any `{ok: false}` reply to a send (bad address, Gmail
+      unreachable, anything else) reopens the compose window as typed,
+      with the daemon's message. A compose opened from chat gets its draft
+      back too: the turn re-sends a `compose_request` with no id, so the next
+      Send goes straight to `emails.send`.
+      - Recipients are split by `email_compose.split_addresses`, which
+        respects quotes and `<…>`, so `"Last, First" <a>` stays one entry.
+        Entries keep exactly what was typed.
+      - The daemon validates each entry with `format_address`. A bad one is
+        named in the error, never dropped.
+      - Not the stdlib's strict `getaddresses`: on Python 3.14 it turns
+        `a@x.com,, b@y.com` into no recipients at all.
+      - Non-ASCII names stay readable rather than RFC 2047-encoded.
+      - v3's compose got the same changes.
+91. **Canvas undoes your own changes to Canvas todos on every sync** (review #20) [probe ×2] — ✔ fixed (2026-10-11)
     - Move a homework's due date earlier and the next sync puts it back. Un-tick
       one (resubmission needed) and it gets re-ticked. "Sync now" always reports
       "N todos ticked off" because it re-applies every time.
     - **Where:** `daemon/connectors/canvas_reconcile.py:46-54`.
     - **Fix:** only push when Canvas's own value changed (store the last-applied
       value).
-92. **Canvas creates duplicate Google Calendar events** (review #21) [checked; probe]
+    - **Done:** `canvas_assignments` gained `applied_submitted` and
+      `applied_due`: the last values Canvas pushed onto the linked todo.
+      - Reconcile now ticks a todo only when Canvas newly marks it submitted,
+        and moves its due date only when Canvas's own date changed.
+      - A local un-tick or date move survives until Canvas changes that
+        field again. "N todos ticked off" counts real changes only.
+      - The migration backfills existing linked rows with their current
+        Canvas values, so the first sync after upgrade changes nothing.
+92. **Canvas creates duplicate Google Calendar events** (review #21) [checked; probe] — ✔ fixed (2026-10-11)
     - Any failed update (Google 503, expired token) is treated as "you deleted the
       event", so the next sync creates a second one. The orphan keeps the old date
       forever.
@@ -307,6 +370,17 @@ without a click), loses something typed, or makes a feature not work at all.
     - **Where:** `daemon/connectors/canvas_calendar.py:77-90`,
       `daemon/connectors/gcal.py:322-338`, `daemon/connectors/canvas_queue.py:63`.
     - **Fix:** demote only on 404/410, and mark "kept" instead of unlinking.
+    - **Done:**
+      - `gcal.patch_event` now answers True (patched), None (404/410: gone)
+        or False (5xx, auth, network). Only None demotes the link to a fresh
+        create; a transient failure keeps the link and retries next sync.
+      - "Keep" in the Review queue keeps the link and sets the new
+        `calendar_event_kept`, so the removal isn't re-proposed and nothing
+        is duplicated. The flag clears itself once the assignment is
+        eligible again (`canvas_calendar.clear_stale_kept_flags`), so normal
+        updates resume.
+      - Pending removals are dropped when the assignment comes back: in that
+        pre-planning sweep, and after any successful create/update.
 
 ### Features that don't work at all
 

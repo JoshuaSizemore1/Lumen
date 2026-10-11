@@ -37,6 +37,29 @@ def test_parse_reply_tolerates_format_misses():
     assert content == "print(1)"
 
 
+def test_a_file_that_starts_with_a_code_block_keeps_the_rest():
+    """todo-fixes #87: the unwrap cut a README that opens with a code block
+    down to that block — everything after it vanished from the proposal."""
+    doc = "```sh\nmake\n```\n\nBuild notes.\n\n## Usage\nRun it."
+    _c, content = parse_reply("CHANGES: x\n---\n" + doc)
+    assert content == doc
+    # ...even when it also ends in a block: the original opens with a fence
+    doc2 = "```sh\nmake\n```\n\nThen:\n\n```sh\nmake install\n```"
+    _c, content = parse_reply("CHANGES: x\n---\n" + doc2, original=doc2)
+    assert content == doc2
+
+
+def test_a_wrapper_fence_with_blocks_inside_still_unwraps():
+    reply = "```markdown\n# T\n\n```py\nx = 1\n```\n\nend\n```"
+    _c, content = parse_reply("CHANGES: x\n---\n" + reply, original="# T\n")
+    assert content == "# T\n\n```py\nx = 1\n```\n\nend"
+
+
+def test_a_wrapper_cut_off_at_the_end_loses_only_its_opener():
+    _c, content = parse_reply("CHANGES: x\n---\n```\nline one\nline tw")
+    assert content == "line one\nline tw"
+
+
 async def test_propose_edit_returns_revision_and_prompts_with_content():
     llm = FakeLLM(["CHANGES: fixed\n---\n", "fixed ", "content"])
     revised, err = await propose_edit(llm, "notes.md", "old content", "fix it")

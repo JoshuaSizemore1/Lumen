@@ -86,8 +86,7 @@ class MemoryWorker:
                 head = memory_mod.SECTIONS.get(e["subsystem"])
                 if head:
                     by_section[head].append(e)
-            current = memory_mod.parse(memory_mod.load(
-                self._path, self._cfg.blob_cap_chars) or "")
+            current = memory_mod.parse(memory_mod.load_full(self._path) or "")
             updated = dict(current)
             done_sections = []
             for head, sect_entries in by_section.items():

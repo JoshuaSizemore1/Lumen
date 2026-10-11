@@ -26,12 +26,23 @@ BULLET_DATE = re.compile(r"\(last seen (\d{4}-\d{2}-\d{2})\)\s*$")
 
 
 def load(path: Path, cap: int) -> str | None:
-    """Read per call; truncate defensively at the cap; None if missing/empty."""
+    """Read per call; truncate defensively at the cap; None if missing/empty.
+    Use this only for prompt injection — never as a disk read before a write."""
     try:
         text = path.read_text().strip()
     except OSError:
         return None
     return text[:cap] or None
+
+
+def load_full(path: Path) -> str | None:
+    """Read the entire file, no truncation. Use this before any parse+write
+    operation so over-cap content is never silently dropped from disk."""
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    return text or None
 
 
 def memory_context(path: Path, cap: int) -> str | None:

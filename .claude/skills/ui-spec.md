@@ -80,7 +80,11 @@ any v4 screen, and update it when you add or change behaviour.
   toggle (remembered), "N more not shown" past 500 entries. An open file sits
   in an editor pane beside a folder list (≥960px), full page when narrower.
   The panes rebuild separately; unsaved edits are never rebuilt away, kept as
-  a draft when you navigate off the file, and Close offers Undo.
+  a draft when you navigate off the file, and Close offers Undo. Quitting
+  asks Save / Don't save / Cancel when anything is unsaved (#88). A file that
+  changes on disk reloads if unedited, else asks "Reload from disk / Keep
+  mine"; Save never writes over a newer disk version (#86). A suggested edit
+  shows as a diff and merges into what you typed meanwhile (#87).
 - **Calendar:** events paint in Google's colours (the event's own, else its
   calendar's); the legend uses calendar colours. Out-of-month days are muted
   text on the same ground. The edit dialog accepts 24:00 and reads an end at
@@ -116,7 +120,9 @@ any v4 screen, and update it when you add or change behaviour.
 - Power: hidden screens defer rebuilds; QtWebEngine is imported only when
   Canvas first builds its view; the Canvas page is Frozen when hidden and
   Discarded on Done; no timers run on hidden screens. Files skips its
-  folder re-read while a narrow editor hides the folder pane.
+  folder re-read while a narrow editor hides the folder pane, and watches
+  its open file through inotify — its settle timer is single-shot, started
+  only by a change, never a poll.
 - Text size and reduced motion: `theme.text_size()` is applied by
   `ThemeManager.apply` (every stylesheet apply); `theme.reduced_motion()`
   also follows the desktop's animation setting, asked once at startup on a

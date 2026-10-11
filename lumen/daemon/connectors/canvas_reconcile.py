@@ -43,15 +43,30 @@ def reconcile_todos(store: CanvasStore, todos: TodoStore, *,
             if not todos.exists(a["todo_id"]):
                 store.mark_handled(a["id"])   # user deleted it -> never recreate
                 handled += 1
-            elif a["submitted"]:
+                continue
+            submitted_int = 1 if a["submitted"] else 0
+            # Treat NULL applied_* as "already at current Canvas value" —
+            # matches what the migration sets for pre-existing rows.
+            applied_sub = a.get("applied_submitted")
+            applied_due = a.get("applied_due")
+            if applied_sub is None:
+                applied_sub = submitted_int
+            if applied_due is None:
+                applied_due = due
+            sub_changed = applied_sub != submitted_int
+            due_changed = not a["submitted"] and applied_due != due
+            # Push only when Canvas itself changed the field since last apply.
+            if sub_changed and a["submitted"]:
                 todos.toggle(a["todo_id"], True)
                 completed += 1
-            else:
-                existing = next((t for t in todos.list_all()
-                                 if t["id"] == a["todo_id"]), None)
-                if existing is not None and existing["due_date"] != due:
-                    todos.set_due(a["todo_id"], due)
-                    updated += 1
+            if due_changed:
+                todos.set_due(a["todo_id"], due)
+                updated += 1
+            if sub_changed or due_changed:
+                store.mark_applied(
+                    a["id"],
+                    submitted_int if sub_changed else applied_sub,
+                    due if due_changed else applied_due)
             continue
         if a["submitted"]:
             continue                          # never submitted -> don't nag
@@ -59,6 +74,7 @@ def reconcile_todos(store: CanvasStore, todos: TodoStore, *,
             _todo_text(courses.get(a["course_id"]), a["name"]), due,
             _tags(courses.get(a["course_id"])))
         store.link_todo(a["id"], tid, now.isoformat(timespec="seconds"))
+        store.mark_applied(a["id"], 0, due)   # record initial values
         created += 1
     return {"created": created, "completed": completed,
             "handled": handled, "updated": updated}

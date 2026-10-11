@@ -68,5 +68,6 @@ The two-tier design above shipped as specified; the load-bearing decisions the n
 - Don't feed raw conversation history into every prompt — this is the single biggest way local performance degrades over time.
 - Don't run distillation synchronously while you're waiting on an answer.
 - Don't let the memory blob grow unbounded — capped and periodically compressed, not append-only.
+- Don't read memory.md with `memory.load()` before writing it back. `load()` truncates at the cap and exists only for prompt injection; distill and forget read it with `load_full()`. A truncated read written back deleted every section past 4,000 chars, including hand edits (todo-fixes #89). The cap is enforced by distillation compressing, never by cutting the file.
 - Don't store anything you wouldn't want summarized and re-surfaced later without you explicitly re-stating it — if something should be forgotten, that needs an explicit "forget X" path that prunes it from both the raw log and the distilled blob.
 - Don't auto-activate proposed procedures — proposal is the model's job, activation is the user's.

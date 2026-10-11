@@ -27,7 +27,7 @@ it holds from startup and across theme switches.
 """
 from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QPainter
-from PyQt6.QtWidgets import QApplication, QBoxLayout, QPlainTextEdit, QWidget
+from PyQt6.QtWidgets import QBoxLayout, QPlainTextEdit, QWidget
 
 from .. import theme as T
 from ..components import (
@@ -861,5 +861,6 @@ class SettingsScreen(QWidget):
 
     def _quit_everything(self):
         from lumen import instance_lock
-        instance_lock.terminate(instance_lock.daemon_pids())
-        QApplication.instance().quit()
+        # Unsaved Files edits are asked about first; Cancel stops nothing.
+        self.win.request_quit(before=lambda: instance_lock.terminate(
+            instance_lock.daemon_pids()))

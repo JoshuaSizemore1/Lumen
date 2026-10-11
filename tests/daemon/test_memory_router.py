@@ -152,6 +152,50 @@ def test_forget_hint_needs_a_request_aimed_at_memory():
         assert not FORGET_HINT.search(msg), msg
 
 
+async def test_forget_preserves_overcap_content(tmp_path):
+    # A file larger than memory_cap must not lose its over-cap content after a
+    # forget run (bug: load() truncated before parse+write).
+    p = tmp_path / "memory.md"
+    # Build a file that exceeds cap=300; the Books section is past the cut
+    overcap_bullet = "- Prefers hardboiled mysteries. (last seen 2026-07-14)"
+    long_prefix = (
+        "## Email\n"
+        + "- Archives PulteGroup newsletters unread. (last seen 2026-07-14)\n"
+        + "- Some other rule. (last seen 2026-07-14)\n" * 5
+        + "\n"
+    )
+    initial = long_prefix + "## Books\n" + overcap_bullet + "\n"
+    assert len(initial) > 300
+    p.write_text(initial)
+    m = MemoryLog(db.connect(tmp_path / "mem.db"))
+    r = Router(ForgetLLM("PulteGroup"), FakeStore(rows=[]), memory=m,
+               memory_path=p, memory_cap=300)
+    await collect(r, "chat", {"message": "forget about PulteGroup"})
+    text = p.read_text()
+    assert "PulteGroup" not in text
+    assert "hardboiled mysteries" in text, "over-cap Books bullet was dropped by forget"
+
+
+async def test_forget_shows_the_model_bullets_past_the_cap(tmp_path):
+    """The model names the topic from what it's shown; a bullet past the
+    always-on prompt cap must still be in front of it."""
+    p = tmp_path / "memory.md"
+    p.write_text("## Email\n" + "- Some other rule. (last seen 2026-07-14)\n" * 8
+                 + "\n## Books\n- Prefers hardboiled mysteries. (last seen 2026-07-14)\n")
+    seen = []
+
+    class Spy(ForgetLLM):
+        async def chat(self, messages):
+            seen.append(messages[-1]["content"])
+            yield self._keyword
+    m = MemoryLog(db.connect(tmp_path / "mem.db"))
+    r = Router(Spy("hardboiled"), FakeStore(rows=[]), memory=m,
+               memory_path=p, memory_cap=300)
+    await collect(r, "chat", {"message": "forget my mystery preference"})
+    assert "hardboiled mysteries" in seen[0]
+    assert "hardboiled" not in p.read_text()
+
+
 async def test_forget_nothing_matched_is_honest(tmp_path):
     p = tmp_path / "memory.md"
     p.write_text("## Todos\n- Groups errands. (last seen 2026-07-14)\n")

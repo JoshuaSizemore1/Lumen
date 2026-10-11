@@ -87,3 +87,52 @@ def test_deleted_todo_is_not_recreated(tmp_path):
     assert res["created"] == 0
     assert todos.list_all() == []
     assert store.active_assignments()[0]["handled"] == 1
+
+
+# --- #91: applied-value guards ------------------------------------------------
+
+def test_local_edit_survives_when_canvas_not_changed(tmp_path):
+    """User un-ticks a submitted todo; subsequent syncs must not re-tick it
+    because Canvas's submitted flag hasn't changed since the last apply."""
+    store, todos = _fixture(tmp_path)
+    _assign(store)
+    reconcile_todos(store, todos)               # create todo
+    _assign(store, submitted=True)
+    reconcile_todos(store, todos)               # tick done (Canvas submitted)
+    assert todos.list_all()[0]["completed"] is True
+    # User un-ticks it (e.g. needs to resubmit)
+    todos.toggle(todos.list_all()[0]["id"], False)
+    assert todos.list_all()[0]["completed"] is False
+    # Canvas value unchanged → must not re-tick
+    res = reconcile_todos(store, todos)
+    assert res["completed"] == 0
+    assert todos.list_all()[0]["completed"] is False
+
+
+def test_local_due_edit_survives_sync(tmp_path):
+    """User moves the todo's due date; Canvas still has the old value.
+    Reconcile must not overwrite the local edit."""
+    store, todos = _fixture(tmp_path)
+    _assign(store, due_at="2026-09-02T06:00:00Z")
+    reconcile_todos(store, todos)
+    # User moves it forward
+    todos.set_due(todos.list_all()[0]["id"], "2026-09-10")
+    assert todos.list_all()[0]["due_date"] == "2026-09-10"
+    # Canvas value unchanged → local edit survives
+    res = reconcile_todos(store, todos)
+    assert res["updated"] == 0
+    assert todos.list_all()[0]["due_date"] == "2026-09-10"
+
+
+def test_canvas_due_change_overrides_local_edit(tmp_path):
+    """If Canvas changes the due date, the new Canvas value wins — even if the
+    user had also edited it locally."""
+    store, todos = _fixture(tmp_path)
+    _assign(store, due_at="2026-09-02T06:00:00Z")
+    reconcile_todos(store, todos)
+    todos.set_due(todos.list_all()[0]["id"], "2026-09-10")
+    # Professor moves the deadline
+    _assign(store, due_at="2026-09-20T06:00:00Z")
+    res = reconcile_todos(store, todos)
+    assert res["updated"] == 1
+    assert todos.list_all()[0]["due_date"] == local_day("2026-09-20T06:00:00Z")

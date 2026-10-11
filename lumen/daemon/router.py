@@ -29,8 +29,9 @@ from lumen.daemon.llm.book_recs import recommend
 from lumen.daemon.llm.briefing import build_sections, compose_briefing
 from lumen.daemon.llm.client import LLMUnavailable
 from lumen.daemon.llm.claude_cli import ClaudeUnavailable
-from lumen.daemon.llm.email_compose import (EMAIL, propose_email,
-                                            revise_email)
+from lumen.daemon.llm.email_compose import (EMAIL, format_address,
+                                            propose_email, revise_email,
+                                            split_addresses)
 from lumen.daemon.llm.event_create import (confirm_payload, propose_event,
                                            validate_proposal)
 from lumen.daemon.llm.file_edit import propose_edit
@@ -2502,8 +2503,13 @@ class Router:
         """Map the user's topic to matching memory lines, remove them from the
         file and delete matching raw-log rows so a later distillation can't
         re-learn it. Honest when nothing matched."""
-        blob = memory_mod.load(self._memory_path, self._memory_cap)
-        if not blob:
+        # The whole file, never load()'s capped text: the write-back below
+        # would drop everything past the cap (todo-fixes #89), and the model
+        # couldn't name a topic it never saw. The prompt bound only guards a
+        # hand-grown file against the context window.
+        full_text = memory_mod.load_full(self._memory_path)
+        blob = (full_text or "")[:3 * self._memory_cap]
+        if not full_text:
             yield {"chunk": "There's nothing in my memory to forget yet."}
             yield {"done": True}
             return
@@ -2528,7 +2534,7 @@ class Router:
         topic = topic.strip().strip('"').strip()
         removed = []
         if topic and topic.upper() != "NONE":
-            parsed = memory_mod.parse(blob)
+            parsed = memory_mod.parse(full_text)
             kept = {}
             for head, bullets in parsed.items():
                 keep, drop = [], []
@@ -3253,7 +3259,14 @@ class Router:
             yield {"chunk": "\n\nCancelled — nothing was sent."}
             yield {"done": True}
             return
-        _ok, text = await self._send_email(answer)
+        ok, text = await self._send_email(answer)
+        if not ok:
+            # The popup closed on Send, so hand the draft back (todo-fixes
+            # #90). No compose_id: its next Send goes straight to emails.send
+            # and this turn doesn't wait on it.
+            yield {"compose_request": {
+                k: answer.get(k) for k in ("to", "cc", "bcc", "subject",
+                                           "body", "reply_to")}}
         yield {"chunk": f"\n\n{text}"}
         yield {"done": True}
 
@@ -3373,13 +3386,16 @@ class Router:
         compose popup, whose Send click is the confirmation."""
         def addrs(key):
             out = []
-            for a in fields.get(key) or []:
-                a = str(a).strip()
-                if a and not EMAIL.match(a):
-                    raise ValueError(f"{a!r} isn't a valid email address — "
-                                     "nothing was sent.")
-                if a and a not in out:
-                    out.append(a)
+            for raw in fields.get(key) or []:
+                # "Name <addr>", "Last, First" <addr>, and `,`/`;` lists
+                # (todo-fixes #90). A bad entry is named, never dropped.
+                for entry in split_addresses(str(raw)):
+                    addr = format_address(entry)
+                    if addr is None:
+                        raise ValueError(f"{entry!r} isn't a valid email "
+                                         "address — nothing was sent.")
+                    if addr not in out:
+                        out.append(addr)
             return out
         try:
             to, cc, bcc = addrs("to"), addrs("cc"), addrs("bcc")

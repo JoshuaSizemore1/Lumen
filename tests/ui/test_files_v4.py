@@ -195,3 +195,259 @@ def test_saving_drops_an_old_draft(files, tree):
     scr._open(tree / "a.md")
     scr._save()
     assert tree / "a.md" not in scr._drafts
+
+
+# ---- the disk under the editor (todo-fixes #86) ------------------------------
+def _write_newer(p, text):
+    """An outside write the stamp can't miss, however fast the test runs."""
+    import os
+    st = p.stat()
+    p.write_text(text)
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+
+
+def test_save_never_writes_stale_text_over_a_newer_file(files, tree):
+    """The review's probe: the Ask bar's file tool (or the memory distiller)
+    rewrote the open file, and Save — even with no edits — put the old text
+    back."""
+    win, scr = files
+    scr._open(tree / "a.md")
+    _write_newer(tree / "a.md", "alpha, from the Ask bar")
+    scr._save()
+    assert (tree / "a.md").read_text() == "alpha, from the Ask bar"
+    assert scr.editor.toPlainText() == "alpha, from the Ask bar"
+    assert not scr.dirty
+
+
+def test_an_unedited_file_follows_the_disk(files, tree, qtbot):
+    win, scr = files
+    scr._open(tree / "a.md")
+    (tree / "a.md").write_text("alpha, rewritten by the distiller")
+    # inotify wakes the screen; no polling timer is involved
+    qtbot.waitUntil(lambda: scr.editor.toPlainText()
+                    == "alpha, rewritten by the distiller", timeout=3000)
+    assert not scr.dirty and scr.status_badge.text() == "Saved"
+
+
+def test_a_change_under_your_edits_asks_and_save_refuses(files, tree):
+    win, scr = files
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, mine")
+    _write_newer(tree / "a.md", "alpha, theirs")
+    assert scr._check_disk() == "conflict"
+    assert scr.disk_host.isVisible()
+    assert scr.editor.toPlainText() == "alpha, mine" and scr.dirty
+    assert scr._save() is False                       # never written blind
+    assert (tree / "a.md").read_text() == "alpha, theirs"
+    keep = next(b for b in scr.disk_host.findChildren(type(scr.save_btn))
+                if b.text() == "Save mine anyway")
+    keep.click()
+    assert (tree / "a.md").read_text() == "alpha, mine"
+    assert not scr.dirty and not scr.disk_host.isVisible()
+
+
+def test_reload_from_disk_offers_your_edits_back(files, tree, monkeypatch):
+    win, scr = files
+    undos = []
+    monkeypatch.setattr(win, "show_toast",
+                        lambda m, undo=None: undos.append(undo))
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, mine")
+    _write_newer(tree / "a.md", "alpha, theirs")
+    scr._check_disk()
+    scr._reload_from_disk()
+    assert scr.editor.toPlainText() == "alpha, theirs" and not scr.dirty
+    undos[-1]()
+    assert scr.editor.toPlainText() == "alpha, mine" and scr.dirty
+    assert (tree / "a.md").read_text() == "alpha, theirs"
+
+
+def test_a_kept_draft_notices_its_file_moved_on(files, tree):
+    win, scr = files
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, draft")
+    scr._open(tree / "b.txt")                         # a.md becomes a draft
+    _write_newer(tree / "a.md", "alpha, newer")
+    scr._open(tree / "a.md")
+    assert scr.editor.toPlainText() == "alpha, draft" and scr.dirty
+    assert scr.disk_host.isVisible()
+    assert scr._save() is False
+    assert (tree / "a.md").read_text() == "alpha, newer"
+
+
+# ---- suggested edits (todo-fixes #87) ----------------------------------------
+def _suggest(scr, monkeypatch, reply):
+    """Ask for an edit and answer it with `reply` (the daemon's content)."""
+    asked = []
+    monkeypatch.setattr(scr.state, "propose_edit",
+                        lambda path, content, instr, cb, on_error=None:
+                        asked.append((content, cb)))
+    scr.instr.set_text("make it better")
+    scr._run_edit()
+    content, cb = asked[-1]
+    return content, (lambda: cb({"ok": True, "content": reply}))
+
+
+def _diff_text(scr) -> str:
+    from lumen.ui_v4.screens.files import _DiffView
+    return scr.prop_host.findChild(_DiffView).toPlainText()
+
+
+def test_a_suggestion_shows_its_diff_before_anything_changes(files, tree,
+                                                             monkeypatch):
+    win, scr = files
+    (tree / "a.md").write_text("one\ntwo\nthree\n")
+    scr._open(tree / "a.md")
+    _base, answer = _suggest(scr, monkeypatch, "one\nTWO\nthree\n")
+    answer()
+    assert scr.prop_host.isVisible()
+    diff = _diff_text(scr)
+    assert "- two" in diff and "+ TWO" in diff
+    assert "1 line added, 1 removed" in scr.prop_note.text()
+    assert scr.editor.toPlainText() == "one\ntwo\nthree\n"   # not applied yet
+
+
+def test_apply_keeps_what_you_typed_while_lumen_drafted(files, tree,
+                                                        monkeypatch):
+    win, scr = files
+    (tree / "a.md").write_text("one\ntwo\nthree\nfour\n")
+    scr._open(tree / "a.md")
+    _base, answer = _suggest(scr, monkeypatch, "one\nTWO\nthree\nfour\n")
+    scr.editor.setPlainText("one\ntwo\nthree\nfour\nfive, typed meanwhile\n")
+    answer()
+    scr._apply_proposal()
+    assert scr.editor.toPlainText() == (
+        "one\nTWO\nthree\nfour\nfive, typed meanwhile\n")
+    scr.editor.undo()                         # one step takes the apply back
+    assert scr.editor.toPlainText() == (
+        "one\ntwo\nthree\nfour\nfive, typed meanwhile\n")
+
+
+def test_apply_refuses_when_you_rewrote_the_same_lines(files, tree,
+                                                       monkeypatch):
+    win, scr = files
+    (tree / "a.md").write_text("one\ntwo\nthree\n")
+    scr._open(tree / "a.md")
+    _base, answer = _suggest(scr, monkeypatch, "one\nTWO\nthree\n")
+    scr.editor.setPlainText("one\ntwo, mine\nthree\n")
+    answer()
+    scr._apply_proposal()
+    assert scr.editor.toPlainText() == "one\ntwo, mine\nthree\n"
+    assert scr.prop_host.isVisible() and not scr.apply_btn.isEnabled()
+
+
+def test_a_reply_that_stops_early_is_flagged(files, tree, monkeypatch):
+    win, scr = files
+    body = "".join(f"line {i}\n" for i in range(1, 11))
+    (tree / "a.md").write_text(body)
+    scr._open(tree / "a.md")
+    _base, answer = _suggest(scr, monkeypatch,
+                             body.replace("line 1\n", "LINE 1\n")[:30])
+    answer()
+    assert scr.prop_warn.isVisible()
+    assert "stopped early" in scr.prop_warn.text()
+
+
+def test_merge3_cases():
+    from lumen.ui_v4.screens.files import merge3
+    base = "a\nb\nc\nd\n"
+    # separate lines: both kept
+    assert merge3(base, "a\nB\nc\nd\n", "a\nb\nc\nD\n") == "a\nB\nc\nD\n"
+    # same line: refused
+    assert merge3(base, "a\nB1\nc\nd\n", "a\nB2\nc\nd\n") is None
+    # identical change on both sides: taken once
+    assert merge3(base, "a\nB\nc\nd\n", "a\nB\nc\nd\n") == "a\nB\nc\nd\n"
+    # an insert on each side at different spots
+    assert merge3(base, "x\na\nb\nc\nd\n", "a\nb\nc\nd\ny\n") == (
+        "x\na\nb\nc\nd\ny\n")
+    # two different inserts at the same spot: refused
+    assert merge3(base, "a\nx\nb\nc\nd\n", "a\ny\nb\nc\nd\n") is None
+
+
+# ---- quitting with unsaved work (todo-fixes #88) -----------------------------
+@pytest.fixture
+def quits(monkeypatch):
+    calls = []
+    monkeypatch.setattr(QApplication.instance(), "quit",
+                        lambda: calls.append(1))
+    return calls
+
+
+def _click(win, text):
+    from lumen.ui_v4.components import Button
+    next(b for b in win.unsaved.card.findChildren(Button)
+         if b.text() == text).click()
+
+
+def test_quit_with_nothing_unsaved_just_quits(files, tree, quits):
+    win, scr = files
+    scr._open(tree / "a.md")
+    win.request_quit()
+    assert quits and not win.unsaved.isVisible()
+
+
+def test_quit_asks_about_the_open_edit_and_a_kept_draft(files, tree, quits):
+    win, scr = files
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, unsaved")
+    scr._open(tree / "b.txt")                     # a.md is now a kept draft
+    scr.editor.setPlainText("bravo, unsaved")
+    win.request_quit()
+    assert win.unsaved.isVisible() and not quits
+    _click(win, "Cancel")
+    assert not quits and scr.dirty
+    win.request_quit()
+    _click(win, "Save and quit")
+    assert quits
+    assert (tree / "a.md").read_text() == "alpha, unsaved"
+    assert (tree / "b.txt").read_text() == "bravo, unsaved"
+
+
+def test_dont_save_quits_without_writing(files, tree, quits):
+    win, scr = files
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, unsaved")
+    win.request_quit()
+    _click(win, "Don't save")
+    assert quits and (tree / "a.md").read_text() == "alpha"
+
+
+def test_save_and_quit_stays_open_when_the_disk_moved_on(files, tree, quits):
+    win, scr = files
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, mine")
+    _write_newer(tree / "a.md", "alpha, theirs")
+    win.request_quit()
+    _click(win, "Save and quit")
+    assert not quits
+    assert (tree / "a.md").read_text() == "alpha, theirs"
+    assert scr.disk_host.isVisible()
+
+
+def test_the_close_button_in_lumen_mode_asks_first(files, tree, quits):
+    win, scr = files
+    win.quit_on_close = True
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, unsaved")
+    win.close()
+    assert win.isVisible() and win.unsaved.isVisible() and not quits
+
+
+def test_quit_everything_stops_the_daemon_only_once_quitting(files, tree,
+                                                             quits,
+                                                             monkeypatch):
+    from lumen import instance_lock
+    win, scr = files
+    stopped = []
+    monkeypatch.setattr(instance_lock, "daemon_pids", lambda: [123])
+    monkeypatch.setattr(instance_lock, "terminate", stopped.append)
+    scr._open(tree / "a.md")
+    scr.editor.setPlainText("alpha, unsaved")
+    win.switch_to("settings")
+    win.screen("settings")._quit_everything()
+    assert not stopped and not quits
+    _click(win, "Cancel")
+    assert not stopped
+    win.screen("settings")._quit_everything()
+    _click(win, "Don't save")
+    assert stopped == [[123]] and quits

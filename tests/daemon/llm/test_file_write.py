@@ -35,6 +35,11 @@ def test_parse_unwraps_one_code_fence():
     assert got["content"] == "# T\nbody"
 
 
+def test_parse_keeps_a_document_that_opens_with_a_code_block():
+    doc = "```sh\nmake\n```\n\nThat builds it."
+    assert parse_file("FILENAME: x.md\n---\n" + doc)["content"] == doc
+
+
 def test_parse_needs_filename_and_separator():
     assert parse_file("---\njust a body, no filename") is None
     assert parse_file("FILENAME: x.md\nno separator line") is None

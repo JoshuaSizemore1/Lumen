@@ -28,7 +28,7 @@ from .components import (
 )
 from .overlays import (
     CommandPalette, ComposeOverlay, ConfirmOverlay, EventOverlay, RuleDialog,
-    SuggestReviewOverlay, Toast, _Overlay,
+    SuggestReviewOverlay, Toast, UnsavedOverlay, _Overlay,
 )
 
 # (key, label, icon, shortcut) — stack order; Ctrl+1..8 in this order.
@@ -235,6 +235,7 @@ class LumenWindow(QWidget):
         self.rules = RuleDialog(self, self.state)
         self.suggest_review = SuggestReviewOverlay(self, self.state)
         self.command_palette = CommandPalette(self)
+        self.unsaved = UnsavedOverlay(self)
         self.toast = Toast(self)
 
         # ---- state wiring -------------------------------------------------
@@ -690,9 +691,41 @@ class LumenWindow(QWidget):
 
     def closeEvent(self, ev):
         self._save_geometry()
-        super().closeEvent(ev)
         if self.quit_on_close:
+            ev.ignore()                  # request_quit decides, and may ask
+            self.request_quit()
+            return
+        super().closeEvent(ev)
+
+    # ---- quitting -----------------------------------------------------------
+    def request_quit(self, before=None) -> None:
+        """Every way out — the close button in `lumen` mode, the tray's Quit,
+        `lumen --quit`, Settings' Quit everything — comes here, so unsaved
+        Files edits are asked about rather than dropped (todo-fixes #88).
+        `before` runs only once the quit is really going ahead."""
+        def quit_now():
+            if before is not None:
+                before()
             QApplication.instance().quit()
+
+        files = self._screen_cache.get("files")
+        names = [p.name for p in files.unsaved()] if files is not None else []
+        if not names:
+            quit_now()
+            return
+        self._present()
+        self.unsaved.open(names, lambda: self._save_and_quit(quit_now),
+                          quit_now)
+
+    def _save_and_quit(self, quit_now) -> None:
+        failed = self._screen_cache["files"].save_unsaved()
+        if not failed:
+            quit_now()
+            return
+        self.switch_to("files")
+        self.show_toast(f"Lumen didn't quit: {', '.join(failed)} couldn't be "
+                        "saved. It may have changed on disk since you opened "
+                        "it.")
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

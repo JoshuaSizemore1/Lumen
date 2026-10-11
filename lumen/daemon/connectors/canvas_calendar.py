@@ -44,6 +44,31 @@ def body_for(action: ce.Action) -> dict:
         html_url=action.html_url, assignment_id=action.assignment_id)
 
 
+# --- 0. pre-planning cleanup (loop thread, writes) ---------------------------
+def clear_stale_kept_flags(store, queue=None) -> None:
+    """Before each planning pass:
+    1. Clear kept flags for assignments whose removal reason is gone (they
+       should resume normal sync instead of staying frozen forever).
+    2. Drop pending removals for assignments that are now eligible and have a
+       linked event — they came back before the user answered the review strip."""
+    candidates = store.calendar_candidates()
+    # Kept flags: clear when the removal reason is gone
+    kept_eligible = [r["id"] for r in candidates
+                     if r.get("calendar_event_kept")
+                     and ce.removal_reason(r) is None]
+    if kept_eligible:
+        store.clear_kept_flags(kept_eligible)
+        if queue is not None:
+            for aid in kept_eligible:
+                queue.drop_for_assignment(aid)
+    # Stale removals: drop for assignments that are now eligible and still linked
+    # (they came back; any pending removal is moot).
+    if queue is not None:
+        for r in candidates:
+            if ce.removal_reason(r) is None and r.get("calendar_event_id"):
+                queue.drop_for_assignment(r["id"])
+
+
 # --- 1. plan (loop thread, reads) --------------------------------------------
 def plan_calendar(store, prefs, now) -> list[ce.Action]:
     """What the calendar should become. Empty when the switch is off, so the
@@ -79,11 +104,16 @@ def _apply(writer, action: ce.Action) -> Result:
         eid = writer.create_event(body_for(action))
         return Result(action=action, ok=eid is not None, event_id=eid)
     if action.op == "update":
-        if writer.patch_event(action.event_id, body_for(action)):
+        result = writer.patch_event(action.event_id, body_for(action))
+        if result:
             return Result(action=action, ok=True, event_id=action.event_id)
-        # The user deleted it by hand. Clearing the link demotes the next pass to
-        # a plain create, instead of retrying a patch that can never succeed.
-        return Result(action=action, ok=False, demoted=True)
+        if result is None:
+            # 404/410: user deleted the event by hand. Clear the link so the
+            # next sync creates a fresh one instead of retrying a dead event_id.
+            return Result(action=action, ok=False, demoted=True)
+        # Transient error (5xx, auth, network): leave the link intact and retry
+        # on the next sync rather than creating a duplicate.
+        return Result(action=action, ok=False)
     if action.op == "recreate":
         writer.delete_event(action.event_id)     # 404 already counts as success
         eid = writer.create_event(body_for(action))
@@ -115,6 +145,10 @@ def commit_calendar(store, queue, alerts, results: list[Result],
                                  action.kind, action.start, action.sig)
         counts[{"create": "created", "update": "updated",
                 "recreate": "recreated"}[action.op]] += 1
+        # Drop any pending removal for this assignment: it came back (or was
+        # just created/updated), so a stale "gone" removal is moot.
+        if queue is not None:
+            queue.drop_for_assignment(action.assignment_id)
         if alerts is not None and ce.moved(action):
             alerts.add(ce.DUE_MOVED_KIND,
                        f"{action.title}: moved to {action.start}",
@@ -141,14 +175,18 @@ def finish_removal(store, queue, row: dict, approve: bool,
                    deleted: bool) -> dict:
     """Loop thread, writes.
 
-    The decline branch MUST clear the link too. Leaving it set means the diff
-    engine still sees an event attached to an ineligible assignment and re-queues
-    the identical removal on every sync, forever."""
+    Approve: the event is gone; clear the link so the diff engine doesn't retry.
+    Decline ("Keep"): mark the assignment as kept so the diff engine doesn't
+    re-propose the removal, but leave the link intact — clearing it would make
+    the next sync create a duplicate event."""
     if approve and not deleted:
         return {"ok": False, "reason": "calendar unavailable"}
     queue.resolve(row["id"], "removed" if approve else "declined")
     if row["assignment_id"] is not None:
-        store.clear_calendar_event(row["assignment_id"])
+        if approve:
+            store.clear_calendar_event(row["assignment_id"])
+        else:
+            store.set_calendar_event_kept(row["assignment_id"])
     return {"ok": True, "removed": bool(approve)}
 
 

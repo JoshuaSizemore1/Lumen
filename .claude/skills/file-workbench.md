@@ -41,11 +41,45 @@ the input is restored on the output so a regeneration never dirties it away.
 
 ## The diff preview is the confirmation
 
-The UI diffs buffer vs proposal (difflib, colored, dark card) with
-**Apply / Discard**; Apply performs the write via the same UI-local save.
-Compose precedent ("the popup is the confirmation"). Deliberately **no**
-write-grant is recorded on Apply — grants stay tied to dialogs that
-explicitly promise "future writes without asking" (Phase 4.5 / item 2).
+The UI diffs the buffer as it was when asked vs the proposal (difflib,
+colored line diff) with **Apply / Discard**. Compose precedent ("the popup is
+the confirmation"). Deliberately **no** write-grant is recorded on Apply —
+grants stay tied to dialogs that explicitly promise "future writes without
+asking" (Phase 4.5 / item 2).
+
+ui_v4 (todo-fixes #87; v3 still applies blind):
+- Apply puts the text in the editor, and Save writes it. It is a line-level
+  three-way merge (`merge3`) onto the buffer as it is *now*, so typing done
+  while the model drafted survives. If both sides changed the same lines,
+  Apply is refused with a note rather than overwriting.
+- Apply is one undo step (`_replace_text`), never `setPlainText`, which
+  would wipe undo.
+- A reply whose end is missing two or more lines of the file is flagged as
+  having probably stopped early (`cut_short`).
+- `file_write.unwrap_fence` strips a model's wrapper fence only when it
+  closes the reply's last line, and never when the original file itself
+  opens with a fence. The old rsplit cut a file that starts with a code
+  block down to that block.
+
+## The disk under the editor (ui_v4, #86)
+
+The editor remembers the disk version it loaded or last saved: a stamp of
+(mtime, size) plus the text.
+- A `QFileSystemWatcher` (inotify, no polling) watches the open file, with a
+  250 ms settle.
+- When it fires, an unedited buffer reloads (with a toast). An edited one
+  gets a banner: "Reload from disk" (Undo restores your text) or "Keep mine".
+- Save checks the disk first and refuses to write over a newer version
+  ("Save mine anyway" is the explicit override).
+- Kept drafts remember their disk version too.
+- The Ask bar's file tool and the memory distiller both write files that
+  may be open, which is why this exists.
+
+Quitting with unsaved edits or kept drafts (#88): every quit path asks
+Save / Don't save / Cancel through `LumenWindow.request_quit`. Those paths
+are the close button in `lumen` mode, the tray's Quit, `lumen --quit`, and
+Settings' Quit everything. Save never overwrites a file that changed on disk;
+Lumen stays open and says which file.
 
 ## Conversation state
 

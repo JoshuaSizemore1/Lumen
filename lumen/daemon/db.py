@@ -175,7 +175,14 @@ CREATE TABLE IF NOT EXISTS canvas_assignments (
     is_quiz INTEGER NOT NULL DEFAULT 0,
     ai_summary TEXT,
     ai_type TEXT,                             -- exam | project | reading | ...
-    ai_state INTEGER NOT NULL DEFAULT 0        -- 0 unclassified | 1 done | 2 failed
+    ai_state INTEGER NOT NULL DEFAULT 0,       -- 0 unclassified | 1 done | 2 failed
+    -- Reconcile guards: last Canvas values pushed to the linked todo.
+    -- NULL = never applied. Prevents every sync from stomping user edits.
+    applied_submitted INTEGER,               -- 0 or 1; last submitted value we pushed
+    applied_due TEXT,                        -- local YYYY-MM-DD; last due date we pushed
+    -- Calendar keep: user declined a removal (Keep button). The diff engine
+    -- must not re-propose the removal while this flag is set.
+    calendar_event_kept INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS canvas_announcements (
     id INTEGER PRIMARY KEY,                  -- Canvas discussion_topic id
@@ -273,10 +280,39 @@ def connect(db_path: Path) -> sqlite3.Connection:
                       ("updated_at", "TEXT"), ("submission_types", "TEXT"),
                       ("is_quiz", "INTEGER NOT NULL DEFAULT 0"),
                       ("ai_summary", "TEXT"), ("ai_type", "TEXT"),
-                      ("ai_state", "INTEGER NOT NULL DEFAULT 0")):
+                      ("ai_state", "INTEGER NOT NULL DEFAULT 0"),
+                      ("applied_submitted", "INTEGER"),
+                      ("applied_due", "TEXT"),
+                      ("calendar_event_kept", "INTEGER NOT NULL DEFAULT 0")):
         if col not in ca_cols:
             conn.execute(
                 f"ALTER TABLE canvas_assignments ADD COLUMN {col} {decl}")
+    # Back-fill applied_submitted/applied_due for rows that already have a linked
+    # todo. Treat the current Canvas value as already applied so the first sync
+    # after an upgrade does not stomp any local edits the user made.
+    # Guard: todo_id is not present in every migration path (the test for the
+    # additive-migration path creates a minimal table without it).
+    ca_cols_now = {r["name"]
+                   for r in conn.execute("PRAGMA table_info(canvas_assignments)")}
+    backfill = conn.execute(
+        "SELECT id, submitted, due_at FROM canvas_assignments "
+        "WHERE todo_id IS NOT NULL AND applied_submitted IS NULL"
+    ).fetchall() if "todo_id" in ca_cols_now else []
+    if backfill:
+        from datetime import datetime as _dt
+
+        def _local_day(utc_iso):
+            if not utc_iso:
+                return None
+            try:
+                return _dt.fromisoformat(utc_iso).astimezone().date().isoformat()
+            except (ValueError, TypeError):
+                return None
+        with conn:
+            conn.executemany(
+                "UPDATE canvas_assignments "
+                "SET applied_submitted = submitted, applied_due = ? WHERE id = ?",
+                [(_local_day(r["due_at"]), r["id"]) for r in backfill])
     can_cols = {r["name"] for r in conn.execute("PRAGMA table_info(canvas_announcements)")}
     if "dismissed" not in can_cols:
         conn.execute(
