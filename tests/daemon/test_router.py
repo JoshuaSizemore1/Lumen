@@ -88,7 +88,13 @@ class FakeMailStore:
             return [r for r in self.rows if label_id in r["labels"]]
         if filter == "inbox":
             return [r for r in self.rows if "INBOX" in r["labels"]]
+        if filter == "unread":
+            return [r for r in self.rows
+                    if "INBOX" in r["labels"] and not r["is_read"]][:limit]
         return self.rows
+
+    def count(self, filter="inbox", label_id=None):
+        return len(self.list_page(filter, 10_000, label_id=label_id))
 
     def user_labels(self):
         return self.labels
@@ -154,6 +160,9 @@ class FakeMailSync:
     async def mark_read(self, mid, read):
         self.marked.append((mid, read))
         return True
+
+    async def receipt_read(self, mid):
+        return await self.mark_read(mid, True)
 
     async def fetch_html(self, mid):
         self.html_fetched.append(mid)
@@ -908,7 +917,7 @@ async def test_classifier_send_email_routes_to_compose(monkeypatch):
                     mail_store=FakeMailStore(), bridge=FakeBridge(),
                     confirm=object(), model_router=FakeModelRouter())
 
-    async def fake_compose(message):
+    async def fake_compose(message, open_email=None):
         yield {"chunk": "compose opened"}
         yield {"done": True}
 
@@ -946,7 +955,28 @@ async def test_chat_tool_error_fed_back_to_model():
     assert any(o.get("chunk", "").startswith("done: tool error:") for o in out)
 
 
-async def test_chat_capped_yields_stopped_message():
+async def test_chat_capped_uses_salvage_content():
+    # New behaviour (#96): a capped event that carries salvage text must yield
+    # that text, not the generic "stopped after…" message.
+    class CapLLM:
+        model = None
+
+        async def chat_with_tools(self, messages, tools, executor, *, model=None, max_iterations=4):
+            yield {"tool_call": {"name": "list_directory", "arguments": {}}}
+            await executor("list_directory", {})
+            yield {"content": "The directory contains: foo.txt, bar.txt", "capped": True}
+
+    out = await collect(Router(CapLLM(), FakeStore(), bridge=FakeBridge(), model_router=FakeModelRouter()),
+                        "chat", {"message": "look up files"})
+    chunks = "".join(o.get("chunk", "") for o in out)
+    assert "foo.txt" in chunks
+    assert "stopped after several tool steps" not in chunks
+    assert out[-1] == {"done": True}
+
+
+async def test_chat_capped_empty_falls_back_to_stopped_message():
+    # When the capped event has no usable content, fall back to the generic
+    # message so the user is never left with a silent blank reply.
     class CapLLM:
         model = None
 
@@ -1909,6 +1939,24 @@ async def test_create_chat_tool_side_failure_reports_not_created():
     assert cal.synced == 0            # nothing created -> no eager re-sync
 
 
+@pytest.mark.parametrize("approve", [True, False])
+async def test_calendar_create_from_the_form_says_if_it_was_cancelled(approve):
+    # The New-event form's exact shape (naive local "YYYY-MM-DDTHH:MM", no
+    # end), and the flag it uses to tell "you said no" from a failure (#99).
+    from datetime import date, timedelta
+    from lumen.daemon.confirm import ConfirmBroker
+    broker = ConfirmBroker()
+    router = create_router(bridge=FakeBridge(result="Created: Dentist"),
+                           broker=broker)
+    day = (date.today() + timedelta(days=3)).isoformat()
+    events = await drive_oneshot(
+        router, "calendar.create",
+        {"proposal": {"title": "Dentist", "start": f"{day}T09:30",
+                      "location": None}}, broker, approve)
+    r = events[-1]["result"]
+    assert r["created"] is approve and r["cancelled"] is (not approve)
+
+
 # ---- calendar.delete (confirm-gated, UI one-shot) ----
 
 async def drive_oneshot(router, type_, payload, broker, approve):
@@ -2747,6 +2795,30 @@ def rules_router(tmp_path, store=None, sync=None, broker=None):
     return router, rules, store, sync
 
 
+async def test_a_rule_only_label_lists_as_an_empty_mailbox(tmp_path):
+    # The nav offers every rule's label (#36); Gmail may not have it yet.
+    # Clicking it toasted "unknown label" over the old mailbox's mail (#108).
+    router, rules, _store, _sync = rules_router(tmp_path)
+    rules.add({"label": "Receipts", "from_addrs": [], "domains": ["shop.com"],
+               "subject_kw": [], "body_kw": []})
+    out = await collect(router, "emails.list",
+                        {"filter": "label", "label": "Receipts"})
+    r = out[-1]["result"]
+    assert r["emails"] == [] and "Receipts" in r["labels"]
+    out = await collect(router, "emails.list",
+                        {"filter": "label", "label": "Nowhere"})
+    assert out[-1] == {"error": "unknown label"}
+
+
+async def test_every_list_carries_the_inbox_unread_tally(tmp_path):
+    # Sent, a label, any page: the badge and Today count the inbox (#103).
+    router, _rules, store, _sync = rules_router(tmp_path)
+    out = await collect(router, "emails.list", {"filter": "sent"})
+    tally = out[-1]["result"]["inbox_unread"]
+    assert tally["total"] == 1
+    assert [m["id"] for m in tally["newest"]] == ["m1"]
+
+
 async def test_rules_list_carries_labels_vocab(tmp_path):
     router, rules, _store, _sync = rules_router(tmp_path)
     out = await collect(router, "rules.list", {})
@@ -2766,7 +2838,9 @@ async def test_rules_create_confirms_saves_and_backfills(tmp_path):
             req = ev["confirm_request"]
             assert req["title"] == "Create mail rule"
             assert ("Label", "Bills") in [tuple(r) for r in req["rows"]]
-            assert "1 matching" in req["check"]["label"]   # m1 is from a@x.com
+            # The keys the v3/v4 confirm overlays read (todo-fixes #95).
+            assert "1 matching" in req["check_label"]   # m1 is from a@x.com
+            assert req["check_default"] is True
             # #78: the confirm names what the rule would catch
             examples = dict(map(tuple, req["rows"]))["For example"]
             assert "a@x.com" in examples and examples.count("\n") == 0
@@ -3144,6 +3218,126 @@ async def test_chat_compose_reply_hint_prefills_from_mirror():
     assert seen["subject"] == "Re: Engines" and seen["reply_to"] == "m1"
 
 
+# ---- #100: "Reply to this" answers the email open in Mail -------------------
+
+class _ReplyMailStore(FakeMailStore):
+    def search(self, query, limit=50):
+        q = query.lower()
+        return [r for r in self.rows
+                if q in f"{r['subject']} {r['body']}".lower()][:limit]
+
+
+def _reply_store():
+    store = _ReplyMailStore()
+    store.rows += [
+        {"id": "m2", "sender": "Bob Smith <bob@x.com>", "subject": "Lunch?",
+         "snippet": "", "body": "Free for lunch Thursday at noon?",
+         "labels": ["INBOX"], "received_at": "2026-07-11T10:00:00+00:00",
+         "is_read": True, "attachments": [], "thread_id": "t2",
+         "recipients": "me@x.com"},
+        # My own reply to Ada — the newest "engine" match.
+        {"id": "m3", "sender": "Me <me@x.com>", "subject": "Re: Engines",
+         "snippet": "", "body": "Will do.", "labels": ["SENT"],
+         "received_at": "2026-07-12T10:00:00+00:00", "is_read": True,
+         "attachments": [], "thread_id": "t1",
+         "recipients": "Ada <a@x.com>"},
+    ]
+    return store
+
+
+async def _drive_reply(router, message, open_email=None):
+    seen = {}
+    payload = {"message": message}
+    if open_email:
+        payload["open_email"] = open_email
+    async for ev in router.handle("chat", payload):
+        if "compose_request" in ev:
+            seen.update(ev["compose_request"])
+            router._confirm.resolve(ev["compose_id"], False)
+    return seen
+
+
+REPLY_JSON = ('{"to": [], "cc": [], "subject": "", "body": "Thursday works!", '
+              '"reply_hint": null}')
+
+
+async def test_reply_to_this_answers_the_open_email():
+    llm = FakeLLM((REPLY_JSON,))
+    router = compose_router(llm, store=_reply_store())
+    seen = await _drive_reply(router, "reply to this",
+                              {"id": "m2", "subject": "Lunch?", "from": "Bob"})
+    assert seen["to"] == ["bob@x.com"] and seen["reply_to"] == "m2"
+    assert seen["subject"] == "Re: Lunch?"
+    # The draft saw what it answers, fenced as data.
+    prompt = llm.messages[-1]["content"]
+    assert "Free for lunch Thursday" in prompt and "<email>" in prompt
+
+
+async def test_reply_saying_with_an_open_email_needs_no_search():
+    llm = FakeLLM(('{"to": [], "cc": [], "subject": "", "body": "Yes!", '
+                   '"reply_hint": "costco"}',))
+    router = compose_router(llm, store=_reply_store())
+    seen = await _drive_reply(router, "respond saying yes",
+                              {"id": "m2", "subject": "Lunch?", "from": "Bob"})
+    assert seen["reply_to"] == "m2" and seen["to"] == ["bob@x.com"]
+
+
+async def test_naming_another_email_does_not_use_the_open_one():
+    reply_json = ('{"to": [], "cc": [], "subject": "", "body": "Thanks!", '
+                  '"reply_hint": "engine"}')
+    router = compose_router(FakeLLM((reply_json,)), store=_reply_store())
+    seen = await _drive_reply(router, "reply to ada's email about engines",
+                              {"id": "m2", "subject": "Lunch?", "from": "Bob"})
+    assert seen["reply_to"] == "m1"
+
+
+async def test_a_search_reply_skips_my_own_sent_mail():
+    # The newest "engine" match is my own reply: To used to be me.
+    reply_json = ('{"to": [], "cc": [], "subject": "", "body": "Thanks!", '
+                  '"reply_hint": "engine"}')
+    router = compose_router(FakeLLM((reply_json,)), store=_reply_store())
+    seen = await _drive_reply(router, "reply to ada's email about engines")
+    assert seen["reply_to"] == "m1" and seen["to"] == ["a@x.com"]
+
+
+async def test_replying_to_my_own_sent_mail_goes_to_its_recipient():
+    router = compose_router(FakeLLM((REPLY_JSON,)), store=_reply_store())
+    seen = await _drive_reply(router, "reply to this",
+                              {"id": "m3", "subject": "Re: Engines"})
+    assert seen["to"] == ["a@x.com"] and seen["subject"] == "Re: Engines"
+
+
+@pytest.mark.parametrize("message,means_open", [
+    ("reply to this", True),
+    ("reply to her saying thanks", True),
+    ("respond saying that works", True),
+    ("reply to Bob saying yes", True),          # Bob sent the open email
+    ("reply to Sam saying I'll do it", False),  # "it" isn't the target here
+    ("reply to the email from Sam", False),
+    ("reply to Sam's email about the budget", False),
+    ("what's the weather", False),
+])
+def test_which_replies_mean_the_open_email(message, means_open):
+    from lumen.daemon.router import _replies_to_open
+    bob = {"sender": "Bob Smith <bob@x.com>"}
+    assert _replies_to_open(message, bob) is means_open
+
+
+async def test_answer_this_is_not_routed_to_compose():
+    # "answer this: …" with an email open is a question, not a reply.
+    router = compose_router(FakeLLM(("4",)), store=_reply_store())
+    seen = await _drive_reply(router, "answer this: what's 2+2",
+                              {"id": "m2", "subject": "Lunch?", "from": "Bob"})
+    assert seen == {}
+
+
+async def test_reply_to_this_without_an_open_email_is_not_a_compose():
+    # No email open: "reply to this" has nothing to answer.
+    router = compose_router(FakeLLM(("hmm",)), store=_reply_store())
+    seen = await _drive_reply(router, "reply to this")
+    assert seen == {}
+
+
 async def test_chat_compose_unparseable_draft_is_honest_chat():
     router = compose_router(FakeLLM(("no json here",)))
     out = await collect(router, "chat", {"message": "send an email to sam@x.com"})
@@ -3212,7 +3406,9 @@ async def test_emails_revise_oneshot():
     router = compose_router(FakeLLM(('{"subject": "S2", "body": "B2"}',)))
     out = await collect(router, "emails.revise",
                         {"subject": "S", "body": "B", "instruction": "shorter"})
-    assert out == [{"result": {"subject": "S2", "body": "B2"}}]
+    # `ok` is what both composers gate on — without it every revise read as
+    # "Revision failed." (todo-fixes #93).
+    assert out == [{"result": {"subject": "S2", "body": "B2", "ok": True}}]
 
 
 async def test_compose_response_expired_id_still_sends():
@@ -3223,6 +3419,16 @@ async def test_compose_response_expired_id_still_sends():
                         {"compose_id": 999, "send": True,
                          "fields": {"to": ["a@x.com"], "subject": "s", "body": "b"}})
     assert sync.sent and out[0]["result"]["ok"] is True
+
+
+async def test_compose_response_expired_without_gmail_says_so():
+    # It used to answer ok with no message, so the Send vanished (#111).
+    router = Router(FakeLLM(), FakeStore(), confirm=ConfirmBroker())
+    out = await collect(router, "compose.response",
+                        {"compose_id": 999, "send": True,
+                         "fields": {"to": ["a@x.com"], "subject": "s", "body": "b"}})
+    r = out[0]["result"]
+    assert r["ok"] is False and "nothing was sent" in r["message"]
 
 
 async def test_compose_response_cancel_never_sends():
@@ -5237,74 +5443,25 @@ async def test_settings_get_reports_model_enabled(tmp_path):
 
 # --- concurrent IPC: which routes must still take their turn (#60/#64) -------
 
-def test_model_and_confirm_routes_are_exclusive():
-    from lumen.daemon.router import EXCLUSIVE_ROUTES
-    assert "chat" in EXCLUSIVE_ROUTES                  # a model turn
-    assert "mail.suggest_labels" in EXCLUSIVE_ROUTES   # a model turn
-    assert "emails.delete" in EXCLUSIVE_ROUTES         # parks on a confirm
-    assert "calendar.create" in EXCLUSIVE_ROUTES       # parks on a confirm
-    # The routes the whole point of the change is to let run concurrently.
+def test_route_locks():
+    router = Router(FakeLLM(), FakeStore())
+    # A chat is a model turn AND the one signal stream.
+    assert router.locks_for("chat") == ("stream", "model")
+    for model in ("mail.suggest_labels", "emails.revise", "briefing.today",
+                  "warm"):
+        assert router.locks_for(model) == ("model",)
+    # Confirm-gated routes hold nothing for their whole run: the broker shows
+    # one dialog at a time and hands the model back while it waits (#94).
+    for gated in ("emails.delete", "calendar.create", "rules.create"):
+        assert router.locks_for(gated) == ()
+    # The routes the whole point of #60/#64 is to let run concurrently.
     for free in ("emails.get", "emails.list", "emails.auto_read",
                  "canvas.status", "settings.get", "todos.list"):
-        assert free not in EXCLUSIVE_ROUTES
+        assert router.locks_for(free) == ()
     # confirm.response is what UNBLOCKS a waiting confirm — making it wait its
     # turn behind the request it is answering would deadlock every gated write.
-    assert "confirm.response" not in EXCLUSIVE_ROUTES
-
-
-def test_every_confirm_gated_route_is_declared_exclusive():
-    """Drift guard. A route that awaits the user's confirmation parks on a modal
-    the UI can only show one of; if a new one is added and left out of
-    EXCLUSIVE_ROUTES, two dialogs can race and the older one silently times out
-    into a deny. This reads the dispatch itself rather than trusting the list."""
-    import re
-    from pathlib import Path
-
-    from lumen.daemon.router import EXCLUSIVE_ROUTES
-
-    src = Path("lumen/daemon/router.py").read_text().splitlines()
-    defs = [(i, re.match(r"\s*(?:async )?def (\w+)", ln).group(1))
-            for i, ln in enumerate(src, 1)
-            if re.match(r"\s*(?:async )?def \w+", ln)]
-
-    # Only call sites inside handle()'s own dispatch map to a route. A helper
-    # calling another helper (the chat path does) is reached through whichever
-    # branch called IT, and `chat` is already exclusive.
-    start = next(i for i, name in defs if name == "handle")
-    end = next((i for i, _ in defs if i > start), len(src) + 1)
-    # Helpers that block on the user, minus handle() itself (that call site is
-    # confirm.response, the resolver).
-    gated = {name for line, name in
-             ((ln, [d for d in defs if d[0] <= ln][-1][1])
-              for ln, text in enumerate(src, 1) if "_confirm.wait(" in text)
-             if name != "handle"}
-    assert gated, "found no confirm-gated helpers — has the parse drifted?"
-
-    # Which dispatch branch each gated helper is reached from.
-    branches = [(i, m.group(1)) for i, ln in enumerate(src, 1)
-                if (m := re.search(r"(?:el)?if type_ (?:==|in) (.+):", ln))]
-    missing = []
-    for line, text in enumerate(src, 1):
-        if not (start < line < end):
-            continue
-        called = [h for h in gated if h + "(" in text and "def " not in text]
-        if not called:
-            continue
-        before = [b for b in branches if b[0] <= line]
-        if not before:
-            continue
-        expr = before[-1][1]
-        if expr == "MAIL_GATES":            # a dict of route names
-            from lumen.daemon.router import MAIL_GATES
-            names = list(MAIL_GATES)
-        else:
-            names = re.findall(r'"([^"]+)"', expr)
-        for name in names:
-            if name != "confirm.response" and name not in EXCLUSIVE_ROUTES:
-                missing.append((name, called[0]))
-    assert not missing, (
-        f"these routes block on a confirm but are not in EXCLUSIVE_ROUTES, so "
-        f"they can now overlap another dialog: {missing}")
+    assert router.locks_for("confirm.response") == ()
+    assert router.locks_for("compose.response") == ()
 
 
 # --- #54: the screen you are on is a routing prior ---------------------------

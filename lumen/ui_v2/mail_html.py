@@ -17,12 +17,22 @@ Plain-text bodies get their own path (todo-fixes #16/#17). They must never
 reach a rich-text widget raw: QLabel defaults to Qt::AutoText, whose
 mightBeRichText() heuristic fires on ordinary prose — "a < b and c > d" renders
 as "a d", silently eating the message. `plain_to_html` escapes first, then
-rebuilds the layout a mail reader is expected to show."""
+rebuilds the layout a mail reader is expected to show.
+
+`inline_remote_images` fetches with a bounded thread pool (todo-fixes #112):
+_POOL_SIZE workers in parallel, overall deadline _TOTAL_DEADLINE so even a page
+with 20 slow images shows within a few seconds. SSRF: every URL is resolved
+before fetching and refused if it maps to a loopback, private, link-local, or
+otherwise reserved address."""
 
 import base64
+import concurrent.futures
 import html as _html
+import ipaddress
 import re
+import socket as _socket
 import urllib.request
+from urllib.parse import urlparse
 
 _IMG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _SRC = re.compile(r"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
@@ -31,6 +41,9 @@ _FETCH_TIMEOUT = 6.0
 _MAX_BYTES = 3_000_000
 _MAX_IMAGES = 80
 _UA = "Mozilla/5.0 (Lumen local mail reader)"
+
+_POOL_SIZE = 6            # concurrent image-fetch threads per message (#112)
+_TOTAL_DEADLINE = 8.0     # overall per-message deadline (seconds)    (#112)
 
 # The paper card HtmlBody paints on. Text must stay legible against this.
 CARD_BG = "#ffffff"
@@ -61,12 +74,49 @@ def strip_remote_images(html: str) -> str:
         html or "")
 
 
+def _is_private_host(url: str) -> bool:
+    """True when the URL's hostname resolves to a loopback, private, link-local,
+    or otherwise reserved address — or when resolution fails. Prevents the image
+    loader from being used as an SSRF probe against local services (#112)."""
+    try:
+        hostname = urlparse(url).hostname
+        if not hostname:
+            return True
+        for _fam, _typ, _proto, _canon, sockaddr in _socket.getaddrinfo(
+                hostname, None):
+            try:
+                ip = ipaddress.ip_address(sockaddr[0])
+            except ValueError:
+                continue
+            if (ip.is_loopback or ip.is_private or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return True
+    except OSError:
+        return True   # can't resolve → refuse
+    return False
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    """A public image URL may not redirect the loader onto the LAN either:
+    tracking pixels redirect all the time (#112)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _is_private_host(newurl):
+            return None              # urllib raises; the fetch yields no image
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_PublicRedirects)
+
+
 def _fetch_data_uri(url: str) -> str | None:
     if url.startswith("//"):
         url = "https:" + url
+    if _is_private_host(url):
+        return None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
-        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as resp:
+        with _OPENER.open(req, timeout=_FETCH_TIMEOUT) as resp:
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             data = resp.read(_MAX_BYTES + 1)
     except Exception:
@@ -80,21 +130,60 @@ def _fetch_data_uri(url: str) -> str | None:
     return f"data:{ctype};base64," + base64.b64encode(data).decode("ascii")
 
 
-def inline_remote_images(html: str) -> str:
-    """Fetch each remote image once and rewrite its src to a data: URI; drop the
-    ones that fail or are cid: attachment parts (no broken boxes left behind).
-    Blocking network — call it off the GUI thread."""
-    cache: dict[str, str | None] = {}
+def inline_remote_images(html: str, *, deadline: float = _TOTAL_DEADLINE) -> str:
+    """Fetch remote images in parallel (up to _POOL_SIZE threads) and rewrite
+    each src to a data: URI. Images not fetched within `deadline` seconds, or
+    that fail or that resolve to private/loopback addresses, are dropped (no
+    broken boxes). cid: parts are always dropped. Blocking — call off GUI (#112).
+    """
+    # --- collect unique remote URLs in document order -------------------------
+    unique_urls: list[str] = []
+    seen: set[str] = set()
+    for tag in _IMG.findall(html or ""):
+        src = _src_of(tag)
+        if _is_remote(src) and not src.lower().startswith("cid:") and src not in seen:
+            if len(seen) < _MAX_IMAGES:
+                seen.add(src)
+                unique_urls.append(src)
 
+    # --- fetch in parallel with a bounded pool and an overall deadline --------
+    results: dict[str, str | None] = {}
+    if unique_urls:
+        n_workers = min(_POOL_SIZE, len(unique_urls))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=n_workers)
+        try:
+            futures = {pool.submit(_fetch_data_uri, url): url
+                       for url in unique_urls}
+            try:
+                for fut in concurrent.futures.as_completed(
+                        futures, timeout=deadline):
+                    url = futures[fut]
+                    try:
+                        results[url] = fut.result()
+                    except Exception:
+                        results[url] = None
+            except concurrent.futures.TimeoutError:
+                pass   # remaining futures timed out — they stay None below
+        finally:
+            # Don't block on slow threads; already-running ones finish on their
+            # own (socket timeout caps them at _FETCH_TIMEOUT).
+            pool.shutdown(wait=False, cancel_futures=True)
+        # Any URL not yet in results expired before we could collect it.
+        for url in unique_urls:
+            if url not in results:
+                results[url] = None
+
+    # --- rewrite the HTML -----------------------------------------------------
     def repl(m: re.Match) -> str:
         tag, src = m.group(0), _src_of(m.group(0))
-        if not _is_remote(src) or src.lower().startswith("cid:"):
-            return "" if src.lower().startswith("cid:") else tag
-        if src not in cache:
-            cache[src] = _fetch_data_uri(src) if len(cache) < _MAX_IMAGES else None
-        data_uri = cache[src]
-        return "" if not data_uri else _SRC.sub(
-            lambda _m: f'src="{data_uri}"', tag, count=1)
+        if src.lower().startswith("cid:"):
+            return ""
+        if not _is_remote(src):
+            return tag
+        data_uri = results.get(src)
+        if not data_uri:
+            return ""
+        return _SRC.sub(lambda _m: f'src="{data_uri}"', tag, count=1)
 
     return _IMG.sub(repl, html or "")
 
@@ -166,6 +255,9 @@ _WIDTH_ATTR = re.compile(r"""\bwidth\s*=\s*(?:"(\d+)"|'(\d+)'|(\d+))""", re.IGNO
 _WIDTH_CSS = re.compile(r"\b(min-width|width)\s*:\s*(\d+)\s*px", re.IGNORECASE)
 _COLOR_CSS = re.compile(r"\bcolor\s*:\s*(#[0-9a-f]{3,8}|rgba?\([^)]*\))",
                         re.IGNORECASE)
+_BG_CSS = re.compile(
+    r"\bbackground(?:-color)?\s*:\s*(#[0-9a-f]{3,8}|rgba?\([^)]*\))",
+    re.IGNORECASE)
 _BGCOLOR = re.compile(r"\bbgcolor\s*=\s*(?:\"[^\"]*\"|'[^']*'|\S+)", re.IGNORECASE)
 _TABLE_TAG = re.compile(r"<(table|td|th)\b[^>]*>", re.IGNORECASE)
 _HAS_WIDTH_ATTR = re.compile(r"\swidth\s*=", re.IGNORECASE)
@@ -343,14 +435,37 @@ def _drop_hidden(html: str) -> str:
     return "".join(out)
 
 
+# A background darker than this can't carry CARD_FG at 4.5:1 contrast.
+_DARK_BG = 0.24
+
+
 def _fix_invisible_text(html: str) -> str:
-    """Light-on-dark mail goes invisible on the white paper card. Any text
-    colour too pale to read against it is dropped so it inherits CARD_FG —
-    dropping beats recolouring, which would fight the sender's own palette."""
-    def repl(m):
-        lum = _luminance(m.group(1))
-        return "" if lum is not None and lum > 0.72 else m.group(0)
-    return _COLOR_CSS.sub(repl, html)
+    """Light-on-dark mail goes invisible on the white paper card.
+
+    Any text colour too pale to read against CARD_BG is dropped so it
+    inherits CARD_FG (dropping beats recolouring, which fights the sender's own
+    palette). So any CSS background too dark to carry CARD_FG goes too, as
+    every bgcolor= attribute already does: the dark header/footer bands and
+    buttons kept their background while their white text turned dark (#102).
+    The band is usually a container (`<td style="background:#222">`) and the
+    pale colour an element inside it, so this can't be decided per element."""
+
+    def _fix_style(css: str) -> str:
+        def drop_light(m):
+            lum = _luminance(m.group(1))
+            return "" if lum is not None and lum > 0.72 else m.group(0)
+
+        def drop_dark_bg(m):
+            lum = _luminance(m.group(1))
+            return "" if lum is not None and lum < _DARK_BG else m.group(0)
+        return _BG_CSS.sub(drop_dark_bg, _COLOR_CSS.sub(drop_light, css))
+
+    def repl_style(m):
+        inner = m.group(1) if m.group(1) is not None else m.group(2)
+        quote = '"' if m.group(1) is not None else "'"
+        return f'style={quote}{_fix_style(inner)}{quote}'
+
+    return _STYLE_ATTR.sub(repl_style, html)
 
 
 def prepare_html(html: str, max_width: int = CONTENT_WIDTH, *,

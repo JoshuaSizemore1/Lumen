@@ -272,3 +272,37 @@ def test_paused_sync_shows_paused_not_failed(live_canvas):
     _p, cb = data.last("canvas.reconcile_now")
     cb({"ok": False, "reason": "paused"})
     assert scr.status_badge.text() != "Sync failed"
+
+
+# ============================================================================
+# Announcement label plain-text safety (#101)
+# ============================================================================
+
+def test_announcement_labels_are_plain_text(canvas, qtbot):
+    """Announcement title and preview labels must use PlainText format so
+    QLabel's AutoText heuristic can't mangle angle-brackets (#101)."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QLabel
+    win, scr = canvas
+    ann = {
+        "id": "a1",
+        "title": "a < b and c > d — <b>Note</b>",
+        "message": "<p>Some <strong>announcement</strong> body with a &lt; b</p>",
+        "course_code": "CS 1000",
+        "course_name": "Intro CS",
+        "posted_at": "2026-10-01T12:00:00Z",
+        "actionable": False,
+        "todo_id": None,
+        "html_url": None,
+    }
+    scr._ann_data = [ann]
+    scr._render_announcements({"announcements": [ann]})
+    qtbot.wait(10)
+
+    labels = scr.findChildren(QLabel)
+    # Find labels that contain the title text (plain: "a < b...")
+    title_labels = [lb for lb in labels if "< b" in lb.text() or "&lt;" in lb.text()]
+    # All such labels must use PlainText, not AutoText
+    for lb in title_labels:
+        assert lb.textFormat() == Qt.TextFormat.PlainText, (
+            f"Label '{lb.text()!r}' is not in PlainText format")

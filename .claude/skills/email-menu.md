@@ -73,7 +73,13 @@ This table is a much fuller mirror of your inbox than the metadata-only cache us
   is a deliberate click and the delay only read as "auto-read is broken".
   Programmatic selection (`_set_mails` picking the first row) never marks
   anything. Explicit mark read/unread is also ungated — consistency with the
-  silent path.
+  silent path. A receipt Gmail doesn't get (offline) is queued in
+  `sync_state` (`gmail_pending_read`) and replayed at the start of the next
+  sync (`GmailSync.receipt_read`, todo-fixes #110): incremental sync only
+  brings Gmail's own changes, so nothing else would re-align them.
+- The mirror never holds TRASH / SPAM / DRAFT mail (#104): history deltas
+  that add one delete the row, a TRASH or SPAM removal re-fetches it (Gmail's
+  Undo in the same poll window included), and every query excludes them.
 - Archive still confirms. **Delete built 2026-07-19** (new-features item 8):
   delete = Gmail **Trash** (recoverable ~30 days, dialog says so), behind the
   same confirm gate as archive (`router.MAIL_GATES` drives both). A

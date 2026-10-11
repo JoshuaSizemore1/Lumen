@@ -217,8 +217,8 @@ class TodosScreen(LazyRebuild, QWidget):
         prow.addWidget(add)
         v.addWidget(panel)
         v.addSpacing(7)
-        v.addWidget(label("#tag sets a tag · a weekday sets the due date", 9.5,
-                          T.TEXT_FAINTER, mono=True))
+        v.addWidget(label("#tag sets a tag · plain weekday / today / tomorrow sets due date",
+                          9.5, T.TEXT_FAINTER, mono=True))
         v.addSpacing(18)
 
         vis = self._visible()

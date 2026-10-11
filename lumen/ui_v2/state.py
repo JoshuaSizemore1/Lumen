@@ -180,6 +180,16 @@ class AppState(QObject):
         self.mail_labels: list[str] = []
         self.mail_suggestions: dict[str, str] = {}
         self.mail_suggestion_meta: dict[str, dict] = {}   # id -> preview row (#32)
+        self.mail_query = ""          # the Mail search in force, if any (#109)
+        self._open_on_load: str | None = None   # see open_mail
+        # (scope, query) self.mails was loaded for: a failed load of another
+        # view mustn't leave its mail under the new title (#108), and only a
+        # reload of the same view keeps the selection near where it was (#109).
+        self._mails_view: tuple | None = None
+        # The inbox's unread mail, whatever list Mail shows (#103). None until
+        # the daemon first says; until then the count falls back to the list.
+        self.inbox_unread_total: int | None = None
+        self.inbox_unread: list[dict] = []
         # Remote images load on open (todo-fixes #18). Mirrors
         # [mail] load_remote_images; refreshed from the daemon on startup so a
         # user who turns it off gets the click-to-load bar back.
@@ -257,15 +267,20 @@ class AppState(QObject):
         if self._data is not None:
             self._data.request("emails.revise", fields, cb, on_error=on_error)
 
-    def respond_compose(self, compose_id: int, fields: dict | None, cb=None) -> None:
+    def respond_compose(self, compose_id: int, fields: dict | None, cb=None,
+                        on_error=None) -> None:
         """Answer a chat-driven compose; fields=None cancels. Travels on the
-        dedicated confirm client — the chat connection is blocked awaiting it."""
+        dedicated confirm client — the chat connection is blocked awaiting it.
+        on_error fires if the answer never lands (daemon down), so a Send can
+        give the draft back (todo-fixes #111)."""
         if self._confirm is not None:
             self._confirm.request(
                 "compose.response",
                 {"compose_id": compose_id, "send": fields is not None,
                  "fields": fields or {}},
-                cb or (lambda _r: None))
+                cb or (lambda _r: None), on_error=on_error)
+        elif on_error is not None:
+            on_error("not connected")
 
     def sleep_model(self) -> None:
         if self._chat is not None:
@@ -768,10 +783,29 @@ class AppState(QObject):
 
     # ---- mail (live from the daemon mirror; sample rows without a daemon) ----
     def unread_count(self) -> int:
+        """Unread mail in the inbox, not in whatever list Mail loaded last:
+        Sent or a search used to read as "Inbox clear" (todo-fixes #103)."""
+        if self.inbox_unread_total is not None:
+            return self.inbox_unread_total
         return sum(1 for m in self.mails if m["unread"])
 
     def unread_mails(self) -> list[dict]:
+        """The newest unread inbox mail (the daemon sends up to 10)."""
+        if self.inbox_unread_total is not None:
+            return self.inbox_unread
         return [m for m in self.mails if m["unread"]]
+
+    def _inbox_unread_read(self, mid: str) -> None:
+        """A message just opened: take it off the inbox's unread tally now,
+        so the badge doesn't wait for the next list load."""
+        if self.inbox_unread_total is None:
+            return
+        listed = any(m["id"] == mid for m in self.inbox_unread)
+        in_inbox = (self.mail_scope in ("inbox", "unread")
+                    and not self.mail_query)
+        if listed or in_inbox:
+            self.inbox_unread = [m for m in self.inbox_unread if m["id"] != mid]
+            self.inbox_unread_total = max(0, self.inbox_unread_total - 1)
 
     def sel_mail(self) -> dict | None:
         return next((m for m in self.mails if m["id"] == self.selected_mail),
@@ -787,6 +821,22 @@ class AppState(QObject):
         self.fetch_body_html(mid)
         self._prefetch_neighbours(mid)
         self.mails_changed.emit()
+
+    def open_mail(self, mid: str) -> None:
+        """Open one message from outside Mail (Today's unread list). Since
+        the unread tally follows the inbox (#103), it may not be in the list
+        Mail last loaded (Sent, a search): then show the inbox and open it
+        when that arrives, rather than showing whatever row is first."""
+        if any(m["id"] == mid for m in self.mails):
+            self.select_mail(mid)
+            return
+        self._open_on_load = mid
+        self.selected_mail = mid
+        self.mail_query = ""
+        if self.mail_scope != "inbox":
+            self.set_mail_scope("inbox")
+        else:
+            self.refresh_mails()
 
     def select_mail_quiet(self, mid: str):
         """Select without marking read — what the arrow keys use (#50).
@@ -839,31 +889,50 @@ class AppState(QObject):
         rather than a race, and a guard is required, not merely tidy."""
         self._mail_req += 1
         mine = self._mail_req
+        view = (self.mail_scope, self.mail_query)
 
         def accept(result):
             if mine == self._mail_req:
-                self._set_mails(result)
+                self._set_mails(result, view)
         return accept
 
     def _list_request(self, type_: str, payload: dict) -> None:
         """A mail list request whose reply — or failure — only counts if it's
-        still the newest. A failure keeps the mails already shown, records
-        why, and emits so a loading skeleton can give way."""
+        still the newest. A failure keeps the mails already shown when they
+        belong to this view, records why, and emits so a loading skeleton can
+        give way."""
         accept = self._list_epoch()
         mine = self._mail_req
+        view = (self.mail_scope, self.mail_query)
 
         def fail(msg):
             if mine == self._mail_req:
                 self.mail_error = msg
+                if view != self._mails_view:
+                    # Another mailbox's mail under this one's title (#108).
+                    self.mails, self.selected_mail = [], None
+                    self._mails_view = view
                 self.mails_changed.emit()
         self._data.request(type_, payload, accept, on_error=fail)
 
-    def _set_mails(self, result: dict) -> None:
+    def _set_mails(self, result: dict, view: tuple | None = None) -> None:
         # emails.search responses carry only {"emails": [...]} — no status
         # keys — so absent keys must fall back to the PRIOR state, not a
         # reset default, or a search while disconnected would flip the
         # status to "connected"/"synced".
+        old = {m["id"]: m for m in self.mails}
+        old_ids = list(old)
+        same_view = view is not None and view == self._mails_view
+        self._mails_view = view
         self.mails = [_norm_mail(r) for r in result.get("emails", [])]
+        # A reload after star / label / mark-unread keeps the HTML already
+        # fetched: the open message no longer flashes "Loading message…" and
+        # loses its scroll (#109). A message's body never changes.
+        for m in self.mails:
+            prev = old.get(m["id"])
+            if m["body_html"] is None and prev is not None:
+                m["body_html"] = prev.get("body_html")
+        self._take_inbox_unread(result)
         self.mail_error = None
         self.mail_connected = result.get("connected", self.mail_connected)
         self.mail_syncing = result.get("syncing", self.mail_syncing)
@@ -875,16 +944,42 @@ class AppState(QObject):
         counts = result.get("counts")
         if counts:
             self.mail_total = counts.get("total", self.mail_total)
-        if self.selected_mail not in {m["id"] for m in self.mails}:
-            self.selected_mail = self.mails[0]["id"] if self.mails else None
+        ids = {m["id"] for m in self.mails}
+        pending, self._open_on_load = self._open_on_load, None
+        if pending in ids:
+            self.selected_mail = pending
+            self.auto_read(pending)      # an open from Today is a deliberate one
+        elif self.selected_mail not in ids:
+            self.selected_mail = self._next_selection(old_ids, ids, same_view)
         if self.selected_mail is not None:
             self.fetch_body_html(self.selected_mail)   # pane shows it right away
         self.mails_changed.emit()
+
+    def _take_inbox_unread(self, result: dict) -> None:
+        """emails.list / mail.refresh carry the inbox's unread tally whatever
+        they list (#103); a search reply doesn't, and keeps the last one."""
+        unread = result.get("inbox_unread")
+        if isinstance(unread, dict):
+            self.inbox_unread_total = int(unread.get("total") or 0)
+            self.inbox_unread = [_norm_mail(r) for r in unread.get("newest", [])]
+
+    def _next_selection(self, old_ids: list, ids: set, same_view: bool):
+        """The open message left this view (archived, deleted, labeled out,
+        unstarred in Starred): open the one below it, else the one above —
+        not the top of the list (#109). A different view starts at the top."""
+        sel = self.selected_mail
+        if same_view and sel in old_ids:
+            i = old_ids.index(sel)
+            for mid in old_ids[i + 1:] + old_ids[:i][::-1]:
+                if mid in ids:
+                    return mid
+        return self.mails[0]["id"] if self.mails else None
 
     def set_mail_scope(self, scope: str) -> None:
         if scope == self.mail_scope:
             return
         self.mail_scope = scope
+        self.mail_query = ""
         self.mail_suggestions.clear()
         self.mail_suggestion_meta.clear()
         if self.live:
@@ -898,15 +993,31 @@ class AppState(QObject):
         return {"filter": "label", "label": self.mail_scope}
 
     def refresh_mails(self) -> None:
-        if self._data is not None:
+        """Reload what Mail is showing: the search in force, else the scope.
+        A reload after star/label/archive used to drop a search and show the
+        Inbox while the box still held the query (#109)."""
+        if self._data is None:
+            return
+        if self.mail_query:
+            self._list_request("emails.search", {"query": self.mail_query})
+        else:
             self._list_request("emails.list", self._scope_payload())
 
     def refresh_inbox(self) -> None:
         """Manual refresh: delta-sync against Gmail, then reload the current
-        scope (a label view reloads as itself)."""
-        if self._data is not None:
-            self._last_sync_req = time.monotonic()
+        scope (a label view reloads as itself) or re-run the search."""
+        if self._data is None:
+            return
+        self._last_sync_req = time.monotonic()
+        if not self.mail_query:
             self._list_request("mail.refresh", self._scope_payload())
+            return
+
+        def synced(result):
+            self._take_inbox_unread(result or {})
+            self.refresh_mails()
+        self._data.request("mail.refresh", self._scope_payload(), synced,
+                           on_error=lambda _m: self.refresh_mails())
 
     SYNC_DEBOUNCE_S = 60.0
 
@@ -926,10 +1037,8 @@ class AppState(QObject):
         query = query.strip()
         if self._data is None:
             return
-        if not query:
-            self.refresh_mails()
-            return
-        self._list_request("emails.search", {"query": query})
+        self.mail_query = query
+        self.refresh_mails()
 
     def _mail_action_done(self, result: dict) -> None:
         msg = result.get("message", "")
@@ -991,6 +1100,7 @@ class AppState(QObject):
         if m is None or not m["unread"]:
             return
         m["unread"] = False
+        self._inbox_unread_read(mid)
         if self._data is not None:
             self._data.request("emails.auto_read", {"id": mid}, lambda _r: None)
 
@@ -1299,11 +1409,11 @@ class AppState(QObject):
         else:
             self.refresh_calendar(frm, to, cb)
 
-    def create_event(self, proposal: dict, cb=None) -> None:
+    def create_event(self, proposal: dict, cb=None, on_error=None) -> None:
         """Daemon validates + gates behind the confirm overlay, then creates."""
         if self._data is not None:
             self._data.request("calendar.create", {"proposal": proposal},
-                               cb or (lambda _r: None))
+                               cb or (lambda _r: None), on_error=on_error)
         else:
             # sample mode: show the mock confirmation so the button still demos
             self.confirm_requested.emit({

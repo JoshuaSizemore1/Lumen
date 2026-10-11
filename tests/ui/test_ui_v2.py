@@ -492,7 +492,7 @@ def test_confirm_overlay_checkbox_rides_the_approval(qtbot):
     got = []
     ov.open({"icon": "⚑", "title": "Create mail rule", "intro": "i",
              "rows": [("Label", "Bills")], "confirm_label": "Save rule",
-             "check": {"label": "Also apply to 3 emails", "checked": True}},
+             "check_label": "Also apply to 3 emails", "check_default": True},
             lambda approved, payload: got.append((approved, payload)))
     assert ov._check is not None and ov._check.isChecked()
     ov._check.setChecked(False)

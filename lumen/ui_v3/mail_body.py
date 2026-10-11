@@ -32,10 +32,13 @@ class MailBodyView(QWidget):
     (body_html present, or None while a fetch is in flight); the widget swaps in
     the complete render once images finish, never a partial one (#2)."""
 
+    _CACHE_MAX = 50   # max inlined-HTML entries kept in memory (#112)
+
     def __init__(self, state):
         super().__init__()
         self.state = state
-        self._loaded_images: dict[str, str] = {}
+        from collections import OrderedDict
+        self._loaded_images: OrderedDict[str, str] = OrderedDict()
         self._img_workers: set[ImageLoader] = set()
         self._auto_loading: set[str] = set()
         self._mid: str | None = None
@@ -55,6 +58,20 @@ class MailBodyView(QWidget):
         if self._m is not None:
             self._lay.addWidget(self._body(self._m))
 
+    def _cache_get(self, mid: str) -> str | None:
+        if mid in self._loaded_images:
+            self._loaded_images.move_to_end(mid)
+            return self._loaded_images[mid]
+        return None
+
+    def _cache_set(self, mid: str, html: str) -> None:
+        if mid in self._loaded_images:
+            self._loaded_images.move_to_end(mid)
+        else:
+            self._loaded_images[mid] = html
+            if len(self._loaded_images) > self._CACHE_MAX:
+                self._loaded_images.popitem(last=False)
+
     # Mirrors MailScreen._body — kept in sync deliberately; see module docstring.
     def _body(self, m: dict) -> QWidget:
         mid = m["id"]
@@ -62,7 +79,7 @@ class MailBodyView(QWidget):
         if raw_html is None and self.state.live:
             return self._loading_body()
         if raw_html:
-            loaded = self._loaded_images.get(mid)
+            loaded = self._cache_get(mid)
             if loaded is not None:
                 return HtmlBody(mail_html.prepare_html(loaded))
             hidden = mail_html.remote_image_count(raw_html)
@@ -86,9 +103,9 @@ class MailBodyView(QWidget):
                     mail_html.strip_remote_images(raw_html))))
                 return w
             return HtmlBody(mail_html.prepare_html(raw_html))
-        body = label(m.get("body", ""), 15, T.TEXT_BODY, wrap=True)
-        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        return body
+        # No HTML part: convert plain text via plain_to_html so angle-brackets,
+        # tags, and blank lines are safe and URLs are linkified (#101).
+        return HtmlBody(mail_html.plain_to_html(m.get("body", "")))
 
     def _loading_body(self) -> QWidget:
         w = QWidget()
@@ -108,7 +125,7 @@ class MailBodyView(QWidget):
         worker.start()
 
     def _images_ready(self, mid: str, html: str):
-        self._loaded_images[mid] = html
+        self._cache_set(mid, html)
         self._auto_loading.discard(mid)
         if self._mid == mid:
             self._render()

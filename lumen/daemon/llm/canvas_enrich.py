@@ -25,6 +25,7 @@ import time
 from datetime import date, datetime, timedelta
 
 from lumen.daemon.connectors import canvas_events as ce
+from lumen.daemon.llm.client import LLMUnavailable
 
 CLASSIFY_CAP = 6
 EXAM_CAP = 6
@@ -109,6 +110,8 @@ async def classify_assignments(store, llm, *, cap: int = CLASSIFY_CAP,
             break
         try:
             got = await classify_one(llm, row)
+        except LLMUnavailable:
+            raise  # model is off/unavailable — don't mark state=2; retry next sync
         except Exception:
             log.exception("canvas classify failed for %s", row.get("id"))
             store.set_ai_fields(row["id"], None, None, state=2)
@@ -184,6 +187,8 @@ async def find_exam_dates(store, llm, proposals, *, cap: int = EXAM_CAP,
                      {"role": "user", "content": user}]):
                 reply += chunk
             got = validate_exam(_parse_obj(reply), today=now.date())
+        except LLMUnavailable:
+            raise   # model is off/unavailable: every remaining call would fail too
         except Exception:
             log.exception("canvas exam scan failed for %s", ann.get("id"))
             continue

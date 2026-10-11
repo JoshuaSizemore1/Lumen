@@ -173,7 +173,13 @@ class FakeMailStore:
             return [r for r in self.rows if "INBOX" in r["labels"]]
         if filter == "starred":
             return [r for r in self.rows if "STARRED" in r["labels"]]
+        if filter == "unread":
+            return [r for r in self.rows
+                    if "INBOX" in r["labels"] and not r["is_read"]][:limit]
         return self.rows
+
+    def count(self, filter="inbox", label_id=None):
+        return len(self.list_page(filter, 10_000, label_id=label_id))
 
     def user_labels(self):
         return self.labels

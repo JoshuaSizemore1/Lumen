@@ -1,7 +1,8 @@
 """Todos: quick add, grouped list, and a side rail for progress and filters.
 
 Keeps everything the ui_v3 Todos screen did:
-- quick add ("#tag" sets a tag, a weekday sets the due date; the daemon parses)
+- quick add ("#tag" sets a tag, a plain weekday / today / tomorrow sets the due
+  date; @fri / @jul9 / @2026-07-12 also work; the daemon parses)
 - tick to complete, cross to delete, click a row to open its detail card
   (task, notes, due date, tags; Save goes through state.update_todo)
 - group by due date (Today / Upcoming / No date) or by tag, done items last
@@ -530,8 +531,8 @@ class TodosScreen(QWidget):
         self.rebuild()
 
     # ---- quick add ----------------------------------------------------------
-    _ADD_HELP = ("Type #tag to tag it, or a weekday like “friday” to give it "
-                 "a due date.")
+    _ADD_HELP = ("Type #tag to tag it.  A plain weekday (or 'today' / 'tomorrow') "
+                 "sets the due date; @fri / @jul9 / @2026-07-12 also work.")
 
     def _quick_add(self) -> QWidget:
         card = Card(padding=T.S5, spacing=T.S2)

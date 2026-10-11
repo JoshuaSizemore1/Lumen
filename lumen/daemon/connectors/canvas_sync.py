@@ -19,6 +19,7 @@ from lumen.daemon.connectors.canvas_reconcile import reconcile_todos
 from lumen.daemon.connectors.canvas_store import CanvasStore
 from lumen.daemon.llm.canvas_flag import flag_announcements
 from lumen.daemon.llm.claude_cli import BACKGROUND
+from lumen.daemon.llm.client import LLMUnavailable
 
 log = logging.getLogger("lumen.daemon")
 
@@ -188,6 +189,10 @@ class CanvasSync:
             # wired. Never fails the sync: the mirror is the valuable part.
             try:
                 await self._enrich()          # AI passes, before the diff runs
+            except LLMUnavailable as e:
+                # The model went Off (or away) mid-pass: nothing was marked
+                # done, the next sync picks it up (#97).
+                log.info("canvas enrichment stopped: %s", e)
             except Exception:
                 log.exception("canvas enrichment failed — mirror kept")
             try:
@@ -206,6 +211,8 @@ class CanvasSync:
                     # NEW announcements only (spec). Never fails the sync.
                     try:
                         await flag_announcements(self._store, self._llm)
+                    except LLMUnavailable as e:
+                        log.info("canvas announcement flagging stopped: %s", e)
                     except Exception:
                         log.exception("canvas announcement flag failed")
             return True

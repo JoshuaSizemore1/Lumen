@@ -201,3 +201,151 @@ def test_a_rejected_address_comes_back_exactly_as_typed(live):
     assert win.compose.isVisible()
     assert split_addresses(win.compose.to.text()) == [
         '"Doe, John" <j@x.com>', "a@@x.com"]
+
+
+# --- #93: Revise ------------------------------------------------------------
+
+def test_revise_applies_the_daemons_answer(live):
+    win, data = live
+    win.compose.ask.setText("shorter")
+    win.compose._revise()
+    payload, cb = data.last("emails.revise")
+    assert payload["instruction"] == "shorter"
+    cb({"subject": "Hi again", "body": "Short.", "ok": True})
+    assert win.compose.body_edit.toPlainText() == "Short."
+    assert win.compose.subject.text() == "Hi again"
+    assert "failed" not in win.compose.hint.text().lower()
+
+
+# --- #105: Cc ---------------------------------------------------------------
+
+def test_a_drafted_cc_is_shown_and_sent(qtbot, v4_settings):
+    data = FakeClient()
+    win = make_window(qtbot, AppState(data=data))
+    win.compose.open({"to": ["ada@example.com"], "cc": ["bo@example.com"],
+                      "subject": "Hi", "body": "b"})
+    assert win.compose.cc.text() == "bo@example.com"
+    seen = {}
+    win.compose.cc.setText("bo@example.com; Cy <cy@example.com>")
+    win.compose._send()
+    seen.update(win.confirm._payload)
+    assert dict(seen["rows"])["Cc"] == "bo@example.com, Cy <cy@example.com>"
+    win.confirm._answer(True)
+    payload, _cb = data.last("emails.send")
+    assert payload["cc"] == ["bo@example.com", "Cy <cy@example.com>"]
+
+
+def test_no_cc_row_and_empty_cc_when_there_is_none(live, monkeypatch):
+    win, data = live
+    assert win.compose.cc.text() == ""
+    seen = {}
+    monkeypatch.setattr(win.confirm, "open", lambda p, cb: seen.update(p))
+    win.compose._send()
+    assert "Cc" not in dict(seen["rows"])
+    assert win.compose.fields()["cc"] == []
+
+
+def test_a_failed_send_keeps_the_cc(live):
+    win, data = live
+    win.compose.cc.setText("bo@example.com")
+    win.compose._send()
+    win.confirm._answer(True)
+    assert data.fail("emails.send")
+    assert win.compose.isVisible()
+    assert win.compose.cc.text() == "bo@example.com"
+
+
+# --- #106: Esc / X don't throw a draft away -----------------------------------
+
+def test_esc_with_a_draft_asks_first(live, qtbot):
+    win, _data = live
+    win.compose.cancel()                          # Esc
+    assert win.compose.isVisible()
+    assert win.compose.drop_btn.isVisible() and win.compose.keep_btn.isVisible()
+    assert not win.compose.send_btn.isVisible()
+    win.compose.cancel()                          # Esc again: keep editing
+    assert win.compose.isVisible() and win.compose.send_btn.isVisible()
+    assert not win.compose.drop_btn.isVisible()
+    assert win.compose.body_edit.toPlainText() == "Hello there"
+
+
+def test_discard_draft_after_asking_closes(live):
+    win, _data = live
+    win.compose.cancel()
+    win.compose.drop_btn.click()
+    assert not win.compose.isVisible()
+
+
+def test_esc_on_an_untouched_empty_compose_just_closes(qtbot, v4_settings):
+    win = make_window(qtbot, AppState(data=FakeClient()))
+    win.compose.open({"to": "ada@example.com", "subject": "Re: Hi"})
+    win.compose.cancel()
+    assert not win.compose.isVisible()
+
+
+def test_esc_after_typing_a_subject_asks(qtbot, v4_settings):
+    win = make_window(qtbot, AppState(data=FakeClient()))
+    win.compose.open({})
+    win.compose.subject.setText("Plans")
+    win.compose.cancel()
+    assert win.compose.isVisible() and win.compose.drop_btn.isVisible()
+
+
+def test_reopening_resets_the_question(live):
+    win, _data = live
+    win.compose.cancel()
+    win.compose.drop_btn.click()
+    win.compose.open({"to": "ada@example.com", "subject": "Hi", "body": "x"})
+    assert win.compose.send_btn.isVisible()
+    assert not win.compose.drop_btn.isVisible()
+
+
+def test_chat_compose_cancel_is_answered_only_on_discard(qtbot, v4_settings):
+    confirm = FakeClient()
+    win = make_window(qtbot, AppState(data=FakeClient(), confirm=confirm))
+    win.compose.open({"compose_id": 9, "to": ["ada@example.com"],
+                      "subject": "Hi", "body": "Lumen's draft"})
+    win.compose.cancel()
+    assert "compose.response" not in confirm.request_types()
+    win.compose.drop_btn.click()
+    payload, _cb = confirm.last("compose.response")
+    assert payload == {"compose_id": 9, "send": False, "fields": {}}
+
+
+# --- #111: a Send after the chat stopped waiting ------------------------------
+
+def _chat_compose_sent(qtbot):
+    confirm = FakeClient()
+    win = make_window(qtbot, AppState(data=FakeClient(), confirm=confirm))
+    toasts = []
+    win.state.toast_requested.connect(toasts.append)
+    win.compose.open({"compose_id": 9, "to": ["ada@example.com"],
+                      "subject": "Hi", "body": "b"})
+    win.compose._send()
+    win.confirm._answer(True)
+    return win, confirm, toasts
+
+
+def test_a_late_send_says_it_went(qtbot, v4_settings):
+    win, confirm, toasts = _chat_compose_sent(qtbot)
+    _payload, cb = confirm.last("compose.response")
+    cb({"ok": True, "message": "Sent."})
+    assert toasts == ["✓ Sent."]
+    assert not win.compose.isVisible()
+
+
+def test_an_in_time_send_leaves_the_word_to_the_chat(qtbot, v4_settings):
+    win, confirm, toasts = _chat_compose_sent(qtbot)
+    _payload, cb = confirm.last("compose.response")
+    cb({"ok": True, "message": ""})
+    assert toasts == []
+
+
+def test_a_late_send_that_fails_gives_the_draft_back(qtbot, v4_settings):
+    win, confirm, toasts = _chat_compose_sent(qtbot)
+    assert confirm.fail("compose.response")
+    assert win.compose.isVisible()
+    assert win.compose.body_edit.toPlainText() == "b"
+    _payload, cb = confirm.last("compose.response")
+    cb({"ok": False, "message": ""})
+    assert toasts[-1] == "Couldn't send. Your draft is back."

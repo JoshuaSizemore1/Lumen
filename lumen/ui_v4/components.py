@@ -1133,10 +1133,14 @@ class MailBody(QWidget):
     click-to-load when that's switched off) or plain text. show_mail(row)
     with a full mirror row; body_html None while a fetch is in flight."""
 
+    _CACHE_MAX = 50   # max inlined-HTML entries kept in memory (#112)
+
     def __init__(self, state):
         super().__init__()
         self.state = state
-        self._loaded: dict[str, str] = {}
+        # OrderedDict used as a bounded LRU: most-recently accessed at the end.
+        from collections import OrderedDict
+        self._loaded: OrderedDict[str, str] = OrderedDict()
         self._workers: set[_ImageLoader] = set()
         self._loading: set[str] = set()
         self._m: dict | None = None
@@ -1162,7 +1166,7 @@ class MailBody(QWidget):
         if raw is None and self.state.live:
             return self._placeholder()
         if raw:
-            done = self._loaded.get(mid)
+            done = self._cache_get(mid)
             if done is not None:
                 return self._html(done)
             hidden = mail_html.remote_image_count(raw)
@@ -1184,7 +1188,10 @@ class MailBody(QWidget):
                 v.addWidget(self._html(mail_html.strip_remote_images(raw)))
                 return w
             return self._html(raw)
-        return Label(m.get("body", ""), "body", wrap=True, selectable=True)
+        # No HTML part (#101): plain_to_html escapes, keeps the line breaks
+        # and links the URLs. A QTextBrowser never runs QLabel's AutoText
+        # guess, which ate "a < b and c > d".
+        return HtmlBody(mail_html.plain_to_html(m.get("body", "")))
 
     def _html(self, raw: str) -> HtmlBody:
         # Prepared for the width the pane has now (less the card's padding
@@ -1199,6 +1206,21 @@ class MailBody(QWidget):
                     Qt.AlignmentFlag.AlignHCenter)
         return w
 
+    # ---- bounded LRU cache for inlined HTML (#112) ---------------------------
+    def _cache_get(self, mid: str) -> str | None:
+        if mid in self._loaded:
+            self._loaded.move_to_end(mid)
+            return self._loaded[mid]
+        return None
+
+    def _cache_set(self, mid: str, html: str) -> None:
+        if mid in self._loaded:
+            self._loaded.move_to_end(mid)
+        else:
+            self._loaded[mid] = html
+            if len(self._loaded) > self._CACHE_MAX:
+                self._loaded.popitem(last=False)   # evict oldest
+
     def _load_images(self, mid: str, html: str):
         if mid in self._loading:
             return
@@ -1210,7 +1232,7 @@ class MailBody(QWidget):
         worker.start()
 
     def _images_ready(self, mid: str, html: str):
-        self._loaded[mid] = html
+        self._cache_set(mid, html)
         self._loading.discard(mid)
         if self._m is not None and self._m.get("id") == mid:
             self._render()

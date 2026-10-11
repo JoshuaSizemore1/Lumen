@@ -24,7 +24,6 @@ it has one, else its calendar's (both arrive as data). Sample events, which
 carry none, fall back to the theme's categorical slots, hashed from the
 calendar name.
 """
-import re
 from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer
@@ -39,7 +38,9 @@ from ..components import (
     Label, ScreenHeader, ScrollArea, SegmentedControl, SkeletonRow, TextField,
     clear_layout, fire_on_next_tick, hbox, vbox,
 )
-from ..overlays import _dialog_foot, _dialog_head, _Overlay
+from ..overlays import (
+    EventOverlay, _dialog_foot, _dialog_head, _Overlay, parse_clock,
+)
 
 from ...daemon.connectors.gcal_colors import GCAL_COLOR_NAMES
 from ...daemon.connectors.gcal_time import tz_offset
@@ -56,8 +57,6 @@ GRID_START_H, GRID_END_H = 7, 21
 HOUR_H = 48
 PAD_T = 10                 # room above the first hour line for its label
 NARROW_W = 900
-_HHMM = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
-_END_HHMM = re.compile(r"^(([01]?\d|2[0-3]):[0-5]\d|24:00)$")   # midnight ends
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -482,7 +481,7 @@ class EventEditOverlay(_Overlay):
         body.addWidget(self.title_f)
         self.times = QWidget()
         tr = hbox(self.times, (0, 0, 0, 0), T.S3)
-        self.start_f = TextField("Starts", "24-hour time, like 14:00", "14:00")
+        self.start_f = TextField("Starts", "Like 14:00, 9:30 or 2pm", "14:00")
         self.end_f = TextField("Ends", "", "15:00")
         tr.addWidget(self.start_f, 1)
         tr.addWidget(self.end_f, 1)
@@ -547,16 +546,19 @@ class EventEditOverlay(_Overlay):
         if title != ev.get("title"):
             changes["title"] = title
         if self._timed:
-            s, e = self.start_f.text().strip(), self.end_f.text().strip()
-            if not _HHMM.match(s):
-                self.start_f.set_error("Use 24-hour time, like 09:30.")
+            # Same reader as the New-event form: "9:30", "2pm", "14:00".
+            s_min = parse_clock(self.start_f.text())
+            if s_min is None:
+                self.start_f.set_error(EventOverlay.BAD_TIME)
                 self.start_f.input.setFocus()
                 return
-            if e and not _END_HHMM.match(e):
-                self.end_f.set_error("Use 24-hour time, like 10:30.")
+            e_txt = self.end_f.text().strip()
+            e_min = parse_clock(e_txt, end=True) if e_txt else s_min
+            if e_min is None:
+                self.end_f.set_error(EventOverlay.BAD_TIME)
                 self.end_f.input.setFocus()
                 return
-            e = e or s
+            s, e = hhmm(s_min), hhmm(e_min)
             orig_s = hhmm(ev.get("start_min", 0))
             if (s, e) != (orig_s, _end_hhmm(ev)):
                 changes["start"] = self._iso(s)

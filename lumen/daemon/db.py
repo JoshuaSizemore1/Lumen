@@ -339,4 +339,13 @@ def connect(db_path: Path) -> sqlite3.Connection:
     todo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(todos)")}
     if "description" not in todo_cols:
         conn.execute("ALTER TABLE todos ADD COLUMN description TEXT")
+    # Remove emails that slipped in with TRASH, SPAM, or DRAFT labels before
+    # the incremental sync started filtering them (#104).  The FTS delete
+    # triggers fire correctly for each row, keeping the index consistent.
+    with conn:
+        conn.execute(
+            "DELETE FROM emails WHERE "
+            "(',' || labels || ',') LIKE '%,TRASH,%' "
+            "OR (',' || labels || ',') LIKE '%,SPAM,%' "
+            "OR (',' || labels || ',') LIKE '%,DRAFT,%'")
     return conn

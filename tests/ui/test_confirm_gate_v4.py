@@ -198,3 +198,38 @@ def test_approve_ignores_clicks_right_after_it_appears(client_and_win, qtbot):
     win.confirm._armed_at -= 1.0
     qtbot.mouseClick(ok, Qt.MouseButton.LeftButton)
     assert results == [True]
+
+
+def test_rule_backfill_checkbox_from_the_real_daemon_payload(client_and_win,
+                                                            tmp_path):
+    """todo-fixes #95: the daemon sent `check: {label, checked}` and the
+    overlay reads `check_label`, so "Also label the N matching emails" never
+    appeared and the backfill never ran. Drive the real router's payload into
+    the real overlay so the two sides can't drift apart again."""
+    import asyncio
+
+    from lumen.daemon.confirm import ConfirmBroker
+    from tests.daemon.test_router import rules_router
+
+    router, _rules, _store, _sync = rules_router(tmp_path,
+                                                 broker=ConfirmBroker())
+    rule = {"label": "Bills", "from_addrs": [], "domains": ["x.com"],
+            "subject_kw": [], "body_kw": []}
+
+    async def first_confirm():
+        gen = router.handle("rules.create", {"rule": rule})
+        async for ev in gen:
+            if "confirm_request" in ev:
+                await gen.aclose()
+                return {"confirm_id": ev["confirm_id"], **ev["confirm_request"]}
+
+    payload = asyncio.run(first_confirm())
+    _client, win = client_and_win
+    got = []
+    win.confirm.open(payload, lambda ok, p: got.append(p))
+    assert win.confirm.check is not None
+    assert "1 matching" in win.confirm.check.text()
+    assert win.confirm.check.isChecked()
+    win.confirm._armed_at -= 1.0
+    win.confirm._approve_clicked()
+    assert got and got[0]["check_state"] is True

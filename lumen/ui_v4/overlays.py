@@ -10,7 +10,9 @@ goes back where it was on close.
 Every one of them gates a write. The confirm overlay is the last stop before
 Lumen touches a connected account: every way out of it answers the daemon.
 """
+import re
 import time
+from datetime import date, timedelta
 
 from PyQt6 import sip
 from PyQt6.QtCore import (
@@ -350,8 +352,9 @@ class UnsavedOverlay(_Overlay):
 # ---- compose ----------------------------------------------------------------
 class ComposeOverlay(_Overlay):
     """Draft composer with an inline "ask Lumen to revise" line. A chat-driven
-    compose (compose_id) has a blocked daemon connection behind it: Discard/Esc
-    answer it with a cancel, Send with the fields."""
+    compose (compose_id) has a blocked daemon connection behind it: Discard
+    answers it with a cancel, Send with the fields. Esc and the X ask first
+    when there's something to lose (todo-fixes #106)."""
 
     CARD_W = 620
 
@@ -362,11 +365,12 @@ class ComposeOverlay(_Overlay):
         self._compose_id = None
         self._reply_to = None
         self._note = ""
+        self._opened = ("", "", "", "")
         v = vbox(self.card, (0, 0, 0, 0), 0)
 
         head, self.heading = _dialog_head(
             "New email", "Sent through Gmail — you confirm before it goes",
-            close=self.close_it)
+            close=self.cancel)
         v.addLayout(head)
 
         body = vbox(m=(T.S6, 0, T.S6, T.S4), s=T.S4)
@@ -383,13 +387,17 @@ class ComposeOverlay(_Overlay):
         body.addWidget(self.note)
         self.to_field = TextField("To", "Separate addresses with commas",
                                   "name@example.com")
+        # A drafted Cc used to be dropped on Send (todo-fixes #105).
+        self.cc_field = TextField("Cc", placeholder="Optional")
         self.subject_field = TextField("Subject")
         self.body_field = TextArea("Message", placeholder="Write your message…",
                                    min_height=120)
         self.to = self.to_field.input
+        self.cc = self.cc_field.input
         self.subject = self.subject_field.input
         self.body_edit = self.body_field.input
         body.addWidget(self.to_field)
+        body.addWidget(self.cc_field)
         body.addWidget(self.subject_field)
         body.addWidget(self.body_field, 1)
 
@@ -415,13 +423,26 @@ class ComposeOverlay(_Overlay):
         v.addLayout(body, 1)
 
         foot, fl = _dialog_foot()
-        fl.addWidget(Button("Discard", "ghost", on_click=self.close_it))
+        self.discard_btn = Button("Discard", "ghost", on_click=self.close_it)
+        fl.addWidget(self.discard_btn)
         fl.addStretch(1)
-        fl.addWidget(Kbd("Ctrl+Enter"), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.send_kbd = Kbd("Ctrl+Enter")
+        fl.addWidget(self.send_kbd, 0, Qt.AlignmentFlag.AlignVCenter)
         # "&&": a lone & is a mnemonic marker and rendered "Review _send" (L1).
         self.send_btn = Button("Review && send", "primary", icon="send",
                                on_click=self._send)
         fl.addWidget(self.send_btn)
+        # Esc / X with something to lose ask here instead (#106). Inline, so
+        # nothing stacks on the compose card.
+        self.ask_discard = Label("Discard this draft?", "small")
+        self.keep_btn = Button("Keep editing", "secondary",
+                               on_click=self._keep_editing)
+        self.drop_btn = Button("Discard draft", "danger", on_click=self.close_it)
+        for w in (self.ask_discard, self.keep_btn, self.drop_btn):
+            w.hide()
+        fl.insertWidget(0, self.ask_discard, 0, Qt.AlignmentFlag.AlignVCenter)
+        fl.addWidget(self.keep_btn)
+        fl.addWidget(self.drop_btn)
         v.addWidget(foot)
 
         for seq in ("Ctrl+Return", "Ctrl+Enter"):
@@ -434,20 +455,26 @@ class ComposeOverlay(_Overlay):
         self._reply_to = payload.get("reply_to")
         # `to` is a list from the daemon's compose_request and a string from
         # the mail screen; setText only takes str (ui_v3 todo-fixes #26).
-        to = payload.get("to") or ""
-        if isinstance(to, list):
-            to = ", ".join(to)
+        def joined(key):
+            v = payload.get(key) or ""
+            return ", ".join(v) if isinstance(v, list) else str(v)
+
+        to, cc = joined("to"), joined("cc")
         self.heading.setText("Reply" if self._reply_to else "New email")
         self._note = payload.get("note") or ""
         self.note_text.setText(self._note)
         self.note.setVisible(bool(self._note))
         self.to_field.clear_error()
+        self.cc_field.clear_error()
         self.to.setText(to)
+        self.cc.setText(cc)
         self.subject.setText(payload.get("subject", ""))
         self.body_edit.setPlainText(payload.get("body", ""))
+        self._opened = self._snapshot()
         self.hint.hide()
         self.ask.clear()
         self.revise_btn.set_busy(False)
+        self._keep_editing()
         self.pop()
         # A reply arrives addressed — land in the body.
         (self.body_edit if to else self.to).setFocus()
@@ -456,14 +483,44 @@ class ComposeOverlay(_Overlay):
         # Entries as typed ("Name <addr>", "Last, First" <addr>, `,`/`;`
         # lists); the daemon validates each, and a rejected one comes
         # back to the draft unchanged (#90).
-        to = split_addresses(self.to.text())
-        return {"to": to, "cc": [], "bcc": [],
+        return {"to": split_addresses(self.to.text()),
+                "cc": split_addresses(self.cc.text()), "bcc": [],
                 "subject": self.subject.text().strip(),
                 "body": self.body_edit.toPlainText(),
                 "reply_to": self._reply_to}
 
+    def _snapshot(self) -> tuple:
+        return (self.to.text(), self.cc.text(), self.subject.text(),
+                self.body_edit.toPlainText())
+
+    def _has_work(self) -> bool:
+        """Something an Esc would throw away: a message (typed, or a draft
+        Lumen wrote), or any edit since the window opened."""
+        return (bool(self.body_edit.toPlainText().strip())
+                or self._snapshot() != self._opened)
+
     def cancel(self):
-        self.close_it()
+        """Esc and the X. Asks first when there's something to lose (#106);
+        Esc again while it's asking keeps editing."""
+        if self.drop_btn.isVisible():
+            self._keep_editing()
+        elif self._has_work():
+            for w in (self.discard_btn, self.send_kbd, self.send_btn):
+                w.hide()
+            for w in (self.ask_discard, self.keep_btn, self.drop_btn):
+                w.show()
+            self.keep_btn.setFocus()
+        else:
+            self.close_it()
+
+    def _keep_editing(self):
+        refocus = self.keep_btn.hasFocus() or self.drop_btn.hasFocus()
+        for w in (self.ask_discard, self.keep_btn, self.drop_btn):
+            w.hide()
+        for w in (self.discard_btn, self.send_kbd, self.send_btn):
+            w.show()
+        if refocus:
+            self.body_edit.setFocus()
 
     def close_it(self):
         self.close_overlay()
@@ -483,8 +540,10 @@ class ComposeOverlay(_Overlay):
             self.to.setFocus()
             return
         body = fields["body"].strip()
-        rows = [("To", ", ".join(fields["to"])),
-                ("Subject", fields["subject"] or "(no subject)")]
+        rows = [("To", ", ".join(fields["to"]))]
+        if fields["cc"]:
+            rows.append(("Cc", ", ".join(fields["cc"])))
+        rows.append(("Subject", fields["subject"] or "(no subject)"))
         if body:
             rows.append(("Message", body if len(body) <= 280
                          else body[:279].rstrip() + "…"))
@@ -508,7 +567,8 @@ class ComposeOverlay(_Overlay):
             # the user can correct the address or retry.  The caller's note
             # (a forward's "attachments aren't included") travels with it.
             self.state.toast_requested.emit(msg)
-            self.open({"to": fields["to"], "subject": fields["subject"],
+            self.open({"to": fields["to"], "cc": fields["cc"],
+                       "subject": fields["subject"],
                        "body": fields["body"], "reply_to": fields.get("reply_to"),
                        "note": note})
 
@@ -518,10 +578,19 @@ class ComposeOverlay(_Overlay):
 
             def compose_done(result):
                 r = result or {}
-                if not r.get("ok") and r.get("message"):
-                    _reopen(r["message"])
+                if not r.get("ok"):
+                    _reopen(r.get("message")
+                            or "Couldn't send. Your draft is back.")
+                elif r.get("message"):
+                    # The chat had stopped waiting (30 min), so this reply
+                    # did the sending and no chat line will say so (#111).
+                    self.state.toast_requested.emit("✓ " + r["message"])
 
-            self.state.respond_compose(compose_id, fields, compose_done)
+            def compose_failed(_msg):
+                _reopen("Couldn't send. Your draft is back.")
+
+            self.state.respond_compose(compose_id, fields, compose_done,
+                                       on_error=compose_failed)
             return
 
         def done(result):
@@ -572,15 +641,41 @@ class ComposeOverlay(_Overlay):
 
 
 # ---- event ------------------------------------------------------------------
+_CLOCK = re.compile(r"^(\d{1,2})(?::?(\d{2}))?\s*(?:([ap])\.?\s*m?\.?)?$", re.I)
+
+
+def parse_clock(text: str, end: bool = False) -> int | None:
+    """Minutes after midnight for "9:30", "09:30", "930", "14", "2pm" or
+    "2:30 p.m.", or None. `end` also allows "24:00" (midnight at the end of
+    the day)."""
+    m = _CLOCK.match((text or "").strip())
+    if not m:
+        return None
+    h, mins = int(m.group(1)), int(m.group(2) or 0)
+    if mins > 59:
+        return None
+    if m.group(3):
+        if not 1 <= h <= 12:
+            return None
+        h = h % 12 + (12 if m.group(3).lower() == "p" else 0)
+    if end and h == 24 and mins == 0:
+        return 24 * 60
+    return h * 60 + mins if h <= 23 else None
+
+
 class EventOverlay(_Overlay):
-    """New-event composer. Times stay free text; the daemon validates and the
-    confirm overlay still gates the actual write."""
+    """New-event composer. The form checks what it can and stays open until
+    the daemon answers, so nothing typed is lost to a rejected time or an
+    unreachable Google (todo-fixes #99). The confirm overlay still gates the
+    actual write."""
 
     CARD_W = 540
+    BAD_TIME = "Try 14:00, 9:30 or 2pm."
 
     def __init__(self, parent, state):
         super().__init__(parent)
         self.state = state
+        self._req = 0
         v = vbox(self.card, (0, 0, 0, 0), 0)
         head, _h = _dialog_head(
             "New event", "Google Calendar — you confirm before it's created",
@@ -595,55 +690,140 @@ class EventOverlay(_Overlay):
         self.date_field = TextField("Date", placeholder="YYYY-MM-DD")
         self.start_field = TextField("Start", placeholder="14:00")
         self.end_field = TextField("End", placeholder="15:00")
-        row.addWidget(self.date_field, 12)
-        row.addWidget(self.start_field, 8)
-        row.addWidget(self.end_field, 8)
+        # Top-aligned: an error under one field mustn't push the others down.
+        for field, stretch in ((self.date_field, 12), (self.start_field, 8),
+                               (self.end_field, 8)):
+            row.addWidget(field, stretch, Qt.AlignmentFlag.AlignTop)
         body.addLayout(row)
         self.date = self.date_field.input
         self.start = self.start_field.input
         self.end = self.end_field.input
+        self.all_day = QCheckBox("All day")
+        self.all_day.toggled.connect(self._all_day_toggled)
+        body.addWidget(self.all_day)
         self.location_field = TextField("Location", "Optional")
         self.location = self.location_field.input
         body.addWidget(self.location_field)
         v.addLayout(body, 1)
 
         foot, fl = _dialog_foot()
-        fl.addStretch(1)
+        self.status = Label("", "small", wrap=True)
+        fl.addWidget(self.status, 1)
         fl.addWidget(Button("Cancel", "secondary", on_click=self.close_overlay))
-        fl.addWidget(Button("Review && create", "primary", icon="calendar",
-                            on_click=self._create))
+        self.create_btn = Button("Review && create", "primary", icon="calendar",
+                                 on_click=self._create)
+        fl.addWidget(self.create_btn)
         v.addWidget(foot)
         for f in (self.title, self.date, self.start, self.end, self.location):
             f.returnPressed.connect(self._create)
 
     def open(self, payload: dict):
-        for f in (self.title_field, self.date_field):
+        self._req += 1                  # an answer for an older form is dropped
+        for f in (self.title_field, self.date_field, self.start_field,
+                  self.end_field):
             f.clear_error()
         self.title.setText(payload.get("title", ""))
         self.date.setText(payload.get("date", ""))
         self.start.setText(payload.get("start", ""))
         self.end.setText(payload.get("end", ""))
+        self.all_day.setChecked(bool(payload.get("all_day")))
+        self._all_day_toggled(self.all_day.isChecked())
         self.location.setText(payload.get("location", "") or "")
+        self._set_status("")
+        self.create_btn.set_busy(False)
         self.pop()
         self.title.setFocus()
 
-    def _create(self):
+    def _all_day_toggled(self, on: bool):
+        self.start_field.setVisible(not on)
+        self.end_field.setVisible(not on)
+
+    def _set_status(self, text: str, role: str = "small"):
+        self.status.setText(text)
+        self.status.set_role(role)
+
+    def _fail(self, field, msg: str):
+        field.set_error(msg)
+        field.input.setFocus()
+
+    def _proposal(self) -> dict | None:
+        """What the daemon gets, or None after flagging the field to fix."""
         title = self.title.text().strip()
-        day = self.date.text().strip()
         if not title:
-            self.title_field.set_error("Give the event a title.")
-            self.title.setFocus()
+            return self._fail(self.title_field, "Give the event a title.")
+        try:
+            day = date.fromisoformat(self.date.text().strip())
+        except ValueError:
+            return self._fail(self.date_field, "Use a date like "
+                              f"{date.today().isoformat()}.")
+        out = {"title": title, "location": self.location.text().strip() or None}
+        if self.all_day.isChecked():
+            return {**out, "all_day": True, "start": day.isoformat(),
+                    "end": day.isoformat()}
+        s = parse_clock(self.start.text())
+        if s is None:
+            return self._fail(self.start_field, self.BAD_TIME)
+        out["start"] = f"{day.isoformat()}T{s // 60:02d}:{s % 60:02d}"
+        if self.end.text().strip():
+            e = parse_clock(self.end.text(), end=True)
+            if e is None:
+                return self._fail(self.end_field, self.BAD_TIME)
+            # An end at or before the start runs past midnight, as in the
+            # edit dialog (L5).
+            end_day = day + timedelta(days=1) if e <= s else day
+            if e == 24 * 60:
+                e, end_day = 0, day + timedelta(days=1)
+            out["end"] = f"{end_day.isoformat()}T{e // 60:02d}:{e % 60:02d}"
+        # A blank End takes the daemon's default length.
+        return out
+
+    def _create(self):
+        if not self.isVisible() or not self.create_btn.isEnabled():
+            return                      # already waiting on the daemon
+        proposal = self._proposal()
+        if proposal is None:
             return
-        if not day:
-            self.date_field.set_error("Add a date.")
-            self.date.setFocus()
+        if not getattr(self.state, "live", True):
+            self.close_overlay()        # sample mode: the demo confirm shows
+            self.state.create_event(proposal)
             return
-        self.close_overlay()
-        self.state.create_event({
-            "title": title,
-            "start": f"{day}T{self.start.text().strip()}",
-            "end": f"{day}T{self.end.text().strip()}",
-            "location": self.location.text().strip() or None})
+        self._req += 1
+        mine = self._req
+        self._set_status("")
+        self.create_btn.set_busy(True, "Waiting…")
+
+        def done(result):
+            if mine != self._req or sip.isdeleted(self):
+                return
+            self.create_btn.set_busy(False)
+            r = result or {}
+            if r.get("created"):
+                self.close_overlay()
+                self.state.toast_requested.emit(
+                    f"✓ Added “{proposal['title']}” to your calendar.")
+                self._show_new_event()
+            elif r.get("cancelled"):
+                self._set_status("")     # back to the form, as typed
+            else:
+                self._set_status(r.get("message")
+                                 or "Couldn't create the event.", "error")
+
+        def failed(msg):
+            if mine != self._req or sip.isdeleted(self):
+                return
+            self.create_btn.set_busy(False)
+            self._set_status(msg or "Couldn't create the event.", "error")
+
+        self.state.create_event(proposal, done, on_error=failed)
+
+    def _show_new_event(self):
+        """Today and Calendar re-read the daemon's cache, which it synced
+        right after creating."""
+        win = self.parentWidget()
+        for key in ("today", "calendar"):
+            screen = win.screen(key) if hasattr(win, "screen") else None
+            if screen is not None and hasattr(screen, "refresh"):
+                screen.refresh()
 
 
 # ---- mail rule --------------------------------------------------------------
@@ -770,7 +950,11 @@ class SuggestReviewOverlay(_Overlay):
     """Two-pane review after "suggest labels": every message with a suggested
     label on the left (accept / skip), the full body on the right so the label
     is judged after reading. Skip is local; accept files the mail (the same
-    emails.apply_label write a manual label uses). Closes when all are done."""
+    emails.apply_label write a manual label uses). Closes when all are done.
+
+    Esc, an outside click and the X only close it: the rest stay waiting
+    behind the Inbox's "N to review" banner. Only "Dismiss all" drops them —
+    they can be a 40-message model run (todo-fixes #107)."""
 
     CARD_W, CARD_H = 900, 620
     LIST_W = 340
@@ -794,8 +978,8 @@ class SuggestReviewOverlay(_Overlay):
         head.addWidget(self.accept_all)
         head.addWidget(Button("Dismiss all", "ghost", size="sm",
                               on_click=self._dismiss))
-        head.addWidget(IconButton("x", "Close and dismiss the rest",
-                                  on_click=self._dismiss))
+        head.addWidget(IconButton("x", "Close — the rest wait in Inbox",
+                                  on_click=self.cancel))
         outer.addLayout(head)
         outer.addWidget(Divider())
 
@@ -826,7 +1010,7 @@ class SuggestReviewOverlay(_Overlay):
         self.close_overlay()
 
     def cancel(self):
-        self._dismiss()
+        self._close()
 
     def _dismiss(self):
         self._close()

@@ -20,6 +20,10 @@ any v4 screen, and update it when you add or change behaviour.
   - Super+L raises the window with the Ask bar focused; a second press hides it.
   - Mail: no per-row trash; Delete is the reading pane's danger button.
   - Compose: "Review & send" and Ctrl+Enter show a "Send this email?" confirm.
+    It has a Cc field (#105). Esc and the X ask "Discard this draft?" in the
+    footer when there's something to lose; the Discard button discards in one
+    click (#106). A Send the chat had stopped waiting for toasts its result
+    itself (#111).
   - No accent picker (fixed forest green). No under-600px top rail.
 
 ## Shell (`main.py`)
@@ -70,6 +74,33 @@ any v4 screen, and update it when you add or change behaviour.
     reading pane is ~376px at a 1280px window, not the 620 `prepare_html`
     assumes, and only the measured choice keeps CSS-built mail (receipts)
     from collapsing without breaking other mail.
+  - **Plain-text bodies (#101):** When `body_html` is absent `MailBody` renders
+    the plain `body` field through `mail_html.plain_to_html()` and puts it in an
+    `HtmlBody` — never a raw `Label`. This prevents Qt's AutoText heuristic from
+    silently mangling `<`/`>` characters and makes URLs clickable.
+  - **Dark bands (#102):** `prepare_html` flattens mail to dark-on-white: pale
+    text colours are dropped, every `bgcolor=` attribute is dropped, and so is
+    every CSS background too dark to carry `CARD_FG` (luminance < 0.24, i.e.
+    under 4.5:1). Per-element rules don't work: the band is usually a container
+    and the white text an element inside it. Mid-tone brand colours stay.
+  - **Unread counts (#103):** the sidebar badge, the Unread scope count,
+    Today and the Ask context count the INBOX (`state.unread_count()` from the
+    daemon's `inbox_unread` tally), whatever list Mail shows. The Mail header
+    counts the list under its own title.
+  - **Reloads (#109):** star / label / mark-unread / archive reload the view
+    in force — a search re-runs (`state.mail_query`) — and keep the open
+    message's fetched HTML, so the reader doesn't flash or scroll. When the
+    open message leaves the view, the one below it opens (else above).
+  - **Suggested labels (#107):** Esc, an outside click and the review's X only
+    close it; the rest wait behind the "N to review" banner. Only "Dismiss
+    all" drops them.
+  - **Remote images (#112):** `inline_remote_images` fetches with a bounded
+    thread pool (_POOL_SIZE = 6) and an overall per-message deadline
+    (_TOTAL_DEADLINE = 8 s); images not collected by the deadline are dropped (no
+    broken boxes, message shows immediately). `_fetch_data_uri` refuses hosts
+    that resolve to loopback/private/link-local addresses (SSRF guard).
+    `MailBody._loaded` is a bounded LRU (50 entries) so inlined HTML doesn't
+    grow for the life of the process.
 - **Todos:** tag chips + Show completed sit directly above the list; the rail
   has progress and group-by. A tag chip click never opens the edit card. The
   "Moved out of #tag" notice judges an edit against the filter it was saved
@@ -89,6 +120,12 @@ any v4 screen, and update it when you add or change behaviour.
   calendar's); the legend uses calendar colours. Out-of-month days are muted
   text on the same ground. The edit dialog accepts 24:00 and reads an end at
   or before the start as the next day.
+  - **New event (#99):** times read like the edit dialog's
+    (`overlays.parse_clock`: "9:30", "930", "14:00", "2pm"); a blank End takes
+    the daemon's default length; "All day" hides the times. The form stays
+    open until the daemon answers: success closes it with a toast and
+    refreshes Today/Calendar, a failure shows in the form with everything
+    still typed, and a cancelled confirm returns to it quietly.
 - **Canvas:** once a login is saved, the "Save this login?" card never opens
   on its own — not even for a captured password that differs, which the 1 Hz
   poll often half-reads (#67). With nothing saved it is offered once per typed

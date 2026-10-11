@@ -161,8 +161,8 @@ class ConcurrentRouter:
         self.chat_concurrent = 0
         self.chat_peak = 0
 
-    def is_exclusive(self, type_: str) -> bool:
-        return type_ == "chat"
+    def locks_for(self, type_: str) -> tuple[str, ...]:
+        return ("stream", "model") if type_ == "chat" else ()
 
     async def handle(self, type_, payload):
         if type_ == "block":
@@ -272,6 +272,78 @@ async def test_concurrent_requests_are_capped(tmp_path):
         router.gate.set()
         replies = await _reply_map(reader, IPCServer.MAX_INFLIGHT + 5)
         assert len(replies) == IPCServer.MAX_INFLIGHT + 5
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await srv.stop()
+
+
+# --- a chat waiting on the user doesn't hold up model routes (#94) ----------
+
+class ParkingRouter:
+    """A chat that parks on the user the way the real one does: a compose
+    window (not modal) or a confirm (modal), through a real ConfirmBroker."""
+
+    def __init__(self):
+        from lumen.daemon.confirm import ConfirmBroker
+        self.broker = ConfirmBroker(timeout=5)
+        self.ids: list[int] = []
+
+    def locks_for(self, type_):
+        return {"chat": ("stream", "model"), "revise": ("model",)}.get(type_, ())
+
+    async def handle(self, type_, payload):
+        if type_ == "chat":
+            cid = self.broker.begin()
+            self.ids.append(cid)
+            yield {"chunk": "drafted"}
+            answer = await self.broker.wait(cid, modal=payload["modal"])
+            yield {"chunk": f"answer:{answer}"}
+            yield {"done": True}
+        elif type_ == "revise":
+            yield {"result": "revised"}
+        elif type_ == "answer":
+            self.broker.resolve(self.ids.pop(0), True)
+            yield {"result": "ok"}
+
+
+async def _read(reader):
+    return json.loads(await asyncio.wait_for(reader.readline(), timeout=2))
+
+
+@pytest.mark.parametrize("modal", [False, True])
+async def test_a_parked_chat_lets_model_routes_run_but_not_another_chat(
+        tmp_path, modal):
+    router = ParkingRouter()
+    srv = IPCServer(tmp_path / "d.sock", router)
+    await srv.start()
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(tmp_path / "d.sock"))
+
+        def send(req_id, type_, payload=None):
+            writer.write(json.dumps({"id": req_id, "type": type_,
+                                     "payload": payload or {}}).encode() + b"\n")
+
+        send(1, "chat", {"modal": modal})
+        await writer.drain()
+        assert await _read(reader) == {"id": 1, "chunk": "drafted"}
+        # The compose window's own Revise used to queue behind this chat for
+        # up to 30 minutes and then fire after the window had closed.
+        send(2, "revise")
+        send(3, "chat", {"modal": modal})
+        await writer.drain()
+        assert await _read(reader) == {"id": 2, "result": "revised"}
+        # The second chat still waits its turn: one signal stream.
+        await asyncio.sleep(0.05)
+        assert len(router.ids) == 1
+        send(4, "answer")
+        await writer.drain()
+        lines = [await _read(reader) for _ in range(4)]
+        assert {"id": 4, "result": "ok"} in lines
+        first = [ln for ln in lines if ln["id"] == 1]
+        assert first == [{"id": 1, "chunk": "answer:True"},
+                         {"id": 1, "done": True}]
+        assert {"id": 3, "chunk": "drafted"} == lines[-1]
         writer.close()
         await writer.wait_closed()
     finally:

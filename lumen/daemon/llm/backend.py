@@ -6,6 +6,7 @@ always routes to Ollama — Claude has no embeddings API."""
 
 import logging
 import sqlite3
+from contextlib import aclosing
 
 from lumen.daemon.llm.client import LLMUnavailable, OllamaClient
 from lumen.daemon.llm.claude_cli import ClaudeCliClient
@@ -182,15 +183,24 @@ class LLMBackend:
         return self._claude if self.mode == "claude" else self._ollama
 
     async def chat(self, messages: list[dict], **kwargs):
+        if self.mode == "off":
+            raise LLMUnavailable("model is off")
         async for chunk in self._active.chat(messages, **kwargs):
             yield chunk
 
     async def chat_with_tools(self, messages, tools, executor, *,
                                model=None, max_iterations=4, **kwargs):
-        async for ev in self._active.chat_with_tools(
+        if self.mode == "off":
+            raise LLMUnavailable("model is off")
+        async with aclosing(self._active.chat_with_tools(
                 messages, tools, executor,
-                model=model, max_iterations=max_iterations, **kwargs):
-            yield ev
+                model=model, max_iterations=max_iterations, **kwargs)) as loop:
+            async for ev in loop:
+                yield ev
+                # Stop calling the model on subsequent iterations if mode
+                # went off while this tool loop was running (#97).
+                if ev.get("tool_call") and self.mode == "off":
+                    break
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
         # Always Ollama: Claude has no embeddings API (spec decision 1).
@@ -202,6 +212,8 @@ class LLMBackend:
         return await self._ollama.is_loaded()
 
     async def warm(self, prime: list[dict] | None = None) -> None:
+        if self.mode == "off":
+            return   # no-op — nothing to warm; model must not load when off
         await self._active.warm(prime)
 
     async def unload(self) -> None:

@@ -339,3 +339,69 @@ async def test_refresh_status_populates_model_state(tmp_path):
     await backend.refresh_status()
     st = backend.model_state()["claude"]
     assert st["installed"] is True and st["account"] == "me@example.com"
+
+
+# ── Off-mode refusal (#97) ─────────────────────────────────────────────────────
+
+async def test_off_mode_chat_raises_llm_unavailable(tmp_path):
+    """chat() must refuse immediately when mode is off, not forward to Ollama."""
+    backend, ollama, _ = make_backend(tmp_path, mode="off")
+    with pytest.raises(LLMUnavailable):
+        async for _ in backend.chat([{"role": "user", "content": "hi"}]):
+            pass
+    assert "chat" not in ollama.calls
+
+
+async def test_off_mode_chat_with_tools_raises_llm_unavailable(tmp_path):
+    """chat_with_tools() must refuse immediately when mode is off."""
+    backend, ollama, _ = make_backend(tmp_path, mode="off")
+    with pytest.raises(LLMUnavailable):
+        async for _ in backend.chat_with_tools(
+                [{"role": "user", "content": "hi"}], [], lambda n, a: "r"):
+            pass
+    assert "chat_with_tools" not in ollama.calls
+
+
+async def test_off_mode_warm_is_noop(tmp_path):
+    """warm() must be a silent no-op when mode is off — no model load."""
+    backend, ollama, _ = make_backend(tmp_path, mode="off")
+    await backend.warm()
+    assert not ollama.warmed
+
+
+async def test_tool_loop_stops_when_mode_goes_off(tmp_path):
+    """The tool loop must not call the model again after mode turns Off mid-run.
+
+    The client yields a tool_call, then the mode is switched to Off before the
+    next model call. The loop must stop at that point."""
+
+    class MultiIterOllama(OllamaDouble):
+        """Yields one tool_call then sets a flag to detect if the loop continued."""
+        def __init__(self):
+            super().__init__()
+            self.continued_after_tool_call = False
+
+        async def chat_with_tools(self, messages, tools, executor, **kwargs):
+            yield {"tool_call": {"name": "dummy", "arguments": {}}}
+            # This line only runs if the loop asked for another event after
+            # the tool_call — i.e. if the Off-mode break did not fire.
+            self.continued_after_tool_call = True
+
+    conn = make_db(tmp_path)
+    multi_ollama = MultiIterOllama()
+    b = LLMBackend(multi_ollama, ClaudeDouble(), conn)
+    b.set_mode("local")
+
+    events = []
+    async for ev in b.chat_with_tools(
+            [{"role": "user", "content": "hi"}], [], lambda n, a: "r"):
+        events.append(ev)
+        # Flip mode to Off immediately after the tool_call event, simulating
+        # the user pressing Off while the tool loop was running.
+        if ev.get("tool_call"):
+            b.set_mode("off")
+
+    assert any(ev.get("tool_call") for ev in events), "should have seen a tool_call"
+    assert not multi_ollama.continued_after_tool_call, (
+        "loop must stop after tool_call when mode is off"
+    )

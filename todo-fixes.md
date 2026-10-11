@@ -384,11 +384,13 @@ without a click), loses something typed, or makes a feature not work at all.
 
 ### Features that don't work at all
 
-93. **"Ask Lumen to revise" in compose always says "Revision failed."** (review #22) [checked]
+93. **"Ask Lumen to revise" in compose always says "Revision failed."** (review #22) [checked] — ✔ fixed (2026-10-11)
     - The daemon returns `{subject, body}` with no `ok`, and v4 checks `ok`.
     - **Where:** `daemon/router.py:2078-2087` vs `ui_v4/overlays.py:466`. One-line
       fix.
-94. **A compose window opened from chat holds the daemon's exclusive lock for up to 30 minutes** (review #23) [checked ×2]
+    - **Done:** `emails.revise` now answers `{subject, body, ok: true}`, which
+      both composers (v3 and v4) gate on.
+94. **A compose window opened from chat holds the daemon's exclusive lock for up to 30 minutes** (review #23) [checked ×2] — ✔ fixed (2026-10-11)
     - While it's open these all queue silently: Revise, another question, the
       briefing, archive/delete, calendar writes. Then they fire late, e.g. a
       stale "Archive email?" confirm pops up after the draft closes. The same
@@ -396,19 +398,38 @@ without a click), loses something typed, or makes a feature not work at all.
     - **Where:** `daemon/ipc_server.py:79-81`, `daemon/router.py:757-782,3212`.
     - **Fix:** hold the model lock only around generation, and use a separate
       one-dialog-at-a-time lock.
-95. **The rule checkbox "Also label the N matching emails" never appears** (review #24) [checked ×3]
+    - **Done:** the one exclusive lock became three (`daemon/route_locks.py`):
+      - "stream": one chat at a time, because chunks share one signal stream.
+      - "model": every model route.
+      - A one-dialog slot owned by `ConfirmBroker`.
+      - Any request waiting on the user (`ConfirmBroker.wait`) gives "model"
+        back for the wait and takes it again after. A confirm also takes the
+        dialog slot, so a queued confirm's 120 s starts on its turn.
+      - The compose window doesn't take the slot (`modal=False`): its own
+        Revise and send review sit on top of it.
+      - Confirm-gated routes no longer hold anything for their whole run. The
+        router's `locks_for(type_)` replaced `EXCLUSIVE_ROUTES`, and the old
+        drift guard went with it, since every confirm wait is now covered.
+95. **The rule checkbox "Also label the N matching emails" never appears** (review #24) [checked ×3] — ✔ fixed (2026-10-11)
     - The daemon sends `check: {label, checked}` and v3/v4 read `check_label`.
       The backfill never runs. This is the "emails didn't get the new label" half
       of archived Josh's Finds #36.
     - **Where:** `ui_v4/overlays.py:237-240` (and `ui_v3/overlays.py:136`) vs
       `daemon/router.py:3379-3392`.
-96. **When the tool loop hits its step limit, the recovered answer is thrown away** (review #25) [checked]
+    - **Done:** the daemon sends the overlays' keys, `check_label` and
+      `check_default`. v2's confirm reads them too. A test now drives the real
+      router's rule-create payload into the real v4 overlay, so the two sides
+      can't drift apart again.
+96. **When the tool loop hits its step limit, the recovered answer is thrown away** (review #25) [checked] — ✔ fixed (2026-10-11)
     - The salvage answer from archived Josh's Finds #45 arrives flagged `capped`,
       and the router replaces it with "(stopped after several tool steps…)". In
       Local mode that wastes a full generation.
     - **Where:** `daemon/router.py:3561-3562`;
       `test_chat_capped_yields_stopped_message` pins the old behaviour.
-97. **Turning the model Off doesn't stop work already queued or running** (review #26) [checked ×3]
+    - **Done:** a `capped` event's salvage text is the answer. The "stopped
+      after several tool steps" line is only the fallback when the salvage is
+      empty. Both paths are pinned by tests.
+97. **Turning the model Off doesn't stop work already queued or running** (review #26) [checked ×3] — ✔ fixed (2026-10-11)
     - A distill scheduled 2 minutes after the last chat still runs. Canvas
       enrichment, a running suggest-labels batch and an in-progress answer keep
       calling Ollama after the unload. That reloads the 4B for 10 minutes right
@@ -418,7 +439,18 @@ without a click), loses something typed, or makes a feature not work at all.
       `daemon/router.py:1135-1148`.
     - **Fix:** `LLMBackend` refuses calls when Off, and the worker re-checks after
       its sleep.
-98. **The Todos quick-add hint teaches a format the parser doesn't accept** (review #27) [checked]
+    - **Done:**
+      - `LLMBackend.chat` / `chat_with_tools` raise `LLMUnavailable("model is
+        off")` when Off, and `warm` does nothing. A tool loop stops after its
+        current step if Off is set mid-run.
+      - The memory worker re-checks after its 2-minute delay, and the pending
+        notes stay for next time.
+      - Canvas classification no longer marks an assignment "failed" when the
+        model was just off. Canvas logs a mid-sync Off at info, not as an
+        error.
+      - Every background caller already treated `LLMUnavailable` as "try again
+        later".
+98. **The Todos quick-add hint teaches a format the parser doesn't accept** (review #27) [checked] — ✔ fixed (2026-10-11)
     - The hint says "a weekday like 'friday' gives it a due date" and the
       placeholder is "Renew the domain friday #admin", but the parser only
       understands `@friday`. The date stays in the text, there's no due date, and
@@ -427,13 +459,34 @@ without a click), loses something typed, or makes a feature not work at all.
     - **Where:** `ui_v4/screens/todos.py:533-542`,
       `daemon/connectors/todo_parse.py:246-263`.
     - **Fix:** resolve plain date phrases on capture (or at least fix the hint).
-99. **The New-event form ignores the daemon's reply and loses your input on error** (review #28) [probe]
+    - **Done:** with no `@date`, `parse_todo_input` resolves a plain date
+      phrase and takes it out of the title.
+      - Accepted: a weekday (optionally with on/by/this/next), today, tonight,
+        tomorrow, "day after tomorrow", "in N days/weeks".
+      - An explicit `@date` still wins.
+      - A possessive ("friday's", "tomorrow's", either apostrophe) isn't a
+        date and stays in the title. Two different weekdays give no due date
+        rather than a guess.
+      - Chat's "remind me to pay rent friday" uses the same parser.
+      - The v3 and v4 hints and todo-system.md say so.
+99. **The New-event form ignores the daemon's reply and loses your input on error** (review #28) [probe] — ✔ fixed (2026-10-11)
     - No toast for success or for "Couldn't reach Google Calendar". Today never
       shows the new event. The form closes before validation, so "9:30", "2pm" or
       a blank End is rejected after everything typed is gone. The edit dialog
       accepts 9:30; create doesn't, and has no all-day option.
     - **Where:** `ui_v4/overlays.py:542-559`, `ui_v4/screens/today.py:447-449`,
       `ui_v4/screens/calendar.py:765-773`.
+    - **Done:** the form checks title, date and times itself, then stays open
+      until the daemon answers.
+      - Times can be "9:30", "930", "14:00" or "2pm" (`overlays.parse_clock`,
+        shared with the edit dialog). A blank End takes the default length,
+        and an End before the Start runs past midnight, as in the edit dialog.
+      - New "All day" checkbox.
+      - Success: the form closes, a toast says "✓ Added …", and Today and
+        Calendar re-read the cache the daemon synced after creating.
+      - Failure: the message shows in the form with everything still typed.
+        Cancel at the confirm returns to the form quietly; the daemon now
+        says `cancelled`.
 
 ---
 
@@ -441,60 +494,161 @@ without a click), loses something typed, or makes a feature not work at all.
 
 ### Mail
 
-100. **"Reply to this" from the Ask bar ignores the open email** (review #29) [probe ×3]
+100. **"Reply to this" from the Ask bar ignores the open email** (review #29) [probe ×3] — ✔ fixed (2026-10-11)
      - To is left empty or picks the newest loose match (a test reply went to
        news@costco.com). The draft never sees the email it replies to. A chat
        reply can also be addressed to *you*, when the newest match is your own
        sent reply.
      - **Where:** `daemon/router.py:2340-2345,3131-3183`.
-101. **Plain-text emails are rendered as rich text** (review #30) [probe]
+     - **Done:**
+       - With an email open in Mail, a reply-shaped ask answers that email
+         (`_replies_to_open`):
+         - "reply to this / her", or no target at all ("respond saying
+           yes"), answers it.
+         - A named person counts only if they sent it: "reply to Sam saying
+           I'll do it" with Bob's email open is about Sam.
+         - "the email from / about X" and "Sam's email" never mean it.
+       - A bare "reply to this" now routes to compose (it matched nothing
+         before) when an email is open. "answer this: …" stays a question.
+       - The draft prompt gets the email it answers, fenced as data and capped
+         at 2,000 characters.
+       - A search match that is your own sent mail is skipped for a received
+         one. Replying to mail you sent goes to its recipient, never to you
+         (`_reply_address`).
+101. **Plain-text emails are rendered as rich text** (review #30) [probe] — ✔ fixed (2026-10-11)
      - "a < b and c > d" loses its middle, `<b>Note</b>` collapses lines, and URLs
        aren't clickable. A regression of archived first-list #16/#17 in v3/v4.
        Canvas announcements have the same problem.
      - **Where:** `ui_v4/components.py:1187`, `ui_v4/screens/canvas.py:193-197`.
-102. **HTML mail with dark header/footer/button bands becomes unreadable** (review #31) [probe, rendered]
+     - **Done:** a mail with no HTML part goes through
+       `mail_html.plain_to_html` into a QTextBrowser (v4 `MailBody`, v3
+       `mail_body`): escaped, line breaks kept, URLs clickable. Canvas
+       announcement titles and previews are PlainText labels.
+102. **HTML mail with dark header/footer/button bands becomes unreadable** (review #31) [probe, rendered] — ✔ fixed (2026-10-11)
      - Pale text colours are dropped but dark CSS backgrounds are kept: dark text
        on dark.
      - **Where:** `ui_v2/mail_html.py:167,346-353,373`.
-103. **Unread counts follow whatever list Mail loaded last** (review #32) [probe ×2]
+     - **Done:** `_fix_invisible_text` drops every CSS background too dark to
+       carry the card's text colour, as every `bgcolor=` attribute already is.
+       - The cut-off is luminance < 0.24, where `CARD_FG` falls under 4.5:1.
+       - The band is usually a container (`<td style="background:#222">`)
+         with the white text inside it, so this can't be decided per element.
+       - Checked by an offscreen render: the band pixel went from #1f2937 to
+         white.
+       - Backgrounds don't change layout, so `fit_html`'s overflow and height
+         numbers from the corpus pass still stand. A visual check on real mail
+         is still owed.
+103. **Unread counts follow whatever list Mail loaded last** (review #32) [probe ×2] — ✔ fixed (2026-10-11)
      - View Sent or run a search and the sidebar badge and Today say "Inbox clear"
        with unread mail waiting. The count is also capped at 50.
      - **Where:** `ui_v2/state.py:769-773`.
-104. **Gmail-side trash, spam and drafts aren't handled** (review #33) [probe with a fake Gmail]
+     - **Done:** every `emails.list` / `mail.refresh` reply carries
+       `inbox_unread: {total, newest}`, whatever it lists.
+       - The total comes from a new uncapped `EmailStore.count("unread")`.
+       - `unread_count()` / `unread_mails()` read it; a search reply keeps the
+         last one.
+       - Opening an inbox message takes it off the tally at once.
+       - The Mail header still counts the list under its title.
+104. **Gmail-side trash, spam and drafts aren't handled** (review #33) [probe with a fake Gmail] — ✔ fixed (2026-10-11)
      - Mail trashed in Gmail stays in Lumen. Spam and half-written drafts get
        mirrored, and can come back as "your most recent email". Mail restored from
        Trash after a Lumen delete never reappears.
      - **Where:** `daemon/connectors/email_menu.py:276-326,356-359,610-636`.
-105. **Cc is silently dropped** (review #34) [probe]
+     - **Done:**
+       - A history delta that adds TRASH, SPAM or DRAFT deletes the row.
+         Messages arriving with one are never upserted, and the bulk pull
+         skips drafts (it already left out spam and trash).
+       - A TRASH or SPAM removal for a message the mirror lacks re-fetches it,
+         so mail restored from Trash, marked "Not spam", or un-trashed with
+         Gmail's Undo inside one poll window comes back. Only a real deletion
+         bars a message for the run. A failed re-fetch retries the window
+         rather than advancing the history cursor past it.
+       - Every list and search query also excludes those labels, and
+         `db.connect` clears any such rows already mirrored.
+       - Lumen has no Trash view, so trashed mail simply leaves.
+105. **Cc is silently dropped** (review #34) [probe] — ✔ fixed (2026-10-11)
      - Compose has no Cc field and always sends `cc: []`, even when the drafted
        email had one.
      - **Where:** `ui_v4/overlays.py:360-389`.
-106. **Esc or X in compose discards the draft** with no prompt or undo (review #35) [probe]
+     - **Done:** v4 compose has a Cc field under To, filled from a drafted Cc.
+       It's sent, shown as a "Cc" row in the send review, and kept when a
+       failed send reopens the draft. v3 is unchanged: its compose still has
+       no Cc.
+106. **Esc or X in compose discards the draft** with no prompt or undo (review #35) [probe] — ✔ fixed (2026-10-11)
      - **Where:** `ui_v4/overlays.py:94-96,391-398`.
-107. **The suggested-labels review closes on any outside click or Esc and discards every suggestion** (review #36) [probe]
+     - **Done:** with something to lose, Esc and the X swap the footer for
+       "Discard this draft? [Keep editing] [Discard draft]".
+       - "Something to lose" is any message text, or any edit since it opened.
+       - Focus goes to Keep editing, and Esc again keeps editing.
+       - The explicit Discard button still discards in one click.
+       - An untouched reply with an empty body just closes.
+       - A chat compose is answered (cancelled) only when the draft is
+         really discarded.
+107. **The suggested-labels review closes on any outside click or Esc and discards every suggestion** (review #36) [probe] — ✔ fixed (2026-10-11)
      - That throws away up to a 40-message model run.
      - **Where:** `ui_v4/overlays.py:690-691,740-745`.
-108. **Clicking a label that only exists in a rule shows an "unknown label" toast** (review #37) [probe]
+     - **Done:** Esc, an outside click and the X only close the review. The
+       rest wait behind the Inbox's "N to review" banner and reopen from its
+       Review button. Only "Dismiss all" drops them. v3 is unchanged: it has
+       no banner to come back to.
+108. **Clicking a label that only exists in a rule shows an "unknown label" toast** (review #37) [probe] — ✔ fixed (2026-10-11)
      - Plus the previous mailbox's mail under the new label's title.
      - **Where:** `daemon/router.py:1906-1911`, `ui_v2/state.py:854-857`.
-109. **Star / label / mark-unread reload the list** (review #38) [probe]
+     - **Done:**
+       - `emails.list` treats a label that only a rule names as an empty
+         mailbox. A label nobody knows is still an error.
+       - The state remembers which view its mail was loaded for
+         (`_mails_view`). A failed load of a different view clears the list
+         rather than leaving the old mailbox's mail under the new title.
+109. **Star / label / mark-unread reload the list** (review #38) [probe] — ✔ fixed (2026-10-11)
      - The open email's scroll position resets and it flashes "Loading message…".
      - If you were searching, the list jumps back to Inbox while the search box
        still shows your query.
      - After archive or delete, selection jumps to the top email instead of the
        next one.
      - **Where:** `ui_v2/state.py:814-827,865-880,933-936`.
-110. **Opening mail while offline marks it read in Lumen but never in Gmail** (review #39) [probe]
+     - **Done:**
+       - A reload carries each message's fetched HTML over, so the reading
+         pane's signature doesn't change and nothing flashes or scrolls.
+       - The state keeps the search in force (`mail_query`), and every reload
+         (`refresh_mails`, ↻) re-runs it. Changing mailbox ends it.
+       - When the open message leaves the same view (archive, delete, label,
+         unstar), the one below it opens, else the one above. A different
+         view starts at the top.
+110. **Opening mail while offline marks it read in Lumen but never in Gmail** (review #39) [probe] — ✔ fixed (2026-10-11)
      - The comment claiming the next poll fixes it is wrong.
      - **Where:** `daemon/router.py:1968-1981`.
-111. **Sending after the 30-minute compose timeout gives no feedback** (review #40) [traced]
+     - **Done:** `GmailSync.receipt_read` queues a receipt Gmail didn't get.
+       - The queue lives in the mirror's state table, so it survives a
+         restart.
+       - It's replayed at the start of the next sync, before a re-baseline
+         could undo it, and stops at the first failure.
+       - Marking the message read or unread later cancels the queued receipt.
+       - Ids no longer mirrored are dropped.
+111. **Sending after the 30-minute compose timeout gives no feedback** (review #40) [traced] — ✔ fixed (2026-10-11)
      - It does send, but there's no toast, and a failure loses the draft.
      - **Where:** `daemon/router.py:1674-1692`, `ui_v2/state.py:259-267`.
-112. **Remote images load one at a time with no overall deadline** (review #41) [probe for timing]
+     - **Done:** when the chat has stopped waiting, `compose.response`'s own
+       reply is the only word on the send.
+       - The composer toasts it ("✓ Sent.").
+       - A failure, or the daemon not answering
+         (`respond_compose(..., on_error=)`), gives the draft back.
+       - With Gmail not connected it now says "nothing was sent" instead of
+         "ok".
+       - v3 got the same.
+112. **Remote images load one at a time with no overall deadline** (review #41) [probe for timing] — ✔ fixed (2026-10-11)
      - 20 images at 250 ms each kept "Loading message…" up for 5 s. The cache of
        inlined HTML grows for the life of the process, and the loader will fetch
        localhost/LAN URLs.
      - **Where:** `ui_v2/mail_html.py:83-99`.
+     - **Done:**
+       - Images load 6 at a time with one 8 s deadline for the message.
+         Stragglers are dropped, not shown as broken boxes.
+       - The inlined-HTML cache is a 50-message LRU (v4 `MailBody`, v3
+         `mail_body`).
+       - A host that resolves to a loopback, private, link-local or reserved
+         address (or doesn't resolve) is refused, and so is a redirect onto
+         one (`_PublicRedirects`).
 
 ### Calendar, todos, Today
 

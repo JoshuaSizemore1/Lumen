@@ -87,12 +87,12 @@ class ConfirmOverlay(QWidget):
 
         # optional checkbox riding the approval (e.g. rule-create backfill)
         self._check = None
-        if c.get("check"):
-            self._check = TodoCheck(bool(c["check"].get("checked", True)))
+        if c.get("check_label"):
+            self._check = TodoCheck(bool(c.get("check_default", True)))
             crow = QWidget()
             cl = hbox(crow, (18, 0, 18, 12), 8)
             cl.addWidget(self._check)
-            cl.addWidget(ClickLabel(c["check"]["label"], 11, T.TEXT_SECONDARY,
+            cl.addWidget(ClickLabel(c["check_label"], 11, T.TEXT_SECONDARY,
                                     on_click=self._check.click), 1)
             self.card_lay.addWidget(crow)
 

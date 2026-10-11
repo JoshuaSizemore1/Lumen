@@ -18,16 +18,23 @@ Todos can carry several tags (decided 2026-07-08): a JSON array column, not a
 join table — tags come back with the row, `json_each` covers future filtering,
 hand-written schema change if tags ever become a first-class query dimension.
 
-## Input grammar (@date / #tag)
+## Input grammar (@date / #tag / plain phrases)
 `parse_todo_input(raw, today)` in `daemon/connectors/todo_parse.py` —
 deterministic, daemon-side (the UI ships raw text), shared by manual adds now
 and NL capture later.
-- `@today`, `@tomorrow`, `@fri`/`@friday` (nearest occurrence, today counts),
-  `@2026-07-12`, `@07-12`, `@jul9` (year-less forms roll to next year if
-  already past). Several `@` dates: last one wins. Unrecognized `@token`
-  stays in the text.
+- **`@date` tokens** (highest priority): `@today`, `@tomorrow`, `@fri`/`@friday`
+  (nearest occurrence, today counts), `@2026-07-12`, `@07-12`, `@jul9`
+  (year-less forms roll to next year if already past). Last `@date` wins.
+  Unrecognized `@token` stays in the text.
+- **Plain date phrases** (used when no `@date` token is present): full weekday
+  names optionally preceded by 'on', 'by', or 'this' ("friday", "on friday",
+  "by friday", "this friday"); 'next <weekday>' for next week's occurrence;
+  'today', 'tonight', 'tomorrow', 'day after tomorrow'; 'in N days/weeks'.
+  Possessives ("friday's") are not treated as dates. If two or more unambiguous
+  weekday names appear, the phrase is left in the text (no guess). The matched
+  phrase (including any preceding on/by preposition) is stripped from the title.
 - `#tag`: each `#word` token becomes a tag — lowercased, deduped, order kept.
-- Matched tokens are stripped from the stored text.
+- Matched tokens/phrases are stripped from the stored text.
 
 ## Natural-language capture
 - Quick-launcher accepts free text; router detects intent (add todo vs question vs command) via cheap heuristic first, LLM fallback if ambiguous.

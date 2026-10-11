@@ -192,7 +192,9 @@ class TodayScreen(LazyRebuild, QWidget):
         return w
 
     def _open_mail(self, mid: str):
-        self.state.select_mail(mid)
+        # open_mail, not select_mail: Today lists the inbox's unread, which
+        # needn't be in the list Mail last loaded (#103).
+        self.state.open_mail(mid)
         self.state.view_requested.emit("mail")
 
     # ---- Lumen extras -----------------------------------------------------

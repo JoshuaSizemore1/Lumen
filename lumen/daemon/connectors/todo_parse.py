@@ -65,7 +65,9 @@ _NUM_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
 _NEXT_WEEK_ON = re.compile(rf"\bnext\s+week\s+(?:on\s+)?({_WD})\b")
 _ON_NEXT_WEEK = re.compile(rf"\b({_WD})\s+(?:of\s+)?next\s+week\b")
 _NEXT_WD = re.compile(rf"\bnext\s+({_WD})\b")
-_BARE_WD = re.compile(rf"\b(?:this\s+|on\s+)?({_WD})\b")
+# Not a possessive ("friday's call"), straight or curly apostrophe (#98).
+_NOT_POSSESSIVE = r"(?![\x27’]s)"
+_BARE_WD = re.compile(rf"\b(?:this\s+|on\s+|by\s+)?({_WD})\b{_NOT_POSSESSIVE}")
 _IN_N = re.compile(rf"\bin\s+(\d+|{'|'.join(_NUM_WORDS)})\s+(days?|weeks?)\b")
 
 # ---- month / year arithmetic ------------------------------------------------
@@ -209,10 +211,11 @@ def resolve_relative_phrase(text: str, today: date) -> tuple[date, str] | None:
         return today + timedelta(days=days), m.group(0)
     if "day after tomorrow" in t:
         return today + timedelta(days=2), "day after tomorrow"
-    if re.search(r"\btomorrow\b", t):
-        return today + timedelta(days=1), "tomorrow"
-    if re.search(r"\btoday\b|\btonight\b", t):
-        return today, "today"
+    # "tomorrow's agenda" names a thing, not a due date — as for weekdays.
+    if m := re.search(rf"\btomorrow\b{_NOT_POSSESSIVE}", t):
+        return today + timedelta(days=1), m.group(0)
+    if m := re.search(rf"\b(?:today|tonight)\b{_NOT_POSSESSIVE}", t):
+        return today, m.group(0)
     return None
 
 
@@ -245,14 +248,18 @@ def correct_year(proposed: date, text: str, today: date) -> date:
 
 def parse_todo_input(raw: str, today: date) -> tuple[str, str | None, list[str]]:
     """(text, due_date ISO or None, tags). Valid @date and #tag tokens are
-    stripped; last @date wins; unrecognized @tokens stay in the text."""
+    stripped; last @date wins. Plain date phrases (full weekday names optionally
+    preceded by 'on'/'by'/'this'/'next', plus today/tomorrow/tonight, and other
+    relative forms) are also resolved when no explicit @date is present.
+    Possessives (friday's) are not treated as dates. Unrecognized @tokens stay
+    in the text."""
     words: list[str] = []
     tags: list[str] = []
-    due: date | None = None
+    at_due: date | None = None          # set by an explicit @token (last wins)
     for word in raw.split():
         if word.startswith("@") and len(word) > 1:
             if (d := _parse_date_token(word[1:].lower(), today)) is not None:
-                due = d
+                at_due = d
                 continue
         elif m := _TAG_RE.fullmatch(word):
             tag = m.group(1).lower()
@@ -260,4 +267,19 @@ def parse_todo_input(raw: str, today: date) -> tuple[str, str | None, list[str]]
                 tags.append(tag)
             continue
         words.append(word)
-    return " ".join(words), due.isoformat() if due else None, tags
+    text = " ".join(words)
+    if at_due is not None:
+        # Explicit @date wins; any plain date phrase stays in the title unchanged.
+        return text, at_due.isoformat(), tags
+    # No explicit @date — resolve a plain date phrase if the text contains one.
+    result = resolve_relative_phrase(text, today)
+    if result is not None:
+        due, phrase = result
+        # Strip the matched phrase from the title; tidy up any leftover spaces.
+        # Skipping possessives, as the match did: "Prep tomorrow's agenda
+        # tomorrow" loses the date, not the "tomorrow's".
+        text = re.sub(r"\b" + re.escape(phrase) + r"\b" + _NOT_POSSESSIVE, "",
+                      text, count=1, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text, due.isoformat(), tags
+    return text, None, tags

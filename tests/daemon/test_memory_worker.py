@@ -86,3 +86,26 @@ def test_model_paused_blocks_distillation(tmp_path):
     assert w.should_run(now) is True
     w.model_paused = lambda: True
     assert w.should_run(now) is False
+
+
+async def test_delayed_run_skips_when_paused_after_sleep(tmp_path, monkeypatch):
+    """If model is turned Off while the pre-distillation sleep is in progress,
+    run_once must NOT be called when the sleep ends (#97)."""
+    import asyncio as _asyncio
+    w, m = worker(tmp_path, distill_min_entries=1, distill_delay_seconds=0)
+    for _ in range(2):
+        m.log("todos", "query", {"message": "x"})
+
+    run_once_called = False
+    original_run_once = w.run_once
+
+    async def patched_run_once(*args, **kwargs):
+        nonlocal run_once_called
+        run_once_called = True
+        return await original_run_once(*args, **kwargs)
+
+    w.run_once = patched_run_once
+    # Model is paused (Off) by the time the sleep ends
+    w.model_paused = lambda: True
+    await w._delayed_run()
+    assert not run_once_called, "run_once must not fire when model is Off after sleep"

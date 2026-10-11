@@ -403,7 +403,15 @@ class MailScreen(QWidget):
             self.rebuild()
         self.state.sync_inbox()
         if mid:
-            self.state.select_mail(mid)
+            # open_mail switches to the inbox when the message isn't in the
+            # list on show (Today's unread can be, since #103); a search box
+            # left holding a query would then lie about the list.
+            if self._query and not any(m["id"] == mid for m in self.state.mails):
+                self.search.blockSignals(True)
+                self.search.setText("")
+                self.search.blockSignals(False)
+                self._query = ""
+            self.state.open_mail(mid)
             self._reading = True
             self._apply_layout()
         elif self._narrow and not resumed:
@@ -527,7 +535,7 @@ class MailScreen(QWidget):
             self.search.blockSignals(False)
             self._query = ""
             if scope == self.state.mail_scope:
-                self.state.refresh_mails()
+                self.state.search_mails("")     # ends the state's search too
                 return
         self.state.set_mail_scope(scope)
         if self._narrow:
@@ -554,7 +562,11 @@ class MailScreen(QWidget):
     def rebuild(self):
         self._dirty = False
         st = self.state
-        n = st.unread_count()
+        # The header describes the list under it; the inbox's own tally
+        # (badge, Unread count) only fits the Inbox and Unread views.
+        n = (st.unread_count() if st.mail_scope in ("inbox", "unread")
+             and not st.mail_query
+             else sum(1 for m in st.mails if m.get("unread")))
         self.header.set_title(_scope_name(st.mail_scope))
         bits = [f"{n} unread" if n else "Nothing unread"]
         if not st.mail_connected:

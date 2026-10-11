@@ -977,10 +977,15 @@ class CanvasScreen(QWidget):
                                   self._add_announcement_todo(i)))
         head.addWidget(self._dismiss_btn("announcement", a["id"], title))
         v.addLayout(head)
-        v.addWidget(Label(title, "body", wrap=True))
-        preview = _strip_html(a.get("message", ""))
-        if preview:
-            v.addWidget(Label(preview, "muted", wrap=True))
+        # Title and preview are plain text (the preview is _strip_html's
+        # output, unescaped): QLabel's AutoText guess would read "a < b" as a
+        # tag and eat it (#101).
+        for text, role in ((title, "body"),
+                           (_strip_html(a.get("message", "")), "muted")):
+            if text:
+                lbl = Label(text, role, wrap=True)
+                lbl.setTextFormat(Qt.TextFormat.PlainText)
+                v.addWidget(lbl)
         return card
 
     def _add_announcement_todo(self, ann_id):

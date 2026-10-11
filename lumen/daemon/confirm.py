@@ -8,6 +8,8 @@ by Phase 4.5 file writes and Phase 6/7 mail writes."""
 import asyncio
 import itertools
 
+from . import route_locks
+
 DEFAULT_TIMEOUT = 120.0
 
 
@@ -16,6 +18,9 @@ class ConfirmBroker:
         self._timeout = timeout
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
+        # One confirm waits at a time (todo-fixes #94). The UI queues the
+        # others; their timeouts start once it's their turn.
+        self._dialog = asyncio.Lock()
 
     def begin(self) -> int:
         """Reserve a confirm id; the caller yields it in a confirm_request event,
@@ -24,15 +29,21 @@ class ConfirmBroker:
         self._pending[confirm_id] = asyncio.get_event_loop().create_future()
         return confirm_id
 
-    async def wait(self, confirm_id: int, timeout: float | None = None):
+    async def wait(self, confirm_id: int, timeout: float | None = None, *,
+                   modal: bool = True):
         """The user's answer — False on timeout / disconnect / cancellation,
         otherwise whatever resolve() carried (bool for confirms, the popup's
         final fields for compose). Compose waits pass their own timeout: an
-        edit session outlives a confirm click."""
+        edit session outlives a confirm click.
+
+        The model is handed back for the wait (todo-fixes #94). A confirm
+        (`modal`) also takes the one-dialog slot; a compose window doesn't,
+        since a confirm can sit on top of it (its own send review does)."""
         fut = self._pending[confirm_id]
         try:
-            return await asyncio.wait_for(
-                fut, self._timeout if timeout is None else timeout)
+            async with route_locks.parked(self._dialog if modal else None):
+                return await asyncio.wait_for(
+                    fut, self._timeout if timeout is None else timeout)
         except asyncio.TimeoutError:
             return False
         finally:

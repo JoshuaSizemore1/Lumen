@@ -302,10 +302,18 @@ class ComposeOverlay(_Scrim):
 
             def compose_done(result):
                 r = result or {}
-                if not r.get("ok") and r.get("message"):
-                    _reopen(r["message"])
+                if not r.get("ok"):
+                    _reopen(r.get("message")
+                            or "Couldn't send. Your draft is back.")
+                elif r.get("message"):
+                    # Sent by this reply: the chat had stopped waiting (#111).
+                    self.state.toast_requested.emit("✓ " + r["message"])
 
-            self.state.respond_compose(compose_id, fields, compose_done)
+            def compose_failed(_msg):
+                _reopen("Couldn't send. Your draft is back.")
+
+            self.state.respond_compose(compose_id, fields, compose_done,
+                                       on_error=compose_failed)
             return
 
         def done(result):

@@ -8,18 +8,26 @@ that went to Gmail held up every list read, status poll and settings read behind
 it. Spam-clicking mail queued ten serialized network round trips and the app
 locked up for all of them.
 
-Two things keep that safe. Routes the router calls exclusive (model turns, and
-anything that parks on a confirm dialog) still run one at a time against each
-other, so two model calls never share the iGPU and two chats' chunks can never
-interleave into the client's one signal stream. And writes take a per-connection
-lock, so a response line is never spliced into another's."""
+Two things keep that safe. The router names the locks a route takes
+(`locks_for`): a chat takes "stream" so two chats' chunks never interleave into
+the client's one signal stream, and every model route takes "model" so two
+generations never share the iGPU. A request waiting on the user hands "model"
+back for the wait (route_locks.parked, todo-fixes #94), and the confirm broker
+shows one dialog at a time. And writes take a per-connection lock, so a
+response line is never spliced into another's."""
 
 import asyncio
 import json
 import logging
 from pathlib import Path
 
+from . import route_locks
+
 log = logging.getLogger(__name__)
+
+# Always acquired in this order, so two requests can't each hold one and wait
+# on the other.
+LOCK_ORDER = ("stream", "model")
 
 
 class IPCServer:
@@ -35,7 +43,7 @@ class IPCServer:
         self._inflight: set[asyncio.Task] = set()
         # Server-wide, not per-connection: "never two model calls at once" is a
         # property of the machine, not of a socket.
-        self._exclusive = asyncio.Lock()
+        self._locks = {name: asyncio.Lock() for name in LOCK_ORDER}
 
     async def start(self) -> None:
         parent = self._path.parent
@@ -65,22 +73,33 @@ class IPCServer:
         """Requests currently being served. Exposed for the concurrency tests."""
         return len(self._inflight)
 
-    def _is_exclusive(self, type_: str) -> bool:
-        """Routes that must not overlap each other. The router owns the list —
-        it is the thing that knows which routes touch the model or block on the
-        user. A router without the hook (older fakes, tests) gets full
-        concurrency, which is the safe default for a stub."""
-        fn = getattr(self._router, "is_exclusive", None)
-        return bool(fn(type_)) if fn is not None else False
+    def _locks_for(self, type_: str) -> list[str]:
+        """The locks this route takes, in LOCK_ORDER. The router owns the
+        list — it is the thing that knows which routes touch the model. A
+        router without the hook (older fakes, tests) gets full concurrency,
+        which is the safe default for a stub."""
+        fn = getattr(self._router, "locks_for", None)
+        names = set(fn(type_)) if fn is not None else set()
+        return [n for n in LOCK_ORDER if n in names]
 
     async def _serve(self, req_id, type_, payload, writer, write_lock) -> None:
         """One request, start to finish, on its own task."""
+        held = route_locks.Held()
+        token = route_locks.current.set(held)
         try:
-            if self._is_exclusive(type_):
-                async with self._exclusive:
-                    await self._pump(req_id, type_, payload, writer, write_lock)
-            else:
+            try:
+                for name in self._locks_for(type_):
+                    lock = self._locks[name]
+                    await lock.acquire()
+                    held.locks[name] = lock
                 await self._pump(req_id, type_, payload, writer, write_lock)
+            finally:
+                # Whatever is held now: a parked request may have handed
+                # "model" back and not got it again before a cancel.
+                for lock in held.locks.values():
+                    lock.release()
+                held.locks.clear()
+                route_locks.current.reset(token)
         except asyncio.CancelledError:
             raise
         except (ConnectionResetError, BrokenPipeError):

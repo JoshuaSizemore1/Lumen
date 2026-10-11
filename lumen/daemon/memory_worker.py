@@ -66,6 +66,11 @@ class MemoryWorker:
         try:
             BACKGROUND.set(True)     # own task: yields to interactive Claude calls
             await asyncio.sleep(self._cfg.distill_delay_seconds)
+            # Re-check after the delay: mode may have turned Off while we waited
+            # — a distill that starts now would reload the model the user just
+            # unloaded (#97).
+            if self.model_paused():
+                return
             await self.run_once()
         except asyncio.CancelledError:
             raise

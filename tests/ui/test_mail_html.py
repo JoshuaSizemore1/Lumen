@@ -49,6 +49,96 @@ def test_inline_fetches_each_unique_url_once(monkeypatch):
     assert calls == ["https://x/a.png"]                  # deduped
 
 
+# ---- parallel fetch, SSRF check, deadline (todo-fixes #112) -----------------
+
+def test_is_private_host_rejects_loopback(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda h, p: [(None, None, None, None, ("127.0.0.1", 0))])
+    assert mail_html._is_private_host("http://localhost/img.png") is True
+
+
+def test_is_private_host_rejects_rfc1918(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda h, p: [(None, None, None, None, ("192.168.1.100", 0))])
+    assert mail_html._is_private_host("http://printer.local/cam.jpg") is True
+
+
+def test_is_private_host_allows_public(monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda h, p: [(None, None, None, None, ("8.8.8.8", 0))])
+    assert mail_html._is_private_host("https://cdn.example.com/img.png") is False
+
+
+def test_is_private_host_refuses_unresolvable(monkeypatch):
+    import socket
+
+    def raise_os(*a):
+        raise OSError("no route")
+
+    monkeypatch.setattr(socket, "getaddrinfo", raise_os)
+    assert mail_html._is_private_host("https://no-such-host.invalid/x.png") is True
+
+
+def test_a_redirect_onto_the_lan_is_refused(monkeypatch):
+    # A public pixel that 302s to the router's admin page must not be fetched.
+    import urllib.request
+    monkeypatch.setattr(mail_html, "_is_private_host",
+                        lambda url: "10.0.0.5" in url)
+    h = mail_html._PublicRedirects()
+    req = urllib.request.Request("https://cdn.example.com/p.gif")
+    assert h.redirect_request(req, None, 302, "Found", {},
+                              "http://10.0.0.5/admin") is None
+    assert h.redirect_request(req, None, 302, "Found", {},
+                              "https://cdn2.example.com/p.gif") is not None
+
+
+def test_fetch_data_uri_refuses_private_hosts(monkeypatch):
+    monkeypatch.setattr(mail_html, "_is_private_host", lambda url: True)
+    result = mail_html._fetch_data_uri("https://internal.corp/logo.png")
+    assert result is None
+
+
+def test_inline_fetches_all_images_in_parallel(monkeypatch):
+    """With a fast fake, all images are fetched and inlined."""
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        return f"data:image/png;base64,{len(calls)}"
+
+    monkeypatch.setattr(mail_html, "_fetch_data_uri", fake_fetch)
+    urls = [f"https://cdn.example.com/img{i}.png" for i in range(5)]
+    html = "".join(f'<img src="{u}">' for u in urls)
+    out = mail_html.inline_remote_images(html)
+    assert len(calls) == 5                   # all five fetched
+    for u in urls:
+        assert u not in out                  # src replaced
+
+
+def test_inline_drops_images_past_deadline(monkeypatch):
+    """Images not resolved within the deadline are dropped."""
+    import threading
+    gate = threading.Event()
+
+    def fake_fetch(url):
+        if "slow" in url:
+            gate.wait(timeout=5.0)
+            return "data:image/png;base64,SLOW"
+        return "data:image/png;base64,FAST"
+
+    monkeypatch.setattr(mail_html, "_fetch_data_uri", fake_fetch)
+    html = ('<img src="https://fast.cdn.example/img.png">'
+            '<img src="https://slow.cdn.example/img.png">')
+    out = mail_html.inline_remote_images(html, deadline=0.3)
+    gate.set()   # release the blocked thread so it can clean up
+    assert "FAST" in out                     # fast image loaded
+    assert "slow.cdn.example" not in out     # slow image dropped
+    assert "SLOW" not in out
+
+
 # ---- plain-text bodies (todo-fixes #16, #17) --------------------------------
 
 from lumen.ui_v2.mail_html import plain_to_html, prepare_html, CONTENT_WIDTH
@@ -154,6 +244,85 @@ def test_prepare_html_leaves_no_broken_style_attributes():
 def test_prepare_html_is_idempotent():
     once = prepare_html('<td style="color:#fff; width:9999px">hi</td>')
     assert prepare_html(once).count("<td>") == 1
+
+
+# ---- dark header/footer bands (todo-fixes #102) -----------------------------
+
+def test_dark_background_dropped_when_light_text_dropped():
+    """Dark email header bands: light text is dropped AND the matching dark
+    background is also dropped so inherited text is readable on white (#102)."""
+    html = ('<table><tr><td style="background-color:#1a1a2e; color:#e0e0e0">'
+            'Header text</td></tr></table>')
+    out = prepare_html(html)
+    assert "#e0e0e0" not in out          # light text dropped
+    assert "#1a1a2e" not in out          # dark background also dropped
+    assert "Header text" in out          # text itself preserved
+
+
+def test_dark_background_dropped_even_without_light_text():
+    """#333 on #1a1a2e was never readable; on the white card it is. Every
+    dark CSS background goes, as every bgcolor= attribute already does."""
+    html = '<div style="background-color:#1a1a2e; color:#333333">Text</div>'
+    out = prepare_html(html)
+    assert "#1a1a2e" not in out
+    assert "#333333" in out and "Text" in out
+
+
+def test_dark_band_on_a_container_with_white_text_inside():
+    """The usual shape (#102): the band is the cell, the white text is a
+    paragraph inside it. Dropping only the white left dark text on dark."""
+    html = ('<table><tr><td style="background:#1f2937;padding:16px">'
+            '<p style="color:#ffffff">Your order shipped</p>'
+            '<a style="background-color:#111;color:#fff" href="https://x.com">'
+            'Track it</a></td></tr></table>')
+    out = prepare_html(html)
+    for dark in ("#1f2937", "#111"):
+        assert dark not in out
+    assert "#ffffff" not in out and "color:#fff" not in out
+    assert "Your order shipped" in out and "Track it" in out
+
+
+def test_mid_tone_backgrounds_are_kept():
+    # Brand colours CARD_FG still reads on stay.
+    out = prepare_html('<td style="background:#f2c94c">Sale</td>')
+    assert "#f2c94c" in out
+
+
+def test_cta_button_style_dark_bg_dropped_with_white_text():
+    """Transactional-mail CTA: dark button background dropped together with
+    white text so the label stays visible on the white card (#102)."""
+    html = ('<a style="background-color:#000000; color:#ffffff; padding:8px 16px">'
+            'Click here</a>')
+    out = prepare_html(html)
+    assert "#000000" not in out          # very dark bg dropped
+    assert "#ffffff" not in out          # white text dropped
+    assert "Click here" in out
+
+
+def test_medium_dark_background_not_dropped_with_white_text():
+    """A medium-dark background (lum >= 0.15, still contrasts with CARD_FG) is
+    kept even when the light text above it is dropped."""
+    # #3a5a80 has lum ≈ 0.08; just over 0.15 threshold → kept
+    # Let's use #555555 (lum ≈ 0.33) which is clearly above 0.15
+    html = '<div style="background-color:#555555; color:#ffffff">label</div>'
+    out = prepare_html(html)
+    assert "#ffffff" not in out          # light text still dropped
+    assert "#555555" in out              # medium-dark bg kept (readable with dark inherited text)
+    assert "label" in out
+
+
+def test_dark_background_with_bgcolor_attr_both_removed():
+    """bgcolor HTML attribute is already dropped by prepare_html; the CSS
+    background-color is what this test targets — both forms of dark background
+    must be gone after the double-drop fix."""
+    html = ('<table><tr>'
+            '<td bgcolor="#000000" style="background-color:#111111; color:#eeeeee">'
+            'footer</td></tr></table>')
+    out = prepare_html(html)
+    assert "bgcolor" not in out          # bgcolor= removed
+    assert "#111111" not in out          # CSS bg removed (paired with light text)
+    assert "#eeeeee" not in out          # light text removed
+    assert "footer" in out
 
 
 # ---- CSS-built layouts and the measured fit (todo-fixes #30) ----------------

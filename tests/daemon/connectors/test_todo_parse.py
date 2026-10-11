@@ -115,9 +115,15 @@ def test_resolve_year_rollover():
 
 
 def test_resolve_bails_on_ambiguity_and_absence():
-    # two weekdays named -> not one resolvable date
-    assert resolve_relative_phrase("move friday's call to monday", WED) is None
+    # two non-possessive weekdays named -> not one resolvable date
+    assert resolve_relative_phrase("move the friday meeting to monday", WED) is None
     assert resolve_relative_phrase("just a plain sentence", WED) is None
+
+
+def test_resolve_possessive_weekday_not_treated_as_date():
+    # "friday's" is a possessive; with it excluded, "monday" is the only weekday
+    d, phrase = resolve_relative_phrase("move friday's call to monday", WED)
+    assert d == date(2026, 7, 20) and "monday" in phrase
 
 
 def test_resolve_returns_matched_phrase():
@@ -187,3 +193,90 @@ def test_correct_year_rolls_a_past_year_less_month_forward():
 def test_correct_year_leaves_unrelated_dates_alone():
     assert correct_year(date(2026, 3, 10), "you may 5 be late", WED) == date(2026, 3, 10)
     assert correct_year(date(2026, 8, 1), "lunch tomorrow", WED) == date(2026, 8, 1)
+
+
+# ---- todo-fixes #98: plain date phrases in parse_todo_input -----------------
+# parse_todo_input must accept plain weekday names (and today/tomorrow) without
+# a leading @, strip the phrase from the title, and set the due date.
+# TODAY = date(2026, 7, 8) — a Wednesday; see module top.
+
+def test_bare_weekday_sets_due_date_and_strips():
+    text, due, tags = parse("Renew the domain friday #admin")
+    assert due == "2026-07-10"      # next Friday from Wednesday 2026-07-08
+    assert text == "Renew the domain"
+    assert tags == ["admin"]
+
+
+def test_plain_today_and_tomorrow():
+    assert parse("pay rent today")[1] == "2026-07-08"
+    assert parse("pay rent tomorrow")[1] == "2026-07-09"
+    assert parse("do thing tonight")[1] == "2026-07-08"
+    assert parse("remind me to call today")[1] == "2026-07-08"
+
+
+def test_plain_weekday_stripped_from_title():
+    text, due, _ = parse("pay rent friday")
+    assert due == "2026-07-10" and text == "pay rent"
+
+
+def test_plain_on_friday_stripped():
+    text, due, _ = parse("finish report on friday")
+    assert due == "2026-07-10" and text == "finish report"
+
+
+def test_plain_by_friday_stripped():
+    text, due, _ = parse("finish report by friday")
+    assert due == "2026-07-10" and text == "finish report"
+
+
+def test_plain_this_friday_stripped():
+    text, due, _ = parse("finish report this friday")
+    assert due == "2026-07-10" and text == "finish report"
+
+
+def test_plain_next_monday_stripped():
+    text, due, _ = parse("finish report next monday")
+    assert due == "2026-07-13" and text == "finish report"
+
+
+def test_explicit_at_date_wins_over_plain_phrase():
+    # @monday wins; "friday" stays in the text unchanged
+    text, due, _ = parse("call @monday about friday report")
+    assert due == "2026-07-13"
+    assert "friday" in text
+
+
+def test_possessive_weekday_not_treated_as_date():
+    text, due, _ = parse("renew friday's domain cert")
+    assert due is None
+    assert "friday's" in text
+    # A curly apostrophe (phones, pasted text) is a possessive too.
+    text, due, _ = parse("renew friday’s domain cert")
+    assert due is None and "friday’s" in text
+
+
+def test_possessive_today_tomorrow_keep_the_title_whole():
+    # Was "Prep 's agenda", due tomorrow.
+    assert parse("Prep tomorrow's agenda")[:2] == ("Prep tomorrow's agenda", None)
+    assert parse("Finish today’s report")[:2] == ("Finish today’s report", None)
+    text, due, _ = parse("Prep tomorrow's agenda tomorrow")
+    assert text == "Prep tomorrow's agenda" and due is not None
+
+
+def test_tonight_is_taken_out_of_the_title():
+    text, due, _ = parse("call mom tonight")
+    assert text == "call mom" and due is not None
+
+
+def test_two_plain_weekdays_no_guess():
+    # ambiguous — two different weekdays → no due date set
+    text, due, _ = parse("move friday meeting to monday")
+    assert due is None
+
+
+def test_plain_phrase_does_not_affect_at_tokens():
+    # existing @date token behaviour unchanged
+    assert parse("x @today")[1] == "2026-07-08"
+    assert parse("x @fri")[1] == "2026-07-10"
+    assert parse("x @2026-07-12")[1] == "2026-07-12"
+    assert parse("email @priya about sync") == ("email @priya about sync", None, [])

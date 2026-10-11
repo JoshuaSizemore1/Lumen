@@ -43,6 +43,16 @@ def test_list_page_filters_and_order(tmp_path):
     assert [m["id"] for m in store.list_page("all", limit=1, offset=1)] == ["m2"]
 
 
+def test_count_matches_list_page_uncapped(tmp_path):
+    # The badge's tally (#103): the whole inbox, not the 50 a page shows.
+    store = make_store(tmp_path)
+    store.upsert([msg(i) for i in range(1, 61)]
+                 + [msg(61, labels=["UNREAD"]), msg(62, labels=["INBOX", "TRASH"])])
+    assert store.count("unread") == 60 == len(store.list_page("unread", 1000))
+    assert len(store.list_page("unread")) == 50
+    assert store.count("all") == 61                  # trash never counts
+
+
 def test_search_matches_body_and_sender_and_survives_syntax(tmp_path):
     store = make_store(tmp_path)
     store.upsert([msg(1, body="quarterly budget forecast"),

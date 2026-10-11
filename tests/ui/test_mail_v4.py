@@ -254,6 +254,105 @@ def test_empty_starred_mailbox_shows_empty_state(mail, qtbot):
                for e in empties)
 
 
+# ============================================================================
+# Plain-text mail body (#101)
+# ============================================================================
+
+def test_plain_text_body_uses_html_body_not_label(qtbot, v4_settings):
+    """A mail row with no body_html must render in an HtmlBody (QTextBrowser),
+    not a QLabel — QLabel's AutoText heuristic would mangle angle-brackets."""
+    from lumen.ui_v4.components import HtmlBody, MailBody
+    from lumen.ui_v3.state import AppState
+
+    state = AppState()
+    mb = MailBody(state)
+    qtbot.addWidget(mb)
+
+    row = {
+        "id": "m1", "body": "a < b and c > d", "body_html": None,
+        "from": "Alice", "subj": "Test", "time": "10:00", "date": "Mon",
+        "unread": False, "preview": "", "labels": [], "label_names": [],
+        "attachments": [], "is_starred": False, "from_addr": "alice@example.com",
+    }
+    # Simulate completed fetch by setting body_html None with live=False
+    mb.show_mail(row)
+    qtbot.wait(10)
+    bodies = mb.findChildren(HtmlBody)
+    assert bodies, "Expected an HtmlBody widget for a plain-text mail body"
+
+
+def test_plain_text_body_html_contains_escaped_brackets(qtbot, v4_settings):
+    """The body HTML must have escaped angle-brackets so Qt doesn't mangle them."""
+    from lumen.ui_v4.components import HtmlBody, MailBody
+    from lumen.ui_v3.state import AppState
+
+    state = AppState()
+    mb = MailBody(state)
+    qtbot.addWidget(mb)
+
+    row = {
+        "id": "m2", "body": "a < b and c > d\nSee <b>Note</b>", "body_html": None,
+        "from": "Alice", "subj": "T", "time": "", "date": "", "unread": False,
+        "preview": "", "labels": [], "label_names": [], "attachments": [],
+        "is_starred": False, "from_addr": "a@b.com",
+    }
+    mb.show_mail(row)
+    qtbot.wait(10)
+    bodies = mb.findChildren(HtmlBody)
+    assert bodies
+    html_source = bodies[0].toHtml()
+    # QTextBrowser re-serialises <b>Note</b> as plain text — "Note" not "Note" bold
+    # The key check: the text "a < b" was not silently eaten
+    plain = bodies[0].toPlainText()
+    assert "a < b" in plain or "a &lt; b" in plain  # either form is fine
+
+
+# ============================================================================
+# Bounded inlined-HTML cache (#112)
+# ============================================================================
+
+def test_mail_body_cache_is_bounded(qtbot, v4_settings):
+    """MailBody._loaded must not grow past _CACHE_MAX entries."""
+    from lumen.ui_v4.components import MailBody
+    from lumen.ui_v3.state import AppState
+
+    state = AppState()
+    mb = MailBody(state)
+    qtbot.addWidget(mb)
+
+    # Fill the cache beyond its limit
+    cap = MailBody._CACHE_MAX
+    for i in range(cap + 10):
+        mb._cache_set(f"mid-{i}", f"<p>html {i}</p>")
+    assert len(mb._loaded) <= cap
+
+    # The oldest entries are evicted; the newest are present
+    for i in range(cap + 10 - cap, cap + 10):
+        assert f"mid-{i}" in mb._loaded
+
+
+def test_mail_body_cache_lru_moves_to_end_on_get(qtbot, v4_settings):
+    """Getting an entry marks it as recently used, protecting it from eviction."""
+    from lumen.ui_v4.components import MailBody
+    from lumen.ui_v3.state import AppState
+
+    state = AppState()
+    mb = MailBody(state)
+    qtbot.addWidget(mb)
+
+    cap = MailBody._CACHE_MAX
+    for i in range(cap):
+        mb._cache_set(f"mid-{i}", f"<p>{i}</p>")
+
+    # Access the first entry (makes it most-recently-used)
+    mb._cache_get("mid-0")
+    # Add one more → should evict the second entry (mid-1), not mid-0
+    mb._cache_set("mid-new", "<p>new</p>")
+    assert "mid-0" in mb._loaded
+    assert "mid-new" in mb._loaded
+    assert "mid-1" not in mb._loaded
+
+
 def test_html_body_refits_when_the_pane_narrows(qtbot, v4_settings, monkeypatch):
     """#30: mail fitted for one pane width is fitted again when the pane
     crosses a FIT_STEP, so fixed widths never end up cut off."""

@@ -22,6 +22,10 @@ CURSOR_KEY = "gmail_bulk_cursor"
 WINDOW_KEY = "gmail_bulk_window_months"
 LAST_SYNC_KEY = "gmail_last_sync"
 RUN_KEY = "gmail_rebaseline_run"
+# Opened-as-read receipts Gmail hasn't heard yet (todo-fixes #110): a JSON
+# list of message ids, replayed at the start of each sync.
+PENDING_READ_KEY = "gmail_pending_read"
+PENDING_READ_MAX = 500
 
 _COLS = ("id", "thread_id", "sender", "recipients", "subject", "body",
          "body_html", "snippet", "labels", "received_at", "is_read",
@@ -29,6 +33,19 @@ _COLS = ("id", "thread_id", "sender", "recipients", "subject", "body",
 # List/search responses skip body_html — 50 raw-HTML bodies per IPC page is
 # dead weight; the reading pane fetches one message's HTML via emails.get.
 _LIST_COLS = ", ".join(c for c in _COLS if c != "body_html")
+
+# Labels whose messages must never appear in any mailbox, search, or lookup.
+# TRASH and SPAM are excluded by the bulk pull (includeSpamTrash=False), but
+# they can arrive via incremental label-change events.  DRAFT messages arrive
+# via both paths.  (#104)
+_HIDDEN_LABELS = frozenset({"TRASH", "SPAM", "DRAFT"})
+
+# SQL fragment (unaliased `labels` column) for EmailStore queries.
+_HIDDEN_SQL = (
+    "(',' || labels || ',') NOT LIKE '%,TRASH,%' "
+    "AND (',' || labels || ',') NOT LIKE '%,SPAM,%' "
+    "AND (',' || labels || ',') NOT LIKE '%,DRAFT,%'"
+)
 
 
 def _decode(data: str) -> str:
@@ -266,6 +283,20 @@ class EmailStore:
 
     def list_page(self, filter: str = "inbox", limit: int = 50, offset: int = 0,
                   label_id: str | None = None) -> list[dict]:
+        where, params = self._page_where(filter, label_id)
+        rows = self._conn.execute(
+            f"SELECT {_LIST_COLS} FROM emails {where} ORDER BY received_at DESC, id "
+            f"LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+        return [self._to_dict(r) for r in rows]
+
+    def count(self, filter: str = "inbox", label_id: str | None = None) -> int:
+        """How many rows list_page(filter) would page through — uncapped."""
+        where, params = self._page_where(filter, label_id)
+        return self._conn.execute(
+            f"SELECT COUNT(*) FROM emails {where}", params).fetchone()[0]
+
+    @staticmethod
+    def _page_where(filter: str, label_id: str | None) -> tuple[str, tuple]:
         # Each label chip is its own inbox (design 2026-07-16): "inbox" is the
         # default one — INBOX mail carrying no user label — so mail labeled
         # upstream without being archived still leaves the default view.
@@ -281,10 +312,12 @@ class EmailStore:
             "label": ("WHERE (',' || labels || ',') LIKE ?", (f"%,{label_id},%",)),
             "all": ("", ()),
         }[filter]
-        rows = self._conn.execute(
-            f"SELECT {_LIST_COLS} FROM emails {where} ORDER BY received_at DESC, id "
-            f"LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
-        return [self._to_dict(r) for r in rows]
+        # Defence-in-depth: never surface trash, spam, or draft rows (#104).
+        if where:
+            where = f"{where} AND {_HIDDEN_SQL}"
+        else:
+            where = f"WHERE {_HIDDEN_SQL}"
+        return where, params
 
     def search(self, query: str, limit: int = 50,
                now_local: datetime | None = None) -> list[dict]:
@@ -295,7 +328,13 @@ class EmailStore:
         one that is only filters) returns the most recent matching messages —
         so 'most recent email' and 'email on the 8th' both work."""
         p = parse_mail_query(query, now_local=now_local or datetime.now().astimezone())
-        where, params = [], []
+        # Always exclude trash, spam, and draft messages (#104).
+        where = [
+            "(',' || e.labels || ',') NOT LIKE '%,TRASH,%'",
+            "(',' || e.labels || ',') NOT LIKE '%,SPAM,%'",
+            "(',' || e.labels || ',') NOT LIKE '%,DRAFT,%'",
+        ]
+        params: list = []
         if p["after"]:
             where.append("e.received_at >= ?"); params.append(p["after"])
         if p["before"]:
@@ -347,8 +386,9 @@ class EmailStore:
         esc = (addr.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_"))
         pat = f"%{esc}%"
         rows = self._conn.execute(
-            "SELECT * FROM emails WHERE sender LIKE ? ESCAPE '\\' "
-            "OR recipients LIKE ? ESCAPE '\\' "
+            f"SELECT * FROM emails WHERE {_HIDDEN_SQL} "
+            "AND (sender LIKE ? ESCAPE '\\' "
+            "OR recipients LIKE ? ESCAPE '\\') "
             "ORDER BY received_at DESC, id LIMIT ?", (pat, pat, limit)).fetchall()
         return [self._to_dict(r) for r in rows]
 
@@ -357,6 +397,7 @@ class EmailStore:
         scan walks forward so its cursor only ever advances."""
         rows = self._conn.execute(
             "SELECT * FROM emails WHERE (',' || labels || ',') LIKE '%,SENT,%' "
+            f"AND {_HIDDEN_SQL} "
             "AND received_at > ? ORDER BY received_at, id LIMIT ?",
             (since_iso, limit)).fetchall()
         return [self._to_dict(r) for r in rows]
@@ -513,6 +554,8 @@ class GmailSync:
             return False
         if service is None:
             return False   # not connected yet — a normal state
+        # Before the sync, so a re-baseline already sees them read.
+        await self._replay_read_receipts()
         await self.refresh_labels(service)   # name↔id map rides every sync
         if self._store.get_state(HISTORY_KEY) is None or self.syncing:
             return await self._bulk(service)
@@ -566,10 +609,15 @@ class GmailSync:
         resp = service.users().messages().list(
             userId="me", q=f"after:{after}", maxResults=self.PAGE_SIZE,
             pageToken=cursor, includeSpamTrash=False).execute()
-        msgs = [normalize_message(
-                    service.users().messages().get(userId="me", id=ref["id"],
-                                                   format="full").execute())
-                for ref in resp.get("messages", [])]
+        msgs = []
+        for ref in resp.get("messages", []):
+            m = normalize_message(
+                service.users().messages().get(
+                    userId="me", id=ref["id"], format="full").execute())
+            # SPAM/TRASH are excluded by includeSpamTrash=False, but DRAFT
+            # messages are not.  Filter all three for safety (#104).
+            if not _HIDDEN_LABELS.intersection(m["labels"]):
+                msgs.append(m)
         return msgs, resp.get("nextPageToken")
 
     @staticmethod
@@ -599,7 +647,10 @@ class GmailSync:
     async def _incremental(self, service) -> bool:
         start = self._store.get_state(HISTORY_KEY)
         page_token, latest = None, None
-        deleted_ids: set[str] = set()   # run-wide: earlier/same-page deletes
+        # Run-wide. Only a real deletion bars a message for good: one trashed
+        # and un-trashed in the same window (Gmail's Undo) must come back.
+        deleted_ids: set[str] = set()   # messagesDeleted, earlier/same page
+        restore_ids: set[str] = set()   # left Trash/Spam while not mirrored
         while True:
             try:
                 resp = await asyncio.to_thread(
@@ -630,11 +681,25 @@ class GmailSync:
                 deleted_ids.update(del_ids)
                 self._store.delete(del_ids)
                 for change in h.get("labelsAdded", []):
-                    self._store.update_labels(change["message"]["id"],
-                                              add=change.get("labelIds", []), remove=[])
+                    mid = change["message"]["id"]
+                    added_lbls = change.get("labelIds", [])
+                    if _HIDDEN_LABELS.intersection(added_lbls):
+                        # Message moved to Trash/Spam in Gmail, or became a
+                        # Draft — drop it from the mirror (#104).
+                        self._store.delete([mid])
+                        restore_ids.discard(mid)
+                    else:
+                        self._store.update_labels(mid, add=added_lbls, remove=[])
                 for change in h.get("labelsRemoved", []):
-                    self._store.update_labels(change["message"]["id"], add=[],
-                                              remove=change.get("labelIds", []))
+                    mid = change["message"]["id"]
+                    removed_lbls = change.get("labelIds", [])
+                    self._store.update_labels(mid, add=[], remove=removed_lbls)
+                    # Restored from Trash, or marked "Not spam", while the row
+                    # is gone: only a fresh fetch brings it back (#104).
+                    if ({"TRASH", "SPAM"} & set(removed_lbls)
+                            and mid not in deleted_ids
+                            and self._store.get(mid) is None):
+                        restore_ids.add(mid)
             # Drop ids added-then-purged within this run (same page or an
             # earlier one) before fetching — otherwise they resurrect as
             # zombie rows.
@@ -645,11 +710,31 @@ class GmailSync:
                     # Non-404 fetch failure: don't advance HISTORY_KEY, retry
                     # this identical window on the next poll.
                     return False
+                # Spam, trash, and draft messages must never enter the mirror
+                # — the bulk pull already excludes them; catch the edge cases
+                # here (e.g. a message added directly to Spam) (#104).
+                msgs = [m for m in msgs if not _HIDDEN_LABELS.intersection(m["labels"])]
                 self._store.upsert(msgs)
                 await self._apply_rules(msgs)   # new mail only — never the bulk pull
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
+        # Re-fetch messages that left Trash/Spam during this delta window
+        # (they were absent from the mirror, so update_labels was a no-op).
+        # The fetch shows Gmail's state now, so one re-trashed later in the
+        # window is filtered out below.
+        restore = [i for i in restore_ids if i not in deleted_ids]
+        if restore:
+            restore_msgs = await asyncio.to_thread(
+                self._fetch_full_blocking, service, restore)
+            if restore_msgs is None:
+                # Like the added_ids path: keep HISTORY_KEY and retry this
+                # window, or the restore is lost for good.
+                log.warning("gmail restore fetch failed for %d id(s)",
+                            len(restore))
+                return False
+            self._store.upsert([m for m in restore_msgs
+                                if not _HIDDEN_LABELS.intersection(m["labels"])])
         if latest is not None:
             self._store.set_state(HISTORY_KEY, str(latest))
         self._store.set_state(LAST_SYNC_KEY,
@@ -835,7 +920,47 @@ class GmailSync:
             self._store.update_labels(mid, add=[], remove=["UNREAD"])
         else:
             self._store.update_labels(mid, add=["UNREAD"], remove=[])
+        # Gmail now has the user's latest word; a queued receipt is stale.
+        self._drop_pending_read(mid)
         return True
+
+    async def receipt_read(self, mid: str) -> bool:
+        """Open-as-read. The mirror already shows it read; if Gmail can't be
+        told now (offline), it's told at the next sync. Incremental sync only
+        brings Gmail's own changes, so nothing else would ever put the two
+        back in step (todo-fixes #110)."""
+        if await self.mark_read(mid, True):
+            return True
+        ids = self._pending_reads()
+        if mid not in ids:
+            ids.append(mid)
+            self._store.set_state(PENDING_READ_KEY,
+                                  json.dumps(ids[-PENDING_READ_MAX:]))
+        return False
+
+    def _pending_reads(self) -> list[str]:
+        try:
+            ids = json.loads(self._store.get_state(PENDING_READ_KEY) or "[]")
+        except ValueError:
+            return []
+        return [str(i) for i in ids] if isinstance(ids, list) else []
+
+    def _drop_pending_read(self, mid: str) -> None:
+        ids = self._pending_reads()
+        if mid in ids:
+            ids.remove(mid)
+            self._store.set_state(PENDING_READ_KEY,
+                                  json.dumps(ids) if ids else None)
+
+    async def _replay_read_receipts(self) -> None:
+        """Send the queued receipts. Stops at the first failure (still
+        offline) and keeps the rest; ids no longer in the mirror are
+        dropped."""
+        for mid in self._pending_reads():
+            if self._store.get(mid) is None:
+                self._drop_pending_read(mid)
+            elif not await self.mark_read(mid, True):
+                return
 
     async def star(self, mid: str, starred: bool) -> bool:
         """Star or unstar a message via the STARRED system label — ungated like
